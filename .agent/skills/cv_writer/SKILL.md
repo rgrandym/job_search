@@ -22,6 +22,10 @@ The Master CV lives at `data/master_cv.json` (git-ignored, personal data). Examp
 
 ## 1. Create or update the Master CV
 
+The web UI first stores uploaded files unchanged in `data/cvs/`. Uploading and selecting a CV
+must not parse it or call an LLM. Conversion to the structured Master CV happens on demand when
+the user requests a CV-powered action such as profile matching, summarisation, or tailoring.
+
 **From raw text / Markdown:**
 ```bash
 python -m src.cv.master_cv_manager import path/to/cv.md --out data/master_cv.json

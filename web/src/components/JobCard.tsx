@@ -1,4 +1,4 @@
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, Download, ExternalLink, FileText, Loader2, MessageSquare } from "lucide-react";
 import { useState } from "react";
 import { api } from "../lib/api";
@@ -45,7 +45,11 @@ export function JobCard({ result, canTailor, onAsk }: { result: MatchResult; can
   const { job, verdict, score } = result;
   const [open, setOpen] = useState(false);
   const [template, setTemplate] = useState("classic");
-  const tailor = useMutation({ mutationFn: () => api.tailor(job.id, template) });
+  const qc = useQueryClient();
+  const tailor = useMutation({
+    mutationFn: () => api.tailor(job.id, template),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["state"] }),
+  });
 
   const salary =
     job.salary_min || job.salary_max

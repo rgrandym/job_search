@@ -134,9 +134,19 @@ export interface LLMView {
   ready: boolean;
 }
 
+export interface CVAsset {
+  id: string;
+  filename: string;
+  size: number;
+  kind: "master" | "uploaded" | "generated";
+  parsed: boolean;
+  selected: boolean;
+}
+
 export interface AppState {
   llm: LLMView;
   cv: { name: string; headline: string | null; roles: number; skills: number } | null;
+  cv_files: { available: CVAsset[]; selected: string | null };
   sources: { available: string[]; skipped: Record<string, string> };
   agents: { name: string; description: string; role: string }[];
   defaults: { threshold: number };

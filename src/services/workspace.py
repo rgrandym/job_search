@@ -36,6 +36,7 @@ class Workspace:
             if self.settings.master_cv_path.exists()
             else None
         )
+        self.active_cv_id: str | None = "master" if self.master_cv is not None else None
         self.last_query: SearchQuery | None = None
         self.last_report: MatchReport | None = None
         self.tailored: dict[str, TailoredCV] = {}
@@ -115,6 +116,7 @@ class Workspace:
     def save_master_cv(self, cv: MasterCV) -> None:
         mgr.save(cv, self.settings.master_cv_path)
         self.master_cv = cv
+        self.active_cv_id = "master"
 
     # ---------------------------------------------------------------- results
 

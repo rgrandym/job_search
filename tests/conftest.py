@@ -44,6 +44,7 @@ def settings(tmp_path: Path) -> Settings:
         request_delay_s=0,
         data_dir=tmp_path,
         output_dir=tmp_path / "output",
+        master_cv_path=tmp_path / "master_cv.json",
         inbox_dir=tmp_path / "inbox",
         companies_path=tmp_path / "companies.json",
     )

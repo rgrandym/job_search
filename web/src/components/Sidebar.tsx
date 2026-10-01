@@ -1,8 +1,8 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { FileUp, Loader2, Search, Sparkles, UserRound } from "lucide-react";
-import { useRef, useState, type DragEvent, type KeyboardEvent } from "react";
+import { useRef, useState, type DragEvent } from "react";
 import { api } from "../lib/api";
-import type { AppState } from "../lib/types";
+import type { AppState, CVAsset } from "../lib/types";
 import { useChat } from "../stores/chatStore";
 import { useSearch } from "../stores/searchStore";
 import { ChipInput, Field, Segmented, Toggle } from "./ui";
@@ -31,22 +31,48 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
   const [dragging, setDragging] = useState(false);
   const chat = useChat();
 
+  const cacheSelection = (asset: CVAsset) => {
+    qc.setQueryData<AppState>(["state"], (current) => {
+      if (!current) return current;
+      const available = current.cv_files.available.some((item) => item.id === asset.id)
+        ? current.cv_files.available.map((item) => (item.id === asset.id ? asset : item))
+        : [...current.cv_files.available, asset];
+      return {
+        ...current,
+        cv: null,
+        cv_files: {
+          selected: asset.id,
+          available: available.map((item) => ({ ...item, selected: item.id === asset.id })),
+        },
+      };
+    });
+  };
+
   const upload = useMutation({
     mutationFn: (f: File) => api.uploadCV(f),
-    onSuccess: async (_, file) => {
+    onSuccess: (asset) => {
       setUploadError(null);
-      setUploadedName(file.name);
-      await qc.invalidateQueries({ queryKey: ["state"] });
+      setUploadedName(asset.filename);
+      s.set({ useCv: true });
+      cacheSelection(asset);
+      void qc.invalidateQueries({ queryKey: ["state"] });
+    },
+    onError: (e: Error) => setUploadError(e.message),
+  });
+
+  const select = useMutation({
+    mutationFn: api.selectCV,
+    onSuccess: (asset) => {
+      setUploadError(null);
+      s.set({ useCv: true, summary: null, outcome: null });
+      cacheSelection(asset);
+      void qc.invalidateQueries({ queryKey: ["state"] });
     },
     onError: (e: Error) => setUploadError(e.message),
   });
 
   const submitCV = (file: File) => {
     setUploadedName(null);
-    if (!state?.llm.ready) {
-      setUploadError("Connect an LLM in Settings before importing a CV.");
-      return;
-    }
     const error = cvFileError(file);
     if (error) {
       setUploadError(error);
@@ -58,10 +84,6 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
 
   const chooseCV = () => {
     if (upload.isPending) return;
-    if (!state?.llm.ready) {
-      setUploadError("Connect an LLM in Settings before importing a CV.");
-      return;
-    }
     if (fileRef.current) fileRef.current.value = "";
     fileRef.current?.click();
   };
@@ -70,13 +92,6 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
     event.preventDefault();
     setDragging(false);
     if (!upload.isPending && event.dataTransfer.files[0]) submitCV(event.dataTransfer.files[0]);
-  };
-
-  const openCVMenu = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      chooseCV();
-    }
   };
 
   const runSearch = async () => {
@@ -99,6 +114,9 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
   };
 
   const cv = state?.cv;
+  const cvFiles = state?.cv_files.available ?? [];
+  const selectedCv = cvFiles.find((item) => item.id === state?.cv_files.selected);
+  const hasCv = !!selectedCv;
   const sources = state ? [...state.sources.available, ...Object.keys(state.sources.skipped)] : [];
 
   return (
@@ -107,25 +125,41 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
       <section className="card space-y-3 p-3">
         <div className="flex items-center justify-between">
           <span className="label">Profile</span>
-          {cv && (
+          {hasCv && (
             <button className="flex items-center gap-1 text-[11px] text-accent hover:underline" onClick={onShowSummary}>
               <Sparkles size={12} /> Summary
             </button>
           )}
         </div>
-        {cv ? (
+        {selectedCv ? (
           <div className="flex items-start gap-2">
             <UserRound size={28} className="mt-0.5 shrink-0 rounded-full bg-surface p-1 text-muted" />
             <div className="min-w-0">
-              <p className="truncate font-semibold">{cv.name}</p>
-              <p className="truncate text-[12px] text-muted">{cv.headline ?? "—"}</p>
-              <p className="text-[11px] text-faint">
-                {cv.roles} roles · {cv.skills} skills
+              <p className="truncate font-semibold">{selectedCv.filename}</p>
+              <p className="truncate text-[12px] text-muted">
+                {cv?.headline ?? `${selectedCv.kind} CV · ready when requested`}
               </p>
+              {cv && <p className="text-[11px] text-faint">{cv.roles} roles · {cv.skills} skills</p>}
             </div>
           </div>
         ) : (
-          <p className="text-[12px] text-muted">No CV yet. Upload one to match against your profile.</p>
+          <p className="text-[12px] text-muted">No CV selected. Upload one or choose from the library.</p>
+        )}
+        {cvFiles.length > 0 && (
+          <Field label="Available CVs">
+            <select
+              className="input"
+              value={state?.cv_files.selected ?? ""}
+              disabled={select.isPending}
+              onChange={(event) => select.mutate(event.target.value)}
+            >
+              {cvFiles.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.filename} · {item.kind}
+                </option>
+              ))}
+            </select>
+          </Field>
         )}
         <input
           ref={fileRef}
@@ -139,14 +173,9 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
           }}
         />
         <div
-          role="button"
-          tabIndex={upload.isPending ? -1 : 0}
-          aria-disabled={upload.isPending}
           className={`flex min-h-24 flex-col items-center justify-center gap-1 rounded-md border border-dashed px-3 py-4 text-center transition-colors ${
-            dragging ? "border-accent bg-accent-bg" : "border-border bg-surface hover:border-accent"
-          } ${upload.isPending ? "cursor-wait opacity-70" : "cursor-pointer"}`}
-          onClick={chooseCV}
-          onKeyDown={openCVMenu}
+            dragging ? "border-accent bg-accent-bg" : "border-border bg-surface"
+          } ${upload.isPending ? "opacity-70" : ""}`}
           onDragEnter={(event) => {
             event.preventDefault();
             if (!upload.isPending) setDragging(true);
@@ -159,14 +188,18 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
         >
           {upload.isPending ? <Loader2 size={20} className="animate-spin text-accent" /> : <FileUp size={20} className="text-accent" />}
           <p className="text-[12px] font-medium text-fg">
-            {upload.isPending ? "Building your profile…" : cv ? "Drop a CV to replace it" : "Drop your CV here"}
+            {upload.isPending ? "Saving CV…" : "Drop a CV to add it to your library"}
           </p>
-          {!upload.isPending && <p className="text-[11px] text-muted">or choose a file from your computer</p>}
+          {!upload.isPending && (
+            <button type="button" className="btn-ghost mt-1" onClick={chooseCV}>
+              <FileUp size={14} /> Choose file
+            </button>
+          )}
           <p className="text-[10px] text-faint">PDF, DOCX, MD or TXT · up to 10 MB</p>
         </div>
-        {uploadedName && <p className="text-[11px] text-good">Imported {uploadedName}</p>}
+        {uploadedName && <p className="text-[11px] text-good">Saved {uploadedName}</p>}
         {uploadError && <p className="text-[12px] text-bad">{uploadError}</p>}
-        <Toggle checked={s.useCv && !!cv} onChange={(v) => s.set({ useCv: v })} label="Match against my CV" />
+        <Toggle checked={s.useCv && hasCv} onChange={(v) => s.set({ useCv: v })} label="Match against my CV" />
       </section>
 
       {/* Filters */}

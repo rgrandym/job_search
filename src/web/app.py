@@ -12,7 +12,7 @@ from typing import Annotated, Any, Literal
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, SecretStr, ValidationError
+from pydantic import BaseModel, SecretStr
 
 from src.agents import chat
 from src.agents.definitions import JOB_MATCHER_INFO
@@ -52,6 +52,7 @@ def state() -> dict[str, Any]:
         {"name": a.name, "description": a.description, "role": a.role} for a in AGENTS.values()
     ] + [JOB_MATCHER_INFO]
     cv = ws.master_cv
+    cv_files = cv_service.list_cvs(ws)
     return {
         "llm": _llm_view(),
         "cv": None
@@ -61,6 +62,10 @@ def state() -> dict[str, Any]:
             "headline": cv.basics.headline,
             "roles": len(cv.experience),
             "skills": len(cv.all_skills()),
+        },
+        "cv_files": {
+            "available": [item.model_dump() for item in cv_files],
+            "selected": ws.active_cv_id,
         },
         "sources": {"available": [s.name for s in sources], "skipped": skipped},
         "agents": agents,
@@ -119,19 +124,25 @@ def get_cv() -> MasterCV | None:
 
 @app.put("/api/cv")
 def put_cv(cv: MasterCV) -> MasterCV:
-    get_workspace().save_master_cv(cv)
+    cv_service.save_selected_cv(get_workspace(), cv)
     return cv
 
 
 @app.post("/api/cv/upload")
-async def upload_cv(file: Annotated[UploadFile, File()]) -> MasterCV:
+async def upload_cv(file: Annotated[UploadFile, File()]) -> cv_service.CVAsset:
     ws = get_workspace()
-    if not ws.llm_ready():
-        raise HTTPException(400, "Configure an LLM provider first (Settings)")
     try:
-        return await cv_service.import_cv(ws, file.filename or "cv.txt", await file.read())
-    except (ValueError, ValidationError, LLMError) as exc:
+        return cv_service.store_cv(ws, file.filename or "cv.txt", await file.read())
+    except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@app.put("/api/cv/selection/{asset_id:path}")
+def select_cv(asset_id: str) -> cv_service.CVAsset:
+    try:
+        return cv_service.select_cv(get_workspace(), asset_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 class SummaryRequest(BaseModel):
@@ -145,10 +156,10 @@ async def profile_summary(body: SummaryRequest) -> dict[str, Any]:
     ws = get_workspace()
     if not ws.llm_ready():
         raise HTTPException(400, "Configure an LLM provider first (Settings)")
-    cv = ws.master_cv if body.use_cv else None
     try:
+        cv = await cv_service.ensure_selected_cv(ws) if body.use_cv else None
         summary, cached = await get_summary(ws, cv, body.query, body.refresh)
-    except LLMError as exc:
+    except (ValueError, LLMError) as exc:
         raise HTTPException(502, str(exc)) from exc
     return {"summary": summary, "from_memory": cached}
 

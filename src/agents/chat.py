@@ -40,7 +40,7 @@ async def handle_user_message(
     ui = {
         "filters": query.model_dump(exclude_defaults=True),
         "match_against_cv": use_cv,
-        "cv_loaded": ws.master_cv is not None,
+        "cv_selected": ws.active_cv_id is not None,
     }
     start = len(session.messages)
     session.messages.append(

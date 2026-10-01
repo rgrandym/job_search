@@ -68,7 +68,7 @@ export default function App() {
         </Panel>
         <Handle />
         <Panel defaultSize={50} minSize={30} className="bg-bg">
-          <ResultsPanel hasCv={!!state.data?.cv && ready} />
+          <ResultsPanel hasCv={!!state.data?.cv_files.selected && ready} />
         </Panel>
         <Handle />
         <Panel defaultSize={28} minSize={20} maxSize={45} className="bg-panel">

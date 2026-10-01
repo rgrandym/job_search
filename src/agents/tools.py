@@ -56,6 +56,8 @@ async def get_workspace_state(_: NoArgs, ctx: AgentContext) -> dict[str, Any]:
     ws, cv = ctx.ws, ctx.ws.master_cv
     rep = ws.last_report
     return {
+        "cv_selected": ws.active_cv_id is not None,
+        "selected_cv": ws.active_cv_id,
         "cv_loaded": cv is not None,
         "cv": None
         if cv is None
@@ -92,7 +94,7 @@ class SummarizeArgs(BaseModel):
 )
 async def summarize_profile_tool(args: SummarizeArgs, ctx: AgentContext) -> dict[str, Any]:
     query = ctx.query.model_copy(update={"titles": args.titles}) if args.titles else ctx.query
-    cv = ctx.ws.master_cv if ctx.use_cv else None
+    cv = await cv_service.ensure_selected_cv(ctx.ws) if ctx.use_cv else None
     summary, cached = await get_summary(ctx.ws, cv, query, args.refresh, ctx.emit)
     await ctx.emit("profile_summary", {"summary": summary.model_dump(), "from_memory": cached})
     return {"from_memory": cached, "summary": summary.model_dump()}
@@ -194,8 +196,8 @@ async def list_sources(_: NoArgs, ctx: AgentContext) -> dict[str, Any]:
 
 @tool("get_master_cv", "The user's Master CV (JSON), or null if none is loaded.", NoArgs)
 async def get_master_cv(_: NoArgs, ctx: AgentContext) -> Any:
-    cv = ctx.ws.master_cv
-    return None if cv is None else cv.model_dump(mode="json", exclude_none=True)
+    cv = await cv_service.ensure_selected_cv(ctx.ws)
+    return cv.model_dump(mode="json", exclude_none=True)
 
 
 class TailorArgs(BaseModel):
@@ -239,6 +241,6 @@ class UpdateCVArgs(BaseModel):
 async def update_master_cv(args: UpdateCVArgs, ctx: AgentContext) -> dict[str, Any]:
     if ctx.ws.master_cv is None:
         raise ValueError("No Master CV loaded")
-    ctx.ws.save_master_cv(mgr.update(ctx.ws.master_cv, args.patch))
+    cv_service.save_selected_cv(ctx.ws, mgr.update(ctx.ws.master_cv, args.patch))
     await ctx.emit("cv_updated", {"reason": args.reason})
     return {"ok": True}

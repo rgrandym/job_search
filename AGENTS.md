@@ -27,7 +27,7 @@ All tests run offline: the LLM is faked, HTTP is mocked, and the agent chat uses
 ## The app
 
 A three-pane web UI (`web/`) over a FastAPI backend (`src/web/app.py`):
-**left**: CV upload and search filters (titles, keywords, location, radius, salary, arrangement,
+**left**: CV library/upload and search filters (titles, keywords, location, radius, salary, arrangement,
 sources, threshold, smart-match toggle). **centre**: ranked results with AI fit scores, reasons,
 gaps, and tailor-to-.docx. **right**: agent chat over `/api/ws/chat`.
 The LLM provider (Claude, OpenAI/Codex, OpenRouter) and the orchestrator and subagent models
@@ -71,7 +71,8 @@ No LLM configured → steps 4–5 are skipped and the report says it shows pre-f
 ## Data flow 2: Master CV → Tailoring → Word document
 
 ```text
-upload (.pdf/.docx/.md/.txt) ─pypdf/python-docx─▶ text ─LLM─▶ MasterCV ─▶ data/master_cv.json
+upload (.pdf/.docx/.md/.txt) ─▶ data/cvs/ (stored unchanged; no parsing or LLM call)
+select CV + request a CV-powered action ─pypdf/python-docx─▶ text ─LLM─▶ MasterCV
 job from results ─▶ tailor.analyze_jd ─▶ propose_plan (LLM) ─▶ apply_plan (guards: source ids,
 no new numbers, no unevidenced skills) ─▶ TailoredCV ─▶ export_docx ─▶ output/<Name>_<Company>.docx
 ```

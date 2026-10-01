@@ -72,26 +72,56 @@ def test_from_text_uses_llm(master_cv: MasterCV) -> None:
     assert llm.calls[0][0] == "raw cv text"
 
 
-def test_import_cv_extracts_off_thread_and_rejects_bad_files(
+def test_upload_stores_without_llm_then_imports_on_demand(
     master_cv: MasterCV, settings: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ws = Workspace(settings)
     llm = FakeLLM({MasterCV: master_cv})
     monkeypatch.setattr(ws, "structured", lambda role="worker": llm)
+    monkeypatch.setattr(ws, "llm_ready", lambda: True)
     raw = ("Alex Example\nSenior engineer\n" + "Built reliable systems.\n" * 8).encode()
 
-    imported = asyncio.run(cv_service.import_cv(ws, "resume.txt", raw, save=False))
+    asset = cv_service.store_cv(ws, "resume.txt", raw)
 
+    assert asset.filename == "resume.txt"
+    stored = next((settings.data_dir / "cvs").glob(f"{asset.id}.source.*"))
+    assert stored.read_bytes() == raw
+    assert ws.master_cv is None
+    assert llm.calls == []
+
+    imported = asyncio.run(cv_service.ensure_selected_cv(ws))
     assert imported == master_cv
     assert llm.calls[0][0].startswith("Alex Example")
+    assert len(llm.calls) == 1
+    edited = imported.model_copy(
+        update={"basics": imported.basics.model_copy(update={"headline": "Edited headline"})}
+    )
+    cv_service.save_selected_cv(ws, edited)
+    ws.master_cv = None
+    assert asyncio.run(cv_service.ensure_selected_cv(ws)).basics.headline == "Edited headline"
+    assert len(llm.calls) == 1
     with pytest.raises(ValueError, match="empty"):
-        asyncio.run(cv_service.import_cv(ws, "resume.txt", b"", save=False))
+        cv_service.store_cv(ws, "empty.txt", b"")
     with pytest.raises(ValueError, match="10 MB"):
-        asyncio.run(
-            cv_service.import_cv(
-                ws, "resume.txt", b"x" * (cv_service.MAX_UPLOAD_BYTES + 1), save=False
-            )
-        )
+        cv_service.store_cv(ws, "large.txt", b"x" * (cv_service.MAX_UPLOAD_BYTES + 1))
+
+
+def test_cv_library_lists_and_selects_generated_files(master_cv: MasterCV, settings: Any) -> None:
+    ws = Workspace(settings)
+    ws.save_master_cv(master_cv)
+    ws.active_cv_id = "master"
+    settings.output_dir.mkdir(parents=True)
+    generated = settings.output_dir / "Tailored.docx"
+    generated.write_bytes(b"word document")
+
+    assets = cv_service.list_cvs(ws)
+
+    assert [(item.id, item.selected) for item in assets] == [
+        ("master", True),
+        ("generated:Tailored.docx", False),
+    ]
+    selected = cv_service.select_cv(ws, "generated:Tailored.docx")
+    assert selected.selected and selected.kind == "generated" and ws.master_cv is None
 
 
 # ---------------------------------------------------------------- tailoring

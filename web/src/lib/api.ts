@@ -1,6 +1,7 @@
 import type {
   AppState,
   CodexStatus,
+  CVAsset,
   Effort,
   LLMView,
   ModelInfo,
@@ -54,8 +55,10 @@ export const api = {
   uploadCV: (file: File) => {
     const form = new FormData();
     form.append("file", file);
-    return request<unknown>("/api/cv/upload", { method: "POST", body: form });
+    return request<CVAsset>("/api/cv/upload", { method: "POST", body: form });
   },
+  selectCV: (assetId: string) =>
+    request<CVAsset>(`/api/cv/selection/${encodeURIComponent(assetId)}`, { method: "PUT" }),
   profileSummary: (query: SearchQuery, use_cv: boolean, refresh = false) =>
     request<{ summary: ProfileSummary; from_memory: boolean }>(
       "/api/profile-summary",

@@ -63,6 +63,7 @@ def fake_llm() -> FakeLLM:
 def ws(settings: Settings, master_cv: MasterCV, monkeypatch: pytest.MonkeyPatch) -> Workspace:
     w = Workspace(settings)
     w.master_cv = master_cv
+    w.active_cv_id = "master"
     llm = fake_llm()
     monkeypatch.setattr(w, "structured", lambda role="worker": llm)
     monkeypatch.setattr(w, "llm_ready", lambda: True)
@@ -259,33 +260,29 @@ def test_api_file_download_is_confined(client: TestClient) -> None:
 def test_api_cv_upload_accepts_multipart_file(
     client: TestClient,
     ws: Workspace,
-    master_cv: MasterCV,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from src.web import app as webapp
-
-    received: dict[str, Any] = {}
-
-    async def fake_import(
-        workspace: Workspace, filename: str, data: bytes, save: bool = True
-    ) -> MasterCV:
-        received.update(workspace=workspace, filename=filename, data=data, save=save)
-        return master_cv
-
-    monkeypatch.setattr(webapp.cv_service, "import_cv", fake_import)
+    readiness_checks: list[bool] = []
+    monkeypatch.setattr(ws, "llm_ready", lambda: readiness_checks.append(True) or True)
+    data = b"A sufficiently detailed CV"
     response = client.post(
         "/api/cv/upload",
-        files={"file": ("resume.txt", b"A sufficiently detailed CV", "text/plain")},
+        files={"file": ("resume.txt", data, "text/plain")},
     )
 
     assert response.status_code == 200
-    assert response.json()["basics"]["name"] == "Alex Example"
-    assert received == {
-        "workspace": ws,
-        "filename": "resume.txt",
-        "data": b"A sufficiently detailed CV",
-        "save": True,
-    }
+    asset = response.json()
+    assert asset["filename"] == "resume.txt"
+    assert asset["kind"] == "uploaded" and asset["selected"] is True
+    assert asset["parsed"] is False and asset["size"] == len(data)
+    stored = next((ws.settings.data_dir / "cvs").glob(f"{asset['id']}.source.*"))
+    assert stored.read_bytes() == data
+    assert ws.master_cv is None
+    assert readiness_checks == []
+
+    state = client.get("/api/state").json()
+    assert state["cv_files"]["selected"] == asset["id"]
+    assert state["cv_files"]["available"][0]["filename"] == "resume.txt"
 
 
 def test_api_codex_login_and_status(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

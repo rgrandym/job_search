@@ -22,5 +22,5 @@ How to work:
    Say plainly when nothing truly matches, and suggest what to relax (radius, titles, salary).
    Never present a rejected or below-threshold job as a match.
 
-If no CV is loaded and the user wants CV-based matching, ask them to upload one (left panel)
+If no CV is selected and the user wants CV-based matching, ask them to upload or select one (left panel)
 or offer a filters-only search.

@@ -23,6 +23,7 @@ from src.jobs.models import JobPosting, MatchReport, ProfileSummary, SearchQuery
 from src.jobs.profile_memory import summarize_profile
 from src.jobs.screener import apply_verdicts, screen_jobs
 from src.jobs.sources.base import SourceError
+from src.services import cv_service
 from src.services.workspace import Workspace
 
 Emit = Callable[[str, dict[str, Any]], Awaitable[None]]
@@ -56,7 +57,7 @@ async def run_search(ws: Workspace, req: SearchRequest, emit: Emit = _noop) -> S
     settings = ws.settings
     threshold = settings.score_threshold if req.threshold is None else req.threshold
     query = req.query
-    cv = ws.master_cv if req.use_cv else None
+    cv = await cv_service.ensure_selected_cv(ws) if req.use_cv else None
 
     await emit("search_progress", {"stage": "capture", "message": "Collecting postings"})
     sources, skipped = build_sources(query.sources or None, settings=settings)
