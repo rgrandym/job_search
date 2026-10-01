@@ -1,0 +1,57 @@
+[
+  {
+    "id": "job-strong",
+    "title": "Senior Machine Learning Engineer",
+    "company": "Orbit AI",
+    "location": "Remote (EU)",
+    "work_arrangement": "remote",
+    "description": "Build and operate recommendation and NLP models in production. Python, PyTorch, Kubernetes, AWS. Mentor engineers.",
+    "required_skills": ["Python", "PyTorch", "Kubernetes"],
+    "preferred_skills": ["AWS", "NLP", "Go"],
+    "min_years_experience": 5,
+    "source": "example"
+  },
+  {
+    "id": "job-partial",
+    "title": "Senior Data Engineer",
+    "company": "Datawell",
+    "location": "Lisbon, Portugal",
+    "work_arrangement": "hybrid",
+    "description": "Own batch and streaming pipelines with Spark, Airflow and Snowflake.",
+    "required_skills": ["Spark", "Airflow", "Snowflake", "Python"],
+    "preferred_skills": ["dbt"],
+    "min_years_experience": 5,
+    "source": "example"
+  },
+  {
+    "id": "job-cert",
+    "title": "Machine Learning Engineer",
+    "company": "SecureCloud",
+    "location": "Remote",
+    "work_arrangement": "remote",
+    "description": "ML on GCP for regulated clients.",
+    "required_skills": ["Python", "GCP"],
+    "required_certifications": ["Google Professional Machine Learning Engineer"],
+    "source": "example"
+  },
+  {
+    "id": "job-onsite",
+    "title": "Senior Machine Learning Engineer",
+    "company": "Berlin Mobility",
+    "location": "Berlin, Germany",
+    "work_arrangement": "onsite",
+    "description": "Recommendation systems for mobility. Python, PyTorch.",
+    "required_skills": ["Python", "PyTorch"],
+    "source": "example"
+  },
+  {
+    "id": "job-junior",
+    "title": "Data Analyst Intern",
+    "company": "Tiny Startup",
+    "location": "Remote",
+    "work_arrangement": "remote",
+    "description": "Excel dashboards and reporting.",
+    "required_skills": ["Excel"],
+    "source": "example"
+  }
+]

@@ -1,0 +1,14 @@
+{
+  "$comment": "Runtime definition lives in src/agents/definitions.py + src/agents/prompts/orchestrator.md. Keep in sync.",
+  "name": "orchestrator",
+  "version": "0.2.0",
+  "description": "Main agent: understands the request, builds/recalls the profile summary, delegates to specialists, reports back.",
+  "model_role": "orchestrator",
+  "tools": ["get_workspace_state", "summarize_profile", "delegate"],
+  "subagents": ["job_search_expert", "cv_expert"],
+  "memory": {
+    "profile_summaries": "data/profile_summaries.json",
+    "key": "cv_fingerprint + role_family (normalised title words)"
+  },
+  "max_turns": 10
+}

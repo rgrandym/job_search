@@ -1,0 +1,6 @@
+[
+  { "name": "Example Greenhouse Co", "ats": "greenhouse", "token": "examplegreenhouse" },
+  { "name": "Example Lever Co", "ats": "lever", "token": "examplelever" },
+  { "name": "Example Ashby Co", "ats": "ashby", "token": "exampleashby" },
+  { "name": "Example Corp", "ats": "careers_page", "url": "https://careers.example.com/jobs" }
+]

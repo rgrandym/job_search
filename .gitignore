@@ -1,0 +1,23 @@
+.DS_Store
+.env
+__pycache__/
+.venv/
+node_modules/
+
+# Personal CV data and generated documents — never commit
+data/*
+!data/examples/
+output/
+*.docx
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Web UI build artefacts
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo
+
+# dev.sh runtime (pids, logs)
+.run/

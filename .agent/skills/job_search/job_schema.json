@@ -1,0 +1,185 @@
+{
+  "$defs": {
+    "JobPosting": {
+      "additionalProperties": false,
+      "description": "A normalised job posting from any source.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "company": {
+          "title": "Company",
+          "type": "string"
+        },
+        "location": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "City, Country, or region for remote roles",
+          "title": "Location"
+        },
+        "work_arrangement": {
+          "default": "onsite",
+          "enum": [
+            "remote",
+            "hybrid",
+            "onsite"
+          ],
+          "title": "Work Arrangement",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "title": "Description",
+          "type": "string"
+        },
+        "required_skills": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Required Skills",
+          "type": "array"
+        },
+        "preferred_skills": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Preferred Skills",
+          "type": "array"
+        },
+        "required_certifications": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Required Certifications",
+          "type": "array"
+        },
+        "min_years_experience": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Years Experience"
+        },
+        "seniority": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "intern \u2026 executive; inferred from title if null",
+          "title": "Seniority"
+        },
+        "salary_range": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Salary Range"
+        },
+        "salary_min": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Annual; parsed from salary_range",
+          "title": "Salary Min"
+        },
+        "salary_max": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Salary Max"
+        },
+        "within_search_area": {
+          "default": false,
+          "description": "Source applied the location/distance filter server-side",
+          "title": "Within Search Area",
+          "type": "boolean"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        },
+        "posted_at": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Posted At"
+        },
+        "source": {
+          "default": "manual",
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "company"
+      ],
+      "title": "JobPosting",
+      "type": "object"
+    }
+  },
+  "items": {
+    "$ref": "#/$defs/JobPosting"
+  },
+  "type": "array",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "job_schema.json"
+}

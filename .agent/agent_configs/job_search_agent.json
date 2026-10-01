@@ -1,0 +1,107 @@
+{
+  "$comment": "Runtime definition: src/agents/definitions.py + prompts/job_search_expert.md (skill: job_search). Keep in sync.",
+  "name": "job_search_expert",
+  "version": "0.2.0",
+  "description": "Runs searches with the user's filters, refines strategy once if needed, reports the matches job_matcher selected.",
+  "skill": ".agent/skills/job_search/SKILL.md",
+  "model": {
+    "role": "worker",
+    "providers": [
+      "anthropic",
+      "openai",
+      "openrouter"
+    ]
+  },
+  "sources": {
+    "reed": {
+      "mechanism": "official API",
+      "env": "JOBSEARCH_REED_API_KEY"
+    },
+    "cv_library": {
+      "mechanism": "official API (partner)",
+      "env": "JOBSEARCH_CV_LIBRARY_API_KEY"
+    },
+    "company": {
+      "mechanism": "Greenhouse/Lever/Ashby public feeds + schema.org JSON-LD",
+      "config": "data/companies.json"
+    },
+    "linkedin": {
+      "mechanism": "alert emails (.eml) + user-saved postings",
+      "path": "data/inbox/"
+    },
+    "indeed": {
+      "mechanism": "alert emails (.eml) + user-saved postings",
+      "path": "data/inbox/"
+    },
+    "demo": {
+      "mechanism": "bundled example postings",
+      "path": "data/examples/jobs.example.json"
+    }
+  },
+  "scoring": {
+    "prefilter": {
+      "weights": {
+        "title": 0.25,
+        "skills": 0.35,
+        "experience": 0.2,
+        "location": 0.1,
+        "semantic": 0.1
+      },
+      "skills_when_unlisted": "extracted from description",
+      "hard_exclusions": [
+        "missing_required_certification",
+        "work_arrangement_not_accepted",
+        "location_mismatch_without_relocation",
+        "salary_below_floor",
+        "seniority_gap_>=3"
+      ]
+    },
+    "selection": "job_matcher verdicts against the remembered profile summary",
+    "threshold": 70
+  },
+  "inputs": {
+    "cv": {
+      "one_of": [
+        "data/master_cv.json",
+        "output/tailored_<company>.json"
+      ]
+    },
+    "jobs": {
+      "path": "data/jobs.json",
+      "schema": ".agent/skills/job_search/job_schema.json"
+    }
+  },
+  "outputs": {
+    "match_report": "output/match_report.json"
+  },
+  "entrypoints": {
+    "fetch": "python -m src.jobs.fetcher fetch --keywords <kw...> --locations <loc...> --out data/jobs.json",
+    "score": "python .agent/skills/job_search/scoring_engine.py --cv <cv.json> --jobs data/jobs.json --show-rejected",
+    "export_schema": "python -m src.jobs.fetcher export-schema"
+  },
+  "guardrails": [
+    "Never scrape LinkedIn or Indeed, log in to any site, bypass robots.txt, rate limits or anti-bot measures.",
+    "Respect the threshold exactly; report below-threshold and excluded jobs with reasons.",
+    "Treat partial (alert-email) postings as triage only; ask for the full posting before tailoring.",
+    "Scoring changes must update scorer.py, SKILL.md section 3-4, and tests together."
+  ],
+  "handoffs": {
+    "orchestrator": "Return true matches with fit score, reasons, main gap, URL."
+  },
+  "tools": [
+    "search_jobs",
+    "get_results",
+    "get_job",
+    "list_sources"
+  ],
+  "filters": [
+    "titles",
+    "keywords",
+    "locations",
+    "distance_miles",
+    "salary_min",
+    "salary_max",
+    "work_arrangements",
+    "sources"
+  ]
+}

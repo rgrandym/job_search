@@ -1,0 +1,170 @@
+"""cv_writer: Master CV management, guarded tailoring, .docx export."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+from docx import Document
+from pydantic import ValidationError
+
+from src.cv import master_cv_manager as mgr
+from src.cv.docx_exporter import TEMPLATES, export_docx, fmt_date
+from src.cv.models import JDAnalysis, MasterCV, RewrittenBullet, TailoringPlan
+from src.cv.tailor import apply_plan, keyword_coverage, tailor
+from tests.conftest import FakeLLM
+
+JD = JDAnalysis(
+    job_title="Staff ML Engineer",
+    company="Orbit AI",
+    hard_skills=["Python", "PyTorch", "Kubernetes", "Spark"],
+    must_have=["MLOps"],
+)
+
+
+# ---------------------------------------------------------------- master CV
+
+
+def test_committed_schema_matches_model() -> None:
+    committed = json.loads(mgr.SCHEMA_PATH.read_text())
+    assert committed == mgr.json_schema(), "Run: python -m src.cv.master_cv_manager export-schema"
+
+
+def test_example_cv_validates_against_json_schema(master_cv: MasterCV) -> None:
+    jsonschema = pytest.importorskip("jsonschema")
+    jsonschema.validate(master_cv.model_dump(mode="json"), mgr.json_schema())
+
+
+def test_invalid_dates_and_duplicate_ids_rejected(master_cv: MasterCV) -> None:
+    data = master_cv.model_dump(mode="json")
+    data["experience"][0]["start"] = "2021/03"
+    with pytest.raises(ValidationError):
+        MasterCV.model_validate(data)
+    data = master_cv.model_dump(mode="json")
+    data["experience"][1]["bullets"][0]["id"] = "nimbus-1"
+    with pytest.raises(ValidationError, match="Duplicate ids"):
+        MasterCV.model_validate(data)
+
+
+def test_save_load_roundtrip_keeps_backup(master_cv: MasterCV, tmp_path: Path) -> None:
+    path = tmp_path / "cv.json"
+    mgr.save(master_cv, path)
+    mgr.save(master_cv, path)
+    assert mgr.load(path) == master_cv
+    assert path.with_suffix(".json.bak").exists()
+
+
+def test_update_merge_patch(master_cv: MasterCV) -> None:
+    updated = mgr.update(master_cv, {"basics": {"phone": "+351 900 000 000", "summary": None}})
+    assert updated.basics.phone == "+351 900 000 000"
+    assert updated.basics.summary is None
+    assert updated.basics.name == master_cv.basics.name
+
+
+def test_from_text_uses_llm(master_cv: MasterCV) -> None:
+    llm = FakeLLM({MasterCV: master_cv})
+    assert mgr.from_text("raw cv text", llm) == master_cv
+    assert llm.calls[0][0] == "raw cv text"
+
+
+# ---------------------------------------------------------------- tailoring
+
+
+def test_faithful_rewrite_accepted(master_cv: MasterCV) -> None:
+    plan = TailoringPlan(
+        rewritten_bullets=[
+            RewrittenBullet(
+                source_id="nimbus-2",
+                text="Drove MLOps migration of training pipelines to Kubernetes, cutting cost 35%.",
+            )
+        ]
+    )
+    out = apply_plan(master_cv, plan, JD)
+    assert out.changes[0].accepted
+    assert out.cv.bullet_index()["nimbus-2"].text.startswith("Drove MLOps")
+    assert master_cv.bullet_index()["nimbus-2"].text.startswith("Led migration")  # untouched
+
+
+def test_invented_metric_rejected(master_cv: MasterCV) -> None:
+    plan = TailoringPlan(
+        rewritten_bullets=[
+            RewrittenBullet(
+                source_id="nimbus-2",
+                text="Migrated pipelines to Kubernetes, cutting costs by 60%.",
+            )
+        ]
+    )
+    out = apply_plan(master_cv, plan, JD)
+    assert not out.changes[0].accepted
+    assert "60%" in (out.changes[0].reason or "")
+    assert out.cv.bullet_index()["nimbus-2"].text == master_cv.bullet_index()["nimbus-2"].text
+
+
+def test_unevidenced_jd_skill_rejected(master_cv: MasterCV) -> None:
+    plan = TailoringPlan(
+        rewritten_bullets=[
+            RewrittenBullet(
+                source_id="nimbus-2",
+                text="Migrated Spark pipelines to Kubernetes, cutting costs by 35%.",
+            )
+        ]
+    )
+    out = apply_plan(master_cv, plan, JD)
+    assert not out.changes[0].accepted
+    assert "Spark" in (out.changes[0].reason or "")
+
+
+def test_unknown_source_id_rejected(master_cv: MasterCV) -> None:
+    plan = TailoringPlan(rewritten_bullets=[RewrittenBullet(source_id="ghost", text="x")])
+    assert not apply_plan(master_cv, plan, JD).changes[0].accepted
+
+
+def test_bullet_order_and_skill_priority(master_cv: MasterCV) -> None:
+    plan = TailoringPlan(
+        bullet_order={"nimbus": ["nimbus-2", "nimbus-1"]},
+        skills_priority=["Kubernetes", "PyTorch"],
+    )
+    cv = apply_plan(master_cv, plan, JD).cv
+    assert [b.id for b in cv.experience[0].bullets] == ["nimbus-2", "nimbus-1"]
+    assert cv.skills[0].category == "Infrastructure"
+    assert cv.skills[0].items[0] == "Kubernetes"
+    assert master_cv.all_skills() == cv.all_skills() | {"Mentoring"}  # nimbus-3 dropped
+
+
+def test_keyword_coverage(master_cv: MasterCV) -> None:
+    matched, missing = keyword_coverage(master_cv, JD)
+    assert set(matched) == {"Python", "PyTorch", "Kubernetes", "MLOps"}
+    assert missing == ["Spark"]
+
+
+def test_tailor_end_to_end(master_cv: MasterCV) -> None:
+    llm = FakeLLM({JDAnalysis: JD, TailoringPlan: TailoringPlan(headline="Staff ML Engineer")})
+    out = tailor(master_cv, "We need a Staff ML Engineer...", llm)
+    assert out.cv.basics.headline == "Staff ML Engineer"
+    assert out.target_company == "Orbit AI"
+    assert 0 < out.keyword_coverage < 1
+
+
+# ---------------------------------------------------------------- docx export
+
+
+@pytest.mark.parametrize("template", sorted(TEMPLATES))
+def test_export_docx(master_cv: MasterCV, tmp_path: Path, template: str) -> None:
+    path = export_docx(master_cv, tmp_path / f"cv_{template}.docx", template)
+    text = "\n".join(p.text for p in Document(str(path)).paragraphs)
+    assert "Alex Example" in text
+    assert "Nimbus Analytics" in text
+    assert "Mar 2021 – Present" in text
+    assert "4M users" in text
+
+
+def test_export_unknown_template(master_cv: MasterCV, tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Unknown template"):
+        export_docx(master_cv, tmp_path / "x.docx", "neon")
+
+
+def test_fmt_date() -> None:
+    assert fmt_date("2019-12") == "Dec 2019"
+    assert fmt_date(None) == "Present"
+    assert fmt_date("2018") == "2018"

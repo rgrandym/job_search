@@ -1,0 +1,86 @@
+{
+  "schema_version": "1.0",
+  "basics": {
+    "name": "Alex Example",
+    "headline": "Senior Machine Learning Engineer",
+    "email": "alex@example.com",
+    "location": "Lisbon, Portugal",
+    "links": [{ "label": "GitHub", "url": "https://github.com/alex-example" }],
+    "summary": "ML engineer with 8 years building production recommendation and NLP systems."
+  },
+  "experience": [
+    {
+      "id": "nimbus",
+      "company": "Nimbus Analytics",
+      "title": "Senior Machine Learning Engineer",
+      "location": "Lisbon, Portugal",
+      "start": "2021-03",
+      "end": null,
+      "bullets": [
+        {
+          "id": "nimbus-1",
+          "text": "Built a real-time recommendation service in Python and PyTorch serving 4M users, lifting click-through rate by 18%.",
+          "skills": ["Python", "PyTorch", "Recommender Systems"],
+          "metrics": ["4M users", "18%"]
+        },
+        {
+          "id": "nimbus-2",
+          "text": "Led migration of model training pipelines to Kubernetes, cutting training costs by 35%.",
+          "skills": ["Kubernetes", "MLOps"],
+          "metrics": ["35%"]
+        },
+        {
+          "id": "nimbus-3",
+          "text": "Mentored 5 engineers and introduced code review standards for ML code.",
+          "skills": ["Mentoring"],
+          "metrics": ["5 engineers"]
+        }
+      ]
+    },
+    {
+      "id": "lexa",
+      "company": "Lexa Labs",
+      "title": "Machine Learning Engineer",
+      "location": "Porto, Portugal",
+      "start": "2017-09",
+      "end": "2021-02",
+      "bullets": [
+        {
+          "id": "lexa-1",
+          "text": "Developed NLP models for document classification with 92% accuracy using scikit-learn and spaCy.",
+          "skills": ["NLP", "scikit-learn", "spaCy", "Python"],
+          "metrics": ["92%"]
+        },
+        {
+          "id": "lexa-2",
+          "text": "Designed PostgreSQL feature store used by 3 data science teams.",
+          "skills": ["PostgreSQL", "Feature Engineering"],
+          "metrics": ["3 data science teams"]
+        }
+      ]
+    }
+  ],
+  "education": [
+    {
+      "institution": "University of Lisbon",
+      "degree": "MSc",
+      "field": "Computer Science",
+      "start": "2015-09",
+      "end": "2017-07"
+    }
+  ],
+  "skills": [
+    { "category": "Languages", "items": ["Python", "SQL", "Go"] },
+    { "category": "ML", "items": ["PyTorch", "scikit-learn", "NLP", "Recommender Systems"] },
+    { "category": "Infrastructure", "items": ["Kubernetes", "Docker", "AWS", "PostgreSQL"] }
+  ],
+  "certifications": [{ "name": "AWS Certified Machine Learning – Specialty", "issuer": "Amazon", "year": 2022 }],
+  "projects": [],
+  "languages": ["English (C2)", "Portuguese (native)"],
+  "preferences": {
+    "target_titles": ["Senior Machine Learning Engineer", "Staff Machine Learning Engineer"],
+    "locations": ["Lisbon, Portugal"],
+    "work_arrangements": ["remote", "hybrid"],
+    "willing_to_relocate": false
+  }
+}

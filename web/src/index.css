@@ -1,0 +1,68 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Design tokens. Change the theme here, not in components. */
+:root,
+[data-theme="dark"] {
+  --bg: #0b0d12;
+  --bg-panel: #11141b;
+  --bg-surface: #181c25;
+  --border: #252a36;
+  --text-primary: #e8ebf2;
+  --text-secondary: #a9b0c0;
+  --text-muted: #6b7386;
+  --accent: #60a5fa;
+  --accent-bg: rgba(96, 165, 250, 0.12);
+  --good: #34d399;
+  --warn: #fbbf24;
+  --bad: #f87171;
+  color-scheme: dark;
+}
+[data-theme="light"] {
+  --bg: #f4f6fa;
+  --bg-panel: #ffffff;
+  --bg-surface: #eef1f6;
+  --border: #dde2ea;
+  --text-primary: #111827;
+  --text-secondary: #4b5563;
+  --text-muted: #8a93a3;
+  --accent: #2563eb;
+  --accent-bg: rgba(37, 99, 235, 0.08);
+  --good: #059669;
+  --warn: #b45309;
+  --bad: #dc2626;
+  color-scheme: light;
+}
+
+html, body, #root { height: 100%; }
+body { background: var(--bg); color: var(--text-primary); font-size: 13px; }
+
+@layer components {
+  .card { @apply rounded-[10px] border border-border bg-panel; }
+  .label { @apply text-[11px] font-medium uppercase tracking-wide text-faint; }
+  .input {
+    @apply w-full rounded-md border border-border bg-surface px-2.5 py-1.5 text-[13px] text-fg
+           placeholder:text-faint outline-none focus:border-accent;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-[13px]
+           font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary { @apply btn bg-accent text-white hover:brightness-110; }
+  .btn-ghost { @apply btn border border-border bg-surface text-muted hover:text-fg; }
+  .chip { @apply inline-flex items-center gap-1 rounded-full bg-surface px-2 py-0.5 text-[11px] text-muted; }
+  .scroll-thin { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+}
+
+/* Markdown in agent replies */
+.prose-chat p { margin: 0.35em 0; }
+.prose-chat ul, .prose-chat ol { margin: 0.35em 0; padding-left: 1.2em; }
+.prose-chat ul { list-style: disc; }
+.prose-chat ol { list-style: decimal; }
+.prose-chat a { color: var(--accent); text-decoration: underline; }
+.prose-chat strong { color: var(--text-primary); }
+.prose-chat code { background: var(--bg-surface); padding: 0 0.3em; border-radius: 4px; }
+.prose-chat table { border-collapse: collapse; font-size: 12px; margin: 0.4em 0; }
+.prose-chat th, .prose-chat td { border: 1px solid var(--border); padding: 2px 6px; text-align: left; }
+.prose-chat h1, .prose-chat h2, .prose-chat h3 { font-weight: 600; margin: 0.5em 0 0.25em; }

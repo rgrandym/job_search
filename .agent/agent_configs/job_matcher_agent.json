@@ -1,0 +1,11 @@
+{
+  "$comment": "Runtime: src/jobs/screener.py (MATCHER_SYSTEM). Invoked inside search_jobs; not a chat-loop agent.",
+  "name": "job_matcher",
+  "version": "0.2.0",
+  "description": "Semantic screening: judges each shortlisted posting against the profile summary and returns a verdict.",
+  "model_role": "worker",
+  "input": ["ProfileSummary", "search constraints", "posting digests (batch)"],
+  "output": "JobVerdict {job_id, match, fit_score 0-100, verdict, reasons, gaps, dealbreakers}",
+  "batching": { "shortlist": 40, "batch_size": 6, "concurrency": 4 },
+  "decision": "match = verdict.match AND fit_score >= threshold (default 70)"
+}
