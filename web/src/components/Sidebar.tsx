@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { FileUp, Loader2, Search, Sparkles, UserRound } from "lucide-react";
-import { useRef, useState } from "react";
+import { useRef, useState, type DragEvent, type KeyboardEvent } from "react";
 import { api } from "../lib/api";
 import type { AppState } from "../lib/types";
 import { useChat } from "../stores/chatStore";
@@ -8,6 +8,18 @@ import { useSearch } from "../stores/searchStore";
 import { ChipInput, Field, Segmented, Toggle } from "./ui";
 
 const DISTANCES = [5, 10, 25, 50, 100];
+const CV_EXTENSIONS = [".pdf", ".docx", ".md", ".txt"];
+const MAX_CV_BYTES = 10 * 1024 * 1024;
+
+function cvFileError(file: File): string | null {
+  const lower = file.name.toLowerCase();
+  if (!CV_EXTENSIONS.some((extension) => lower.endsWith(extension))) {
+    return "Choose a PDF, DOCX, Markdown, or text CV.";
+  }
+  if (!file.size) return "The selected CV file is empty.";
+  if (file.size > MAX_CV_BYTES) return "The CV must be smaller than 10 MB.";
+  return null;
+}
 
 export function Sidebar({ state, onShowSummary }: { state: AppState | undefined; onShowSummary: () => void }) {
   const s = useSearch();
@@ -15,16 +27,57 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
   const qc = useQueryClient();
   const fileRef = useRef<HTMLInputElement>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadedName, setUploadedName] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
   const chat = useChat();
 
   const upload = useMutation({
     mutationFn: (f: File) => api.uploadCV(f),
-    onSuccess: () => {
+    onSuccess: async (_, file) => {
       setUploadError(null);
-      qc.invalidateQueries({ queryKey: ["state"] });
+      setUploadedName(file.name);
+      await qc.invalidateQueries({ queryKey: ["state"] });
     },
     onError: (e: Error) => setUploadError(e.message),
   });
+
+  const submitCV = (file: File) => {
+    setUploadedName(null);
+    if (!state?.llm.ready) {
+      setUploadError("Connect an LLM in Settings before importing a CV.");
+      return;
+    }
+    const error = cvFileError(file);
+    if (error) {
+      setUploadError(error);
+      return;
+    }
+    setUploadError(null);
+    upload.mutate(file);
+  };
+
+  const chooseCV = () => {
+    if (upload.isPending) return;
+    if (!state?.llm.ready) {
+      setUploadError("Connect an LLM in Settings before importing a CV.");
+      return;
+    }
+    if (fileRef.current) fileRef.current.value = "";
+    fileRef.current?.click();
+  };
+
+  const dropCV = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setDragging(false);
+    if (!upload.isPending && event.dataTransfer.files[0]) submitCV(event.dataTransfer.files[0]);
+  };
+
+  const openCVMenu = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      chooseCV();
+    }
+  };
 
   const runSearch = async () => {
     s.set({ loading: true, error: null, progress: s.smart ? "Searching and screening…" : "Searching…" });
@@ -79,17 +132,39 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
           type="file"
           accept=".pdf,.docx,.md,.txt"
           hidden
-          onChange={(e) => e.target.files?.[0] && upload.mutate(e.target.files[0])}
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            if (file) submitCV(file);
+            event.target.value = "";
+          }}
         />
-        <button
-          className="btn-ghost w-full"
-          disabled={upload.isPending || !state?.llm.ready}
-          title={state?.llm.ready ? "" : "Configure an LLM in Settings first"}
-          onClick={() => fileRef.current?.click()}
+        <div
+          role="button"
+          tabIndex={upload.isPending ? -1 : 0}
+          aria-disabled={upload.isPending}
+          className={`flex min-h-24 flex-col items-center justify-center gap-1 rounded-md border border-dashed px-3 py-4 text-center transition-colors ${
+            dragging ? "border-accent bg-accent-bg" : "border-border bg-surface hover:border-accent"
+          } ${upload.isPending ? "cursor-wait opacity-70" : "cursor-pointer"}`}
+          onClick={chooseCV}
+          onKeyDown={openCVMenu}
+          onDragEnter={(event) => {
+            event.preventDefault();
+            if (!upload.isPending) setDragging(true);
+          }}
+          onDragOver={(event) => event.preventDefault()}
+          onDragLeave={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false);
+          }}
+          onDrop={dropCV}
         >
-          {upload.isPending ? <Loader2 size={14} className="animate-spin" /> : <FileUp size={14} />}
-          {upload.isPending ? "Reading CV…" : cv ? "Replace CV" : "Upload CV (PDF, DOCX, MD)"}
-        </button>
+          {upload.isPending ? <Loader2 size={20} className="animate-spin text-accent" /> : <FileUp size={20} className="text-accent" />}
+          <p className="text-[12px] font-medium text-fg">
+            {upload.isPending ? "Building your profile…" : cv ? "Drop a CV to replace it" : "Drop your CV here"}
+          </p>
+          {!upload.isPending && <p className="text-[11px] text-muted">or choose a file from your computer</p>}
+          <p className="text-[10px] text-faint">PDF, DOCX, MD or TXT · up to 10 MB</p>
+        </div>
+        {uploadedName && <p className="text-[11px] text-good">Imported {uploadedName}</p>}
         {uploadError && <p className="text-[12px] text-bad">{uploadError}</p>}
         <Toggle checked={s.useCv && !!cv} onChange={(v) => s.set({ useCv: v })} label="Match against my CV" />
       </section>

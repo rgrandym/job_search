@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from docx import Document
@@ -13,6 +15,8 @@ from src.cv import master_cv_manager as mgr
 from src.cv.docx_exporter import TEMPLATES, export_docx, fmt_date
 from src.cv.models import JDAnalysis, MasterCV, RewrittenBullet, TailoringPlan
 from src.cv.tailor import apply_plan, keyword_coverage, tailor
+from src.services import cv_service
+from src.services.workspace import Workspace
 from tests.conftest import FakeLLM
 
 JD = JDAnalysis(
@@ -66,6 +70,28 @@ def test_from_text_uses_llm(master_cv: MasterCV) -> None:
     llm = FakeLLM({MasterCV: master_cv})
     assert mgr.from_text("raw cv text", llm) == master_cv
     assert llm.calls[0][0] == "raw cv text"
+
+
+def test_import_cv_extracts_off_thread_and_rejects_bad_files(
+    master_cv: MasterCV, settings: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = Workspace(settings)
+    llm = FakeLLM({MasterCV: master_cv})
+    monkeypatch.setattr(ws, "structured", lambda role="worker": llm)
+    raw = ("Alex Example\nSenior engineer\n" + "Built reliable systems.\n" * 8).encode()
+
+    imported = asyncio.run(cv_service.import_cv(ws, "resume.txt", raw, save=False))
+
+    assert imported == master_cv
+    assert llm.calls[0][0].startswith("Alex Example")
+    with pytest.raises(ValueError, match="empty"):
+        asyncio.run(cv_service.import_cv(ws, "resume.txt", b"", save=False))
+    with pytest.raises(ValueError, match="10 MB"):
+        asyncio.run(
+            cv_service.import_cv(
+                ws, "resume.txt", b"x" * (cv_service.MAX_UPLOAD_BYTES + 1), save=False
+            )
+        )
 
 
 # ---------------------------------------------------------------- tailoring

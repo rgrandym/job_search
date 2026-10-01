@@ -256,6 +256,38 @@ def test_api_file_download_is_confined(client: TestClient) -> None:
     assert client.get("/api/files/..%2F.env").status_code == 404
 
 
+def test_api_cv_upload_accepts_multipart_file(
+    client: TestClient,
+    ws: Workspace,
+    master_cv: MasterCV,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.web import app as webapp
+
+    received: dict[str, Any] = {}
+
+    async def fake_import(
+        workspace: Workspace, filename: str, data: bytes, save: bool = True
+    ) -> MasterCV:
+        received.update(workspace=workspace, filename=filename, data=data, save=save)
+        return master_cv
+
+    monkeypatch.setattr(webapp.cv_service, "import_cv", fake_import)
+    response = client.post(
+        "/api/cv/upload",
+        files={"file": ("resume.txt", b"A sufficiently detailed CV", "text/plain")},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["basics"]["name"] == "Alex Example"
+    assert received == {
+        "workspace": ws,
+        "filename": "resume.txt",
+        "data": b"A sufficiently detailed CV",
+        "save": True,
+    }
+
+
 def test_api_codex_login_and_status(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     from src.web import app as webapp
 
