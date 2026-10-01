@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { FileUp, Loader2, Search, Sparkles, UserRound } from "lucide-react";
-import { useRef, useState, type DragEvent } from "react";
+import { useState, type DragEvent } from "react";
 import { api } from "../lib/api";
 import type { AppState, CVAsset } from "../lib/types";
 import { useChat } from "../stores/chatStore";
@@ -25,7 +25,6 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
   const s = useSearch();
   const q = s.query;
   const qc = useQueryClient();
-  const fileRef = useRef<HTMLInputElement>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadedName, setUploadedName] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -82,13 +81,7 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
     upload.mutate(file);
   };
 
-  const chooseCV = () => {
-    if (upload.isPending) return;
-    if (fileRef.current) fileRef.current.value = "";
-    fileRef.current?.click();
-  };
-
-  const dropCV = (event: DragEvent<HTMLDivElement>) => {
+  const dropCV = (event: DragEvent<HTMLLabelElement>) => {
     event.preventDefault();
     setDragging(false);
     if (!upload.isPending && event.dataTransfer.files[0]) submitCV(event.dataTransfer.files[0]);
@@ -161,21 +154,10 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
             </select>
           </Field>
         )}
-        <input
-          ref={fileRef}
-          type="file"
-          accept=".pdf,.docx,.md,.txt"
-          hidden
-          onChange={(event) => {
-            const file = event.target.files?.[0];
-            if (file) submitCV(file);
-            event.target.value = "";
-          }}
-        />
-        <div
+        <label
           className={`flex min-h-24 flex-col items-center justify-center gap-1 rounded-md border border-dashed px-3 py-4 text-center transition-colors ${
-            dragging ? "border-accent bg-accent-bg" : "border-border bg-surface"
-          } ${upload.isPending ? "opacity-70" : ""}`}
+            dragging ? "border-accent bg-accent-bg" : "border-border bg-surface hover:border-accent"
+          } ${upload.isPending ? "cursor-wait opacity-70" : "cursor-pointer"}`}
           onDragEnter={(event) => {
             event.preventDefault();
             if (!upload.isPending) setDragging(true);
@@ -186,17 +168,28 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
           }}
           onDrop={dropCV}
         >
+          <input
+            type="file"
+            accept=".pdf,.docx,.md,.txt"
+            className="sr-only"
+            disabled={upload.isPending}
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) submitCV(file);
+              event.target.value = "";
+            }}
+          />
           {upload.isPending ? <Loader2 size={20} className="animate-spin text-accent" /> : <FileUp size={20} className="text-accent" />}
           <p className="text-[12px] font-medium text-fg">
             {upload.isPending ? "Saving CV…" : "Drop a CV to add it to your library"}
           </p>
           {!upload.isPending && (
-            <button type="button" className="btn-ghost mt-1" onClick={chooseCV}>
-              <FileUp size={14} /> Choose file
-            </button>
+            <span className="btn-ghost mt-1">
+              <FileUp size={14} /> Browse files
+            </span>
           )}
           <p className="text-[10px] text-faint">PDF, DOCX, MD or TXT · up to 10 MB</p>
-        </div>
+        </label>
         {uploadedName && <p className="text-[11px] text-good">Saved {uploadedName}</p>}
         {uploadError && <p className="text-[12px] text-bad">{uploadError}</p>}
         <Toggle checked={s.useCv && hasCv} onChange={(v) => s.set({ useCv: v })} label="Match against my CV" />
