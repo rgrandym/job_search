@@ -1,5 +1,6 @@
 import type {
   AppState,
+  CodexUsage,
   CodexStatus,
   CVAsset,
   Effort,
@@ -51,6 +52,7 @@ export const api = {
     api_key?: string;
   }) => request<LLMView>("/api/llm", json("PUT", body)),
   codexStatus: () => request<CodexStatus>("/api/codex/status"),
+  codexUsage: () => request<CodexUsage>("/api/codex/usage"),
   loginCodex: () => request<{ started: boolean }>("/api/codex/login", { method: "POST" }),
   uploadCV: (file: File) => {
     const form = new FormData();

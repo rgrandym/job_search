@@ -330,6 +330,24 @@ def test_dedupe_prefers_richer_posting() -> None:
 
 
 def test_build_sources_skips_unconfigured(settings: Settings) -> None:
-    sources, skipped = fetcher.build_sources(["reed", "cv_library", "inbox"], settings=settings)
-    assert [s.name for s in sources] == ["inbox"]
+    sources, skipped = fetcher.build_sources(
+        ["reed", "cv_library", "linkedin", "indeed", "inbox"], settings=settings
+    )
+    assert [s.name for s in sources] == ["linkedin", "indeed", "inbox"]
     assert set(skipped) == {"reed", "cv_library"}
+
+
+def test_inbox_source_can_focus_on_one_board(tmp_path: Path, settings: Settings) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    (inbox / "alerts.eml").write_bytes(
+        b"Content-Type: text/plain; charset=utf-8\n\n"
+        b"LinkedIn role\nhttps://www.linkedin.com/jobs/view/123\n"
+        b"Indeed role\nhttps://uk.indeed.com/viewjob?jk=abc123\n"
+    )
+
+    linkedin = InboxSource(inbox_dir=inbox, settings=settings, board="linkedin")
+    indeed = InboxSource(inbox_dir=inbox, settings=settings, board="indeed")
+
+    assert {job.source for job in linkedin.fetch(SearchQuery())} == {"linkedin_alert"}
+    assert {job.source for job in indeed.fetch(SearchQuery())} == {"indeed_alert"}

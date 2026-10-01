@@ -9,6 +9,16 @@ export type ChatItem =
   | { kind: "file"; name: string; url: string }
   | { kind: "error"; text: string };
 
+export interface SessionModelUsage {
+  model: string;
+  input: number;
+  output: number;
+  estimated: boolean;
+  latestContext: number;
+  agents: string[];
+  purposes: string[];
+}
+
 interface ChatState {
   sessionId: string | null;
   items: ChatItem[];
@@ -16,6 +26,7 @@ interface ChatState {
   status: string | null;
   connected: boolean;
   tokens: { input: number; output: number };
+  modelUsage: Record<string, SessionModelUsage>;
   socket: WebSocket | null;
   connect: () => void;
   send: (text: string, filters: SearchQuery, useCv: boolean) => void;
@@ -43,6 +54,31 @@ export const useChat = create<ChatState>()((set, get) => {
         break;
       case "agent_status":
         set({ status: `${ev.agent} is thinking…` });
+        break;
+      case "model_usage":
+        set((s) => {
+          const current = s.modelUsage[ev.model];
+          const input = (current?.input ?? 0) + ev.input_tokens;
+          const output = (current?.output ?? 0) + ev.output_tokens;
+          return {
+            tokens: {
+              input: s.tokens.input + ev.input_tokens,
+              output: s.tokens.output + ev.output_tokens,
+            },
+            modelUsage: {
+              ...s.modelUsage,
+              [ev.model]: {
+                model: ev.model,
+                input,
+                output,
+                estimated: (current?.estimated ?? false) || ev.estimated,
+                latestContext: ev.input_tokens + ev.output_tokens,
+                agents: Array.from(new Set([...(current?.agents ?? []), ev.agent])),
+                purposes: Array.from(new Set([...(current?.purposes ?? []), ev.purpose])),
+              },
+            },
+          };
+        });
         break;
       case "agent_message":
         if (ev.depth === 0 && ev.final) push({ kind: "assistant", text: ev.text });
@@ -85,7 +121,12 @@ export const useChat = create<ChatState>()((set, get) => {
         set((s) => ({
           running: false,
           status: ev.cancelled ? "Stopped" : null,
-          tokens: { input: s.tokens.input + ev.tokens.input, output: s.tokens.output + ev.tokens.output },
+          // Usage events arrive before `done`; max() also recovers safely if a
+          // client missed an event during a reconnect.
+          tokens: {
+            input: Math.max(s.tokens.input, ev.tokens.input),
+            output: Math.max(s.tokens.output, ev.tokens.output),
+          },
         }));
         break;
       case "error":
@@ -104,6 +145,7 @@ export const useChat = create<ChatState>()((set, get) => {
     status: null,
     connected: false,
     tokens: { input: 0, output: 0 },
+    modelUsage: {},
     socket: null,
 
     connect: () => {
@@ -133,7 +175,7 @@ export const useChat = create<ChatState>()((set, get) => {
 
     reset: () => {
       get().socket?.send(JSON.stringify({ type: "reset" }));
-      set({ items: [], tokens: { input: 0, output: 0 }, status: null });
+      set({ items: [], tokens: { input: 0, output: 0 }, modelUsage: {}, status: null });
     },
   };
 });

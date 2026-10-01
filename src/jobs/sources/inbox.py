@@ -124,17 +124,19 @@ def parse_saved_posting(path: Path, llm: LLMProvider | None = None) -> list[JobP
 class InboxSource:
     """Reads alert emails and saved postings from `Settings.inbox_dir`."""
 
-    name = "inbox"
-
     def __init__(
         self,
         inbox_dir: Path | None = None,
         llm: LLMProvider | None = None,
         settings: Settings | None = None,
+        *,
+        board: str | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.inbox_dir = inbox_dir or self.settings.inbox_dir
         self.llm = llm
+        self.board = board
+        self.name = board or "inbox"
         self.errors: dict[str, str] = {}
 
     def fetch(self, query: SearchQuery) -> list[JobPosting]:
@@ -150,6 +152,8 @@ class InboxSource:
                     jobs += parse_saved_posting(path, self.llm)
                 except ValueError as exc:
                     self.errors[path.name] = str(exc)
+        if self.board:
+            jobs = [j for j in jobs if j.source.startswith(f"{self.board}_")]
         jobs = [j for j in jobs if query.is_relevant(j)]
         if query.remote_only:
             jobs = [j for j in jobs if j.work_arrangement == "remote"]

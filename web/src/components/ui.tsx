@@ -19,17 +19,17 @@ export function ChipInput({
     setDraft("");
   };
   return (
-    <div className="input flex min-h-[34px] flex-wrap items-center gap-1 py-1">
+    <div className="input flex min-h-[34px] min-w-0 max-w-full flex-wrap items-center gap-1 py-1">
       {value.map((v) => (
-        <span key={v} className="chip bg-accent-bg text-fg">
-          {v}
-          <button aria-label={`Remove ${v}`} onClick={() => onChange(value.filter((x) => x !== v))}>
+        <span key={v} className="chip min-w-0 max-w-full bg-accent-bg text-fg">
+          <span className="truncate">{v}</span>
+          <button className="shrink-0" aria-label={`Remove ${v}`} onClick={() => onChange(value.filter((x) => x !== v))}>
             <X size={11} />
           </button>
         </span>
       ))}
       <input
-        className="min-w-[80px] flex-1 bg-transparent outline-none placeholder:text-faint"
+        className="min-w-[80px] max-w-full flex-1 bg-transparent outline-none placeholder:text-faint"
         value={draft}
         placeholder={value.length ? "" : placeholder}
         onChange={(e) => setDraft(e.target.value)}
@@ -49,7 +49,7 @@ export function ChipInput({
 
 export function Field({ label, children, hint }: { label: string; children: ReactNode; hint?: string }) {
   return (
-    <label className="block space-y-1">
+    <label className="block min-w-0 space-y-1">
       <span className="label">{label}</span>
       {children}
       {hint && <span className="block text-[11px] text-faint">{hint}</span>}
@@ -57,14 +57,28 @@ export function Field({ label, children, hint }: { label: string; children: Reac
   );
 }
 
-export function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
+export function Toggle({
+  checked,
+  onChange,
+  label,
+  disabled = false,
+  title,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  label: string;
+  disabled?: boolean;
+  title?: string;
+}) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
+      disabled={disabled}
+      title={title}
       onClick={() => onChange(!checked)}
-      className="flex w-full items-center justify-between gap-2 text-[13px] text-muted"
+      className="flex w-full items-center justify-between gap-2 text-[13px] text-muted disabled:cursor-not-allowed disabled:opacity-40"
     >
       <span>{label}</span>
       <span className={cn("relative h-4 w-7 rounded-full transition-colors", checked ? "bg-accent" : "bg-border")}>
@@ -89,7 +103,7 @@ export function Segmented<T extends string>({
   onChange: (v: T[]) => void;
 }) {
   return (
-    <div className="flex gap-1">
+    <div className="flex min-w-0 gap-1">
       {options.map((o) => {
         const on = value.includes(o.value);
         return (
@@ -98,7 +112,7 @@ export function Segmented<T extends string>({
             type="button"
             onClick={() => onChange(on ? value.filter((v) => v !== o.value) : [...value, o.value])}
             className={cn(
-              "flex-1 rounded-md border px-2 py-1 text-[12px] transition-colors",
+              "min-w-0 flex-1 rounded-md border px-2 py-1 text-[12px] transition-colors",
               on ? "border-accent bg-accent-bg text-fg" : "border-border bg-surface text-muted hover:text-fg",
             )}
           >

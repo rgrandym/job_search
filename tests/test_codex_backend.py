@@ -63,6 +63,32 @@ def test_codex_model_catalogue_keeps_listed_models(monkeypatch: pytest.MonkeyPat
     assert backend.list_codex_models() == [payload["models"][0]]
 
 
+def test_codex_usage_view_exposes_limits_without_account_id() -> None:
+    view = backend._usage_view(
+        {
+            "ordinaryUsageAllowed": True,
+            "accountId": "private-account-id",
+            "rateLimits": {
+                "planType": "plus",
+                "primary": {"usedPercent": 7, "windowDurationMins": 300, "resetsAt": 123},
+                "secondary": {
+                    "usedPercent": 20,
+                    "windowDurationMins": 10080,
+                    "resetsAt": 456,
+                },
+                "credits": {"hasCredits": False, "unlimited": False, "balance": "0"},
+            },
+        },
+        {"summary": {"lifetimeTokens": 123456}},
+    )
+
+    assert view["plan_type"] == "plus"
+    assert view["primary"]["remaining_percent"] == 93
+    assert view["secondary"]["remaining_percent"] == 80
+    assert view["lifetime_tokens"] == 123456
+    assert "account_id" not in view
+
+
 def test_strict_schema_preserves_field_names_and_makes_defaults_nullable() -> None:
     class Answer(BaseModel):
         title: str = ""

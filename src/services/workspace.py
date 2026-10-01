@@ -14,7 +14,7 @@ from typing import Any
 from pydantic import SecretStr
 
 from src.core.config import LLMProviderName, Settings, get_settings
-from src.core.llm import ChatModel, LLMConfig, Role, make_chat, make_structured
+from src.core.llm import ChatModel, LLMConfig, Role, UsageSink, make_chat, make_structured
 from src.core.llm_provider import LLMProvider
 from src.cv import master_cv_manager as mgr
 from src.cv.models import MasterCV, TailoredCV
@@ -105,8 +105,13 @@ class Workspace:
             self._codex_checked = now
         return self._codex_ok
 
-    def structured(self, role: Role = "worker") -> LLMProvider:
-        return make_structured(self.llm, role)
+    def structured(
+        self,
+        role: Role = "worker",
+        usage_sink: UsageSink | None = None,
+        purpose: str = "structured output",
+    ) -> LLMProvider:
+        return make_structured(self.llm, role, usage_sink, purpose)
 
     def chat(self, role: Role) -> ChatModel:
         return make_chat(self.llm, role)

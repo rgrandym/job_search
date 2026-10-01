@@ -13,9 +13,11 @@ from __future__ import annotations
 import asyncio
 import glob
 import json
+import select
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 from functools import lru_cache
 from pathlib import Path
@@ -28,13 +30,16 @@ from src.core.llm.types import (
     ChatResponse,
     LLMConfig,
     LLMError,
+    ModelUsage,
     Role,
     ToolCall,
     ToolSpec,
+    UsageSink,
 )
 
 T = TypeVar("T", bound=BaseModel)
 TIMEOUT_S = 600
+USAGE_TIMEOUT_S = 20
 NO_TOOLS_NOTE = (
     "You are running inside an application, not a coding session: do not run shell commands, "
     "read files or browse. Answer directly from the information provided."
@@ -54,6 +59,105 @@ _STRIP = {
     "exclusiveMinimum",
     "exclusiveMaximum",
 }
+
+
+def codex_usage() -> dict[str, Any]:
+    """Read signed-in ChatGPT usage through the supported Codex app-server protocol."""
+    binary = codex_binary()
+    if binary is None:
+        raise LLMError("Codex CLI not found")
+    proc = subprocess.Popen(
+        [binary, "app-server", "--listen", "stdio://"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        bufsize=1,
+    )
+    try:
+        responses = _read_usage_responses(proc)
+        return _usage_view(responses[2], responses[3])
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def _read_usage_responses(proc: subprocess.Popen[str]) -> dict[int, dict[str, Any]]:
+    if proc.stdin is None or proc.stdout is None:
+        raise LLMError("Codex app-server did not open stdio")
+    requests = [
+        {
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {"name": "job-search", "version": "0.1.0"},
+                "capabilities": {"experimentalApi": True},
+            },
+        },
+        {"method": "initialized"},
+        {
+            "id": 2,
+            "method": "account/rateLimits/read",
+            "params": {"excludeResetCreditDetails": True},
+        },
+        {"id": 3, "method": "account/usage/read", "params": None},
+    ]
+    for request in requests:
+        proc.stdin.write(json.dumps(request) + "\n")
+    proc.stdin.flush()
+    responses: dict[int, dict[str, Any]] = {}
+    deadline = time.monotonic() + USAGE_TIMEOUT_S
+    while len(responses) < 3:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise LLMError("Timed out reading Codex account usage")
+        ready, _, _ = select.select([proc.stdout], [], [], remaining)
+        if not ready:
+            raise LLMError("Timed out reading Codex account usage")
+        line = proc.stdout.readline()
+        if not line:
+            raise LLMError("Codex app-server stopped before returning usage")
+        message = json.loads(line)
+        if isinstance(message.get("id"), int):
+            if "error" in message:
+                raise LLMError(f"Codex usage request failed: {message['error']}")
+            responses[message["id"]] = message.get("result") or {}
+    return responses
+
+
+def _usage_view(rate_response: dict[str, Any], usage_response: dict[str, Any]) -> dict[str, Any]:
+    limits = rate_response.get("rateLimits") or {}
+
+    def window(name: str) -> dict[str, Any] | None:
+        value = limits.get(name)
+        if not value:
+            return None
+        used = int(value.get("usedPercent", 0))
+        return {
+            "used_percent": used,
+            "remaining_percent": max(0, 100 - used),
+            "window_minutes": value.get("windowDurationMins"),
+            "resets_at": value.get("resetsAt"),
+        }
+
+    credits = limits.get("credits") or {}
+    summary = usage_response.get("summary") or {}
+    return {
+        "plan_type": limits.get("planType"),
+        "ordinary_usage_allowed": rate_response.get("ordinaryUsageAllowed"),
+        "primary": window("primary"),
+        "secondary": window("secondary"),
+        "credits": {
+            "has_credits": bool(credits.get("hasCredits")),
+            "unlimited": bool(credits.get("unlimited")),
+            "balance": credits.get("balance"),
+        },
+        "lifetime_tokens": summary.get("lifetimeTokens"),
+        "updated_at": int(time.time()),
+    }
 
 
 # ------------------------------------------------------------------ CLI discovery
@@ -273,13 +377,31 @@ async def run_codex_async(cfg: LLMConfig, model: str, prompt: str, schema: dict[
 class CodexStructured:
     """`LLMProvider` backed by `codex exec --output-schema`."""
 
-    def __init__(self, cfg: LLMConfig, role: Role = "worker") -> None:
+    def __init__(
+        self,
+        cfg: LLMConfig,
+        role: Role = "worker",
+        usage_sink: UsageSink | None = None,
+        purpose: str = "structured output",
+    ) -> None:
         self.cfg = cfg
         self.model = cfg.model_for(role)
+        self.usage_sink = usage_sink
+        self.purpose = purpose
 
     def generate(self, *, system: str, prompt: str, output_model: type[T]) -> T:
         full = f"{NO_TOOLS_NOTE}\n\n{system}\n\n{prompt}"
         data = run_codex(self.cfg, self.model, full, output_model.model_json_schema())
+        if self.usage_sink:
+            self.usage_sink(
+                ModelUsage(
+                    model=self.model,
+                    input_tokens=_estimate_tokens(full),
+                    output_tokens=_estimate_tokens(json.dumps(data)),
+                    estimated=True,
+                    purpose=self.purpose,
+                )
+            )
         try:
             return output_model.model_validate(_drop_nulls(data))
         except ValidationError as exc:
@@ -318,7 +440,8 @@ class CodexChat:
             },
             "required": ["message", "tool_calls"],
         }
-        data = await run_codex_async(self.cfg, self.model, _render(system, messages, tools), schema)
+        prompt = _render(system, messages, tools)
+        data = await run_codex_async(self.cfg, self.model, prompt, schema)
         turn = _Turn.model_validate(data)
         calls = []
         for c in turn.tool_calls:
@@ -336,7 +459,15 @@ class CodexChat:
         return ChatResponse(
             message=ChatMessage(role="assistant", content=turn.message, tool_calls=calls),
             stop_reason="tool_use" if calls else "end_turn",
+            input_tokens=_estimate_tokens(prompt),
+            output_tokens=_estimate_tokens(json.dumps(data)),
+            usage_estimated=True,
         )
+
+
+def _estimate_tokens(text: str) -> int:
+    """Conservative display estimate for Codex CLI, which does not expose usage."""
+    return max(1, (len(text) + 3) // 4)
 
 
 def _render(system: str, messages: list[ChatMessage], tools: list[ToolSpec]) -> str:

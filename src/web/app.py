@@ -20,9 +20,9 @@ from src.agents.registry import AGENTS
 from src.core.config import PROJECT_ROOT, LLMProviderName
 from src.core.llm import LLMConfig, LLMError, available_models
 from src.core.llm.catalog import ModelInfo
-from src.core.llm.codex_backend import codex_status, start_login
+from src.core.llm.codex_backend import codex_status, codex_usage, start_login
 from src.cv.models import MasterCV
-from src.jobs.fetcher import ALL_SOURCES, build_sources
+from src.jobs.fetcher import SELECTABLE_SOURCES, build_sources
 from src.jobs.models import SearchQuery
 from src.services import cv_service
 from src.services.search_service import SearchOutcome, SearchRequest, get_summary, run_search
@@ -47,7 +47,7 @@ def _llm_view() -> dict[str, Any]:
 @app.get("/api/state")
 def state() -> dict[str, Any]:
     ws = get_workspace()
-    sources, skipped = build_sources([*ALL_SOURCES, "demo"], settings=ws.settings)
+    sources, skipped = build_sources(list(SELECTABLE_SOURCES), settings=ws.settings)
     agents = [
         {"name": a.name, "description": a.description, "role": a.role} for a in AGENTS.values()
     ] + [JOB_MATCHER_INFO]
@@ -102,6 +102,17 @@ def llm_models(provider: LLMProviderName) -> list[ModelInfo]:
 @app.get("/api/codex/status")
 def get_codex_status() -> dict[str, Any]:
     return codex_status()
+
+
+@app.get("/api/codex/usage")
+async def get_codex_usage() -> dict[str, Any]:
+    """Current ChatGPT-plan Codex limits from the signed-in Codex app-server."""
+    if get_workspace().llm.provider != "codex":
+        raise HTTPException(400, "Codex is not the active provider")
+    try:
+        return await asyncio.to_thread(codex_usage)
+    except (LLMError, OSError, ValueError) as exc:
+        raise HTTPException(502, str(exc)) from exc
 
 
 @app.post("/api/codex/login")

@@ -23,6 +23,23 @@ export interface CodexStatus {
   message: string;
 }
 
+export interface UsageWindow {
+  used_percent: number;
+  remaining_percent: number;
+  window_minutes: number | null;
+  resets_at: number | null;
+}
+
+export interface CodexUsage {
+  plan_type: string | null;
+  ordinary_usage_allowed: boolean | null;
+  primary: UsageWindow | null;
+  secondary: UsageWindow | null;
+  credits: { has_credits: boolean; unlimited: boolean; balance: string | null };
+  lifetime_tokens: number | null;
+  updated_at: number;
+}
+
 export interface SearchQuery {
   titles: string[];
   keywords: string[];
@@ -156,6 +173,16 @@ export interface AppState {
 export type ChatEvent =
   | { type: "session"; session_id: string }
   | { type: "agent_status"; agent: string; depth: number; status: string }
+  | {
+      type: "model_usage";
+      agent: string;
+      depth: number;
+      model: string;
+      input_tokens: number;
+      output_tokens: number;
+      estimated: boolean;
+      purpose: string;
+    }
   | { type: "agent_message"; agent: string; depth: number; text: string; final: boolean }
   | { type: "tool_call"; agent: string; depth: number; id: string; tool: string; args: Record<string, unknown> }
   | { type: "tool_result"; agent: string; depth: number; id: string; tool: string; ok: boolean; preview: string }

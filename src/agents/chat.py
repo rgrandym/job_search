@@ -48,12 +48,15 @@ async def handle_user_message(
     )
     try:
         await run_agent(ORCHESTRATOR, session.messages, ctx)
+        await ctx.flush_usage()
         await emit("done", {"tokens": ctx.tokens})
     except Cancelled:
         del session.messages[start:]
+        await ctx.flush_usage()
         await emit("done", {"tokens": ctx.tokens, "cancelled": True})
     except (LLMError, OSError, ValueError) as exc:
         del session.messages[start:]
+        await ctx.flush_usage()
         await emit("error", {"message": str(exc)})
     finally:
         session.ctx = None

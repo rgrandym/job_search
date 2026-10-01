@@ -17,9 +17,11 @@ from src.core.llm.types import (
     ChatResponse,
     LLMConfig,
     LLMError,
+    ModelUsage,
     Role,
     ToolCall,
     ToolSpec,
+    UsageSink,
 )
 
 if TYPE_CHECKING:
@@ -32,28 +34,35 @@ __all__ = [
     "ChatResponse",
     "LLMConfig",
     "LLMError",
+    "ModelUsage",
     "Role",
     "ToolCall",
     "ToolSpec",
+    "UsageSink",
     "available_models",
     "make_chat",
     "make_structured",
 ]
 
 
-def make_structured(cfg: LLMConfig, role: Role = "worker") -> LLMProvider:
+def make_structured(
+    cfg: LLMConfig,
+    role: Role = "worker",
+    usage_sink: UsageSink | None = None,
+    purpose: str = "structured output",
+) -> LLMProvider:
     """Structured-output provider for `cfg.provider`."""
     if cfg.provider == "codex":
         from src.core.llm.codex_backend import CodexStructured
 
-        return CodexStructured(cfg, role)
+        return CodexStructured(cfg, role, usage_sink, purpose)
     if cfg.provider == "anthropic":
         from src.core.llm.anthropic_backend import AnthropicStructured
 
-        return AnthropicStructured(cfg, role)
+        return AnthropicStructured(cfg, role, usage_sink, purpose)
     from src.core.llm.openai_backend import OpenAICompatStructured
 
-    return OpenAICompatStructured(cfg, role)
+    return OpenAICompatStructured(cfg, role, usage_sink, purpose)
 
 
 def make_chat(cfg: LLMConfig, role: Role) -> ChatModel:

@@ -9,14 +9,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections.abc import Awaitable, Callable
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
 from src.agents.registry import AGENTS, TOOLS, AgentDefinition
-from src.core.llm import ChatMessage, LLMError, ToolCall
+from src.core.llm import ChatMessage, LLMError, ModelUsage, ToolCall, UsageSink
 from src.jobs.models import SearchQuery
 from src.services.workspace import Workspace
 
@@ -36,6 +38,34 @@ class AgentContext:
     use_cv: bool = True
     cancelled: bool = False
     tokens: dict[str, int] = field(default_factory=lambda: {"input": 0, "output": 0})
+    _usage_futures: list[Future[None]] = field(default_factory=list, repr=False)
+    _usage_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def usage_sink(self, agent: str, depth: int = 0) -> UsageSink:
+        """Return a thread-safe sink that streams structured-call usage to the UI."""
+        loop = asyncio.get_running_loop()
+
+        async def emit_usage(usage: ModelUsage) -> None:
+            await self.emit(
+                "model_usage",
+                {"agent": agent, "depth": depth, **usage.model_dump()},
+            )
+
+        def record(usage: ModelUsage) -> None:
+            future: Future[None] = asyncio.run_coroutine_threadsafe(emit_usage(usage), loop)
+            with self._usage_lock:
+                self.tokens["input"] += usage.input_tokens
+                self.tokens["output"] += usage.output_tokens
+                self._usage_futures.append(future)
+
+        return record
+
+    async def flush_usage(self) -> None:
+        """Wait until pending usage events have been emitted."""
+        with self._usage_lock:
+            pending, self._usage_futures = self._usage_futures, []
+        if pending:
+            await asyncio.gather(*(asyncio.wrap_future(item) for item in pending))
 
 
 async def run_agent(
@@ -52,6 +82,18 @@ async def run_agent(
         )
         ctx.tokens["input"] += resp.input_tokens
         ctx.tokens["output"] += resp.output_tokens
+        await ctx.emit(
+            "model_usage",
+            {
+                "agent": defn.name,
+                "depth": depth,
+                "model": ctx.ws.llm.model_for(defn.role),
+                "input_tokens": resp.input_tokens,
+                "output_tokens": resp.output_tokens,
+                "estimated": resp.usage_estimated,
+                "purpose": defn.description,
+            },
+        )
         msg = resp.message
         messages.append(msg)
         if msg.content:
@@ -98,6 +140,7 @@ async def _run_tool(
     except (ValidationError, ValueError, KeyError, LLMError) as exc:
         result, is_error = f"Error: {exc}", True
     text = result if isinstance(result, str) else _to_json(result)
+    await ctx.flush_usage()
     if len(text) > MAX_TOOL_RESULT_CHARS:
         text = text[:MAX_TOOL_RESULT_CHARS] + "\n…[truncated]"
     await ctx.emit(

@@ -72,7 +72,7 @@ export default function App() {
         </Panel>
         <Handle />
         <Panel defaultSize={28} minSize={20} maxSize={45} className="bg-panel">
-          <AgentPanel ready={ready} />
+          <AgentPanel ready={ready} llm={llm} />
         </Panel>
       </PanelGroup>
 

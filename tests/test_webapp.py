@@ -65,7 +65,7 @@ def ws(settings: Settings, master_cv: MasterCV, monkeypatch: pytest.MonkeyPatch)
     w.master_cv = master_cv
     w.active_cv_id = "master"
     llm = fake_llm()
-    monkeypatch.setattr(w, "structured", lambda role="worker": llm)
+    monkeypatch.setattr(w, "structured", lambda role="worker", *_: llm)
     monkeypatch.setattr(w, "llm_ready", lambda: True)
     return w
 
@@ -248,6 +248,9 @@ def client(ws: Workspace, monkeypatch: pytest.MonkeyPatch) -> TestClient:
 def test_api_state_and_search(client: TestClient) -> None:
     st = client.get("/api/state").json()
     assert st["cv"]["name"] == "Alex Example" and "demo" in st["sources"]["available"]
+    assert {"linkedin", "indeed", "reed", "cv_library"} <= (
+        set(st["sources"]["available"]) | set(st["sources"]["skipped"])
+    )
     assert {a["name"] for a in st["agents"]} >= {"orchestrator", "job_matcher", "cv_expert"}
     out = client.post("/api/search", json={"query": {"sources": ["demo"]}, "smart": True}).json()
     assert out["report"]["screened"] and out["report"]["matches"][0]["job"]["id"] == "job-strong"
@@ -275,7 +278,7 @@ def test_api_cv_upload_accepts_multipart_file(
     assert asset["filename"] == "resume.txt"
     assert asset["kind"] == "uploaded" and asset["selected"] is True
     assert asset["parsed"] is False and asset["size"] == len(data)
-    stored = next((ws.settings.data_dir / "cvs").glob(f"{asset['id']}.source.*"))
+    stored = ws.settings.data_dir / "cvs" / "resume.txt"
     assert stored.read_bytes() == data
     assert ws.master_cv is None
     assert readiness_checks == []
@@ -306,6 +309,26 @@ def test_api_codex_login_and_status(client: TestClient, monkeypatch: pytest.Monk
     assert started == [True]
 
 
+def test_api_codex_usage(
+    client: TestClient, ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.web import app as webapp
+
+    ws.llm = ws.llm.model_copy(update={"provider": "codex"})
+    usage = {
+        "plan_type": "plus",
+        "ordinary_usage_allowed": True,
+        "primary": {"used_percent": 10, "remaining_percent": 90},
+        "secondary": None,
+        "credits": {"has_credits": False, "unlimited": False, "balance": "0"},
+        "lifetime_tokens": 1000,
+        "updated_at": 123,
+    }
+    monkeypatch.setattr(webapp, "codex_usage", lambda: usage)
+
+    assert client.get("/api/codex/usage").json() == usage
+
+
 def test_ws_chat_streams_events(client: TestClient, ws: Workspace, monkeypatch: Any) -> None:
     script = {"orchestrator": [ChatMessage(role="assistant", content="Hello!")]}
     monkeypatch.setattr(ws, "chat", lambda role: ScriptedChat(script))
@@ -317,6 +340,7 @@ def test_ws_chat_streams_events(client: TestClient, ws: Workspace, monkeypatch: 
         while not seen or seen[-1]["type"] not in {"done", "error"}:
             seen.append(conn.receive_json())
     assert any(e["type"] == "agent_message" and e["text"] == "Hello!" for e in seen)
+    assert any(e["type"] == "model_usage" and e["agent"] == "orchestrator" for e in seen)
     assert seen[-1]["type"] == "done"
     [session] = chat.SESSIONS.values()
     assert "<ui_context>" in session.messages[0].content and len(session.messages) == 2

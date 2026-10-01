@@ -24,6 +24,7 @@ from src.jobs.models import JobPosting, SearchQuery
 
 SCHEMA_PATH = PROJECT_ROOT / ".agent" / "skills" / "job_search" / "job_schema.json"
 ALL_SOURCES = ("reed", "cv_library", "company", "inbox")
+SELECTABLE_SOURCES = ("linkedin", "indeed", "reed", "cv_library", "company", "demo")
 DEMO_JOBS = PROJECT_ROOT / "data" / "examples" / "jobs.example.json"
 
 PARSE_SYSTEM = """You convert a raw job posting into structured fields. Copy facts only.
@@ -104,6 +105,8 @@ def build_sources(
         "cv_library": lambda: CVLibrarySource(settings=settings),
         "company": lambda: CompanyCareersSource(settings=settings),
         "inbox": lambda: InboxSource(settings=settings, llm=llm),
+        "linkedin": lambda: InboxSource(settings=settings, llm=llm, board="linkedin"),
+        "indeed": lambda: InboxSource(settings=settings, llm=llm, board="indeed"),
         "demo": lambda: JsonFileSource(DEMO_JOBS, name="demo"),
     }
     sources: list[JobSource] = []

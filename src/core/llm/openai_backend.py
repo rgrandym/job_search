@@ -18,9 +18,11 @@ from src.core.llm.types import (
     ChatResponse,
     LLMConfig,
     LLMError,
+    ModelUsage,
     Role,
     ToolCall,
     ToolSpec,
+    UsageSink,
 )
 
 T = TypeVar("T", bound=BaseModel)
@@ -50,10 +52,30 @@ def _check(resp: httpx.Response) -> dict[str, Any]:
 class OpenAICompatStructured:
     """`LLMProvider` via JSON-schema response format, with one repair retry."""
 
-    def __init__(self, cfg: LLMConfig, role: Role = "worker") -> None:
+    def __init__(
+        self,
+        cfg: LLMConfig,
+        role: Role = "worker",
+        usage_sink: UsageSink | None = None,
+        purpose: str = "structured output",
+    ) -> None:
         self.cfg = cfg
         self.model = cfg.model_for(role)
         self.url = f"{BASE_URLS[cfg.provider]}/chat/completions"
+        self.usage_sink = usage_sink
+        self.purpose = purpose
+
+    def _record(self, data: dict[str, Any]) -> None:
+        usage = data.get("usage") or {}
+        if self.usage_sink:
+            self.usage_sink(
+                ModelUsage(
+                    model=self.model,
+                    input_tokens=usage.get("prompt_tokens", 0),
+                    output_tokens=usage.get("completion_tokens", 0),
+                    purpose=self.purpose,
+                )
+            )
 
     def generate(self, *, system: str, prompt: str, output_model: type[T]) -> T:
         schema = output_model.model_json_schema()
@@ -79,7 +101,9 @@ class OpenAICompatStructured:
                 )
                 resp = client.post(self.url, json=body)
             for attempt in range(2):
-                content = _check(resp)["choices"][0]["message"].get("content") or ""
+                data = _check(resp)
+                self._record(data)
+                content = data["choices"][0]["message"].get("content") or ""
                 try:
                     return output_model.model_validate_json(_strip_fences(content))
                 except ValidationError as exc:

@@ -10,6 +10,16 @@ import { ChipInput, Field, Segmented, Toggle } from "./ui";
 const DISTANCES = [5, 10, 25, 50, 100];
 const CV_EXTENSIONS = [".pdf", ".docx", ".md", ".txt"];
 const MAX_CV_BYTES = 10 * 1024 * 1024;
+const SOURCE_LABELS: Record<string, string> = {
+  linkedin: "LinkedIn",
+  indeed: "Indeed",
+  reed: "Reed",
+  cv_library: "CV-Library",
+  company: "Company career sites",
+  demo: "Demo jobs",
+};
+const SOURCE_ORDER = Object.keys(SOURCE_LABELS);
+const INBOX_SOURCES = new Set(["linkedin", "indeed"]);
 
 function cvFileError(file: File): string | null {
   const lower = file.name.toLowerCase();
@@ -110,10 +120,26 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
   const cvFiles = state?.cv_files.available ?? [];
   const selectedCv = cvFiles.find((item) => item.id === state?.cv_files.selected);
   const hasCv = !!selectedCv;
-  const sources = state ? [...state.sources.available, ...Object.keys(state.sources.skipped)] : [];
+  const sources = state
+    ? SOURCE_ORDER.filter(
+        (name) => state.sources.available.includes(name) || Object.hasOwn(state.sources.skipped, name),
+      )
+    : [];
+  const enabledSources = sources.filter((name) => !state?.sources.skipped[name]);
+  const defaultSources = enabledSources.filter((name) => name !== "demo");
+  const sourceIsOn = (name: string) =>
+    q.sources.length ? q.sources.includes(name) : defaultSources.includes(name);
+  const setSource = (name: string, on: boolean) => {
+    const selected = enabledSources.filter(sourceIsOn);
+    if (!on && selected.length === 1) return;
+    const next = on ? [...new Set([...selected, name])] : selected.filter((item) => item !== name);
+    const isDefault =
+      next.length === defaultSources.length && defaultSources.every((item) => next.includes(item));
+    s.setQuery({ sources: isDefault ? [] : next });
+  };
 
   return (
-    <aside className="flex h-full flex-col gap-3 overflow-y-auto p-3 scroll-thin">
+    <aside className="flex h-full min-w-0 flex-col gap-3 overflow-x-hidden overflow-y-auto p-3 scroll-thin">
       {/* Profile */}
       <section className="card space-y-3 p-3">
         <div className="flex items-center justify-between">
@@ -189,6 +215,7 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
             </span>
           )}
           <p className="text-[10px] text-faint">PDF, DOCX, MD or TXT · up to 10 MB</p>
+          <p className="text-[10px] text-faint">Saved automatically in data/cvs · generated CVs from output appear in the library above</p>
         </label>
         {uploadedName && <p className="text-[11px] text-good">Saved {uploadedName}</p>}
         {uploadError && <p className="text-[12px] text-bad">{uploadError}</p>}
@@ -196,15 +223,53 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
       </section>
 
       {/* Filters */}
-      <section className="card space-y-3 p-3">
+      <section className="card min-w-0 space-y-3 p-3">
         <span className="label">Search</span>
+        <Field label="Job boards" hint="Choose where to focus this search.">
+          <div className="space-y-2 rounded-md border border-border bg-surface p-2">
+            {sources.map((name) => {
+              const skipped = state?.sources.skipped[name];
+              return (
+                <div key={name}>
+                  <Toggle
+                    checked={!skipped && sourceIsOn(name)}
+                    disabled={!!skipped}
+                    title={skipped}
+                    onChange={(on) => setSource(name, on)}
+                    label={SOURCE_LABELS[name] ?? name}
+                  />
+                  {INBOX_SOURCES.has(name) && (
+                    <p className="pr-8 text-[10px] text-faint">Alert emails and saved postings</p>
+                  )}
+                  {skipped && <p className="pr-8 text-[10px] text-faint">{skipped}</p>}
+                </div>
+              );
+            })}
+          </div>
+        </Field>
+        <Field label={`Match threshold · ${s.threshold}`}>
+          <input
+            type="range"
+            min={40}
+            max={95}
+            step={5}
+            value={s.threshold}
+            onChange={(e) => s.set({ threshold: Number(e.target.value) })}
+            className="block w-full max-w-full accent-[var(--accent)]"
+          />
+        </Field>
+        <Toggle
+          checked={s.smart}
+          onChange={(v) => s.set({ smart: v })}
+          label="Smart match (AI screening)"
+        />
         <Field label="Job titles">
           <ChipInput value={q.titles} onChange={(titles) => s.setQuery({ titles })} placeholder="e.g. ML Engineer ⏎" />
         </Field>
         <Field label="Keywords">
           <ChipInput value={q.keywords} onChange={(keywords) => s.setQuery({ keywords })} placeholder="e.g. PyTorch ⏎" />
         </Field>
-        <div className="grid grid-cols-[1fr_88px] gap-2">
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,88px)] gap-2">
           <Field label="Location">
             <ChipInput value={q.locations} onChange={(locations) => s.setQuery({ locations })} placeholder="City ⏎" />
           </Field>
@@ -255,50 +320,13 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
             onChange={(work_arrangements) => s.setQuery({ work_arrangements })}
           />
         </Field>
-        <Field label="Sources" hint="None selected = all configured sources">
-          <div className="flex flex-wrap gap-1">
-            {sources.map((name) => {
-              const skipped = state?.sources.skipped[name];
-              const on = q.sources.includes(name);
-              return (
-                <button
-                  key={name}
-                  disabled={!!skipped}
-                  title={skipped ?? ""}
-                  onClick={() =>
-                    s.setQuery({ sources: on ? q.sources.filter((x) => x !== name) : [...q.sources, name] })
-                  }
-                  className={`chip border ${on ? "border-accent text-fg" : "border-transparent"} disabled:opacity-40`}
-                >
-                  {name}
-                </button>
-              );
-            })}
-          </div>
-        </Field>
-        <Field label={`Match threshold · ${s.threshold}`}>
-          <input
-            type="range"
-            min={40}
-            max={95}
-            step={5}
-            value={s.threshold}
-            onChange={(e) => s.set({ threshold: Number(e.target.value) })}
-            className="w-full accent-[var(--accent)]"
-          />
-        </Field>
-        <Toggle
-          checked={s.smart}
-          onChange={(v) => s.set({ smart: v })}
-          label="Smart match (AI screening)"
-        />
-        <div className="grid grid-cols-2 gap-2 pt-1">
-          <button className="btn-primary" disabled={s.loading} onClick={runSearch}>
+        <div className="grid min-w-0 grid-cols-2 gap-2 pt-1">
+          <button className="btn-primary min-w-0 px-2" disabled={s.loading} onClick={runSearch}>
             {s.loading ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
-            Search
+            <span className="truncate">Search</span>
           </button>
-          <button className="btn-ghost" disabled={chat.running || !state?.llm.ready} onClick={askAgent}>
-            <Sparkles size={14} /> Ask agent
+          <button className="btn-ghost min-w-0 px-2" disabled={chat.running || !state?.llm.ready} onClick={askAgent}>
+            <Sparkles size={14} className="shrink-0" /> <span className="truncate">Ask agent</span>
           </button>
         </div>
       </section>

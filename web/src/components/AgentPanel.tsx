@@ -1,9 +1,12 @@
-import { Bot, Download, Loader2, RotateCcw, Send, Square } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { Bot, Download, Loader2, RefreshCw, RotateCcw, Send, Square } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { api } from "../lib/api";
+import type { CodexUsage, LLMView, ModelInfo, UsageWindow } from "../lib/types";
 import { cn } from "../lib/utils";
-import { useChat, type ChatItem } from "../stores/chatStore";
+import { useChat, type ChatItem, type SessionModelUsage } from "../stores/chatStore";
 import { useSearch } from "../stores/searchStore";
 import { Empty } from "./ui";
 
@@ -22,7 +25,125 @@ function Activity({ item }: { item: Extract<ChatItem, { kind: "activity" }> }) {
   );
 }
 
-export function AgentPanel({ ready }: { ready: boolean }) {
+const tokens = (value: number) => {
+  if (value < 1_000) return value.toLocaleString();
+  if (value < 1_000_000) return `${(value / 1_000).toFixed(1)}k`;
+  return `${(value / 1_000_000).toFixed(1)}m`;
+};
+
+function resetLabel(window: UsageWindow | null) {
+  if (!window?.resets_at) return "reset unavailable";
+  return `resets ${new Date(window.resets_at * 1000).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}`;
+}
+
+function Limit({ label, window }: { label: string; window: UsageWindow | null }) {
+  if (!window) return null;
+  return (
+    <div>
+      <div className="flex justify-between text-[11px]">
+        <span className="text-muted">{label}</span>
+        <span>{window.remaining_percent}% left</span>
+      </div>
+      <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-surface">
+        <div className="h-full bg-accent" style={{ width: `${window.remaining_percent}%` }} />
+      </div>
+      <p className="mt-0.5 text-[10px] text-faint">{resetLabel(window)}</p>
+    </div>
+  );
+}
+
+function UsagePanel({ llm }: { llm: LLMView }) {
+  const chat = useChat();
+  const models = useQuery({
+    queryKey: ["models", llm.provider],
+    queryFn: () => api.models(llm.provider),
+    staleTime: 5 * 60_000,
+  });
+  const account = useQuery({
+    queryKey: ["codex-usage"],
+    queryFn: api.codexUsage,
+    enabled: llm.provider === "codex",
+    refetchInterval: 60_000,
+  });
+  const catalog = new Map((models.data ?? []).map((model) => [model.id, model]));
+  const session = Object.values(chat.modelUsage);
+  const cost = session.reduce((total, usage) => {
+    const model = catalog.get(usage.model);
+    if (model?.input_price == null || model.output_price == null) return total;
+    return total + (usage.input * model.input_price + usage.output * model.output_price) / 1_000_000;
+  }, 0);
+  const costKnown = session.length > 0 && session.every((usage) => {
+    const model = catalog.get(usage.model);
+    return model?.input_price != null && model.output_price != null;
+  });
+
+  return (
+    <details open className="border-b border-border bg-panel px-3 py-2 text-[11px]">
+      <summary className="cursor-pointer text-muted">Models, limits & live usage</summary>
+      <div className="mt-2 space-y-3">
+        <div className="space-y-1 rounded-md bg-surface p-2">
+          <ModelPurpose label="Orchestrator" model={llm.orchestrator_model} purpose="Planning, delegation and profile summaries" />
+          <ModelPurpose label="Workers" model={llm.worker_model} purpose="Search, job matching, CV parsing and tailoring" />
+          <p className="text-faint">Provider: {llm.provider} · effort: {llm.effort}</p>
+        </div>
+        {llm.provider === "codex" && (
+          <CodexAccount usage={account.data} loading={account.isPending} error={account.error as Error | null} refresh={() => account.refetch()} />
+        )}
+        <div className="space-y-1.5">
+          <div className="flex justify-between">
+            <span className="font-medium text-fg">This agent session</span>
+            <span>{costKnown ? `$${cost.toFixed(4)}` : llm.provider === "codex" ? "ChatGPT plan" : "cost unavailable"}</span>
+          </div>
+          {session.length === 0 ? (
+            <p className="text-faint">Usage appears after the first model turn.</p>
+          ) : (
+            session.map((usage) => <ModelSession key={usage.model} usage={usage} model={catalog.get(usage.model)} />)
+          )}
+          {llm.provider === "codex" && <p className="text-faint">Codex CLI token counts are estimates; account-limit percentages above are reported by OpenAI.</p>}
+        </div>
+      </div>
+    </details>
+  );
+}
+
+function ModelPurpose({ label, model, purpose }: { label: string; model: string; purpose: string }) {
+  return <p><span className="font-medium text-fg">{label}:</span> {model}<br /><span className="text-faint">{purpose}</span></p>;
+}
+
+function CodexAccount({ usage, loading, error, refresh }: { usage?: CodexUsage; loading: boolean; error: Error | null; refresh: () => void }) {
+  return (
+    <div className="space-y-2 rounded-md border border-border p-2">
+      <div className="flex items-center justify-between">
+        <span className="font-medium text-fg">OpenAI account {usage?.plan_type && `· ${usage.plan_type}`}</span>
+        <button title="Refresh account usage" className="text-faint hover:text-fg" onClick={refresh}><RefreshCw size={11} /></button>
+      </div>
+      {loading && <p className="text-faint">Loading account limits…</p>}
+      {error && <p className="text-bad">Usage unavailable: {error.message}</p>}
+      {usage && <>
+        {usage.ordinary_usage_allowed === false && <p className="text-bad">Ordinary Codex usage is currently unavailable.</p>}
+        <Limit label="5-hour allowance" window={usage.primary} />
+        <Limit label="Weekly allowance" window={usage.secondary} />
+        <p className="text-faint">
+          {usage.lifetime_tokens != null && `${tokens(usage.lifetime_tokens)} lifetime tokens`}
+          {usage.credits.has_credits && ` · ${usage.credits.balance ?? "—"} credits`}
+        </p>
+      </>}
+    </div>
+  );
+}
+
+function ModelSession({ usage, model }: { usage: SessionModelUsage; model?: ModelInfo }) {
+  const remaining = model?.context_length == null ? null : Math.max(0, model.context_length - usage.latestContext);
+  return (
+    <div className="rounded-md bg-surface p-2">
+      <div className="flex justify-between"><span className="font-medium text-fg">{usage.model}</span><span>{usage.estimated && "≈"}{tokens(usage.input + usage.output)} tokens</span></div>
+      <p className="text-faint">{tokens(usage.input)} input · {tokens(usage.output)} output{remaining != null ? ` · ${tokens(remaining)} latest context left` : ""}</p>
+      <p className="text-faint">{usage.agents.join(", ")} · {usage.purposes.join(", ")}</p>
+    </div>
+  );
+}
+
+export function AgentPanel({ ready, llm }: { ready: boolean; llm?: LLMView }) {
   const chat = useChat();
   const { query, useCv } = useSearch();
   const [draft, setDraft] = useState("");
@@ -55,6 +176,8 @@ export function AgentPanel({ ready }: { ready: boolean }) {
           </button>
         </div>
       </header>
+
+      {llm && <UsagePanel llm={llm} />}
 
       <div className="flex-1 space-y-2 overflow-y-auto p-3 scroll-thin">
         {chat.items.length === 0 ? (

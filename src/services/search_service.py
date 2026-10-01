@@ -16,6 +16,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from src.core.llm import UsageSink
 from src.core.llm_provider import LLMError
 from src.jobs.fetcher import JobSource, build_sources, fetch_all
 from src.jobs.matcher import JobMatcher
@@ -51,13 +52,18 @@ class SearchOutcome(BaseModel):
     seconds: float = 0.0
 
 
-async def run_search(ws: Workspace, req: SearchRequest, emit: Emit = _noop) -> SearchOutcome:
+async def run_search(
+    ws: Workspace,
+    req: SearchRequest,
+    emit: Emit = _noop,
+    usage_sink: UsageSink | None = None,
+) -> SearchOutcome:
     """Execute the full pipeline and store the report in the workspace."""
     t0 = time.monotonic()
     settings = ws.settings
     threshold = settings.score_threshold if req.threshold is None else req.threshold
     query = req.query
-    cv = await cv_service.ensure_selected_cv(ws) if req.use_cv else None
+    cv = await cv_service.ensure_selected_cv(ws, usage_sink) if req.use_cv else None
 
     await emit("search_progress", {"stage": "capture", "message": "Collecting postings"})
     sources, skipped = build_sources(query.sources or None, settings=settings)
@@ -82,7 +88,9 @@ async def run_search(ws: Workspace, req: SearchRequest, emit: Emit = _noop) -> S
         outcome.smart_unavailable = "No LLM configured; showing keyword pre-filter scores only"
     if req.smart and ws.llm_ready() and shortlist:
         try:
-            summary, cached = await get_summary(ws, cv, query, req.refresh_summary, emit)
+            summary, cached = await get_summary(
+                ws, cv, query, req.refresh_summary, emit, usage_sink
+            )
             outcome.summary_from_memory = cached
             await emit(
                 "search_progress",
@@ -91,7 +99,7 @@ async def run_search(ws: Workspace, req: SearchRequest, emit: Emit = _noop) -> S
             verdicts, screen_errors = await screen_jobs(
                 summary,
                 shortlist,
-                ws.structured("worker"),
+                ws.structured("worker", usage_sink, "Job matching"),
                 query,
                 settings.screen_batch_size,
                 settings.screen_concurrency,
@@ -112,12 +120,22 @@ async def run_search(ws: Workspace, req: SearchRequest, emit: Emit = _noop) -> S
 
 
 async def get_summary(
-    ws: Workspace, cv: Any, query: SearchQuery | None, refresh: bool, emit: Emit = _noop
+    ws: Workspace,
+    cv: Any,
+    query: SearchQuery | None,
+    refresh: bool,
+    emit: Emit = _noop,
+    usage_sink: UsageSink | None = None,
 ) -> tuple[ProfileSummary, bool]:
     """Orchestrator-built profile summary, reused from memory for the same search type."""
     await emit("search_progress", {"stage": "summary", "message": "Profile summary"})
     return await asyncio.to_thread(
-        summarize_profile, cv, query, ws.structured("orchestrator"), ws.memory, refresh
+        summarize_profile,
+        cv,
+        query,
+        ws.structured("orchestrator", usage_sink, "Profile summary"),
+        ws.memory,
+        refresh,
     )
 
 

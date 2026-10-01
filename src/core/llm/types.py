@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
@@ -9,6 +10,19 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from src.core.config import LLMProviderName, Settings
 
 Role = Literal["orchestrator", "worker"]
+
+
+class ModelUsage(BaseModel):
+    """Token usage reported by a provider, or explicitly marked as estimated."""
+
+    model: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    estimated: bool = False
+    purpose: str = ""
+
+
+UsageSink = Callable[[ModelUsage], None]
 
 
 class LLMError(RuntimeError):
@@ -82,6 +96,7 @@ class ChatResponse(BaseModel):
     stop_reason: str
     input_tokens: int = 0
     output_tokens: int = 0
+    usage_estimated: bool = False
 
 
 class ChatModel(Protocol):

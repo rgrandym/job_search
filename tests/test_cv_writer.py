@@ -77,14 +77,14 @@ def test_upload_stores_without_llm_then_imports_on_demand(
 ) -> None:
     ws = Workspace(settings)
     llm = FakeLLM({MasterCV: master_cv})
-    monkeypatch.setattr(ws, "structured", lambda role="worker": llm)
+    monkeypatch.setattr(ws, "structured", lambda role="worker", *_: llm)
     monkeypatch.setattr(ws, "llm_ready", lambda: True)
     raw = ("Alex Example\nSenior engineer\n" + "Built reliable systems.\n" * 8).encode()
 
     asset = cv_service.store_cv(ws, "resume.txt", raw)
 
     assert asset.filename == "resume.txt"
-    stored = next((settings.data_dir / "cvs").glob(f"{asset.id}.source.*"))
+    stored = settings.data_dir / "cvs" / "resume.txt"
     assert stored.read_bytes() == raw
     assert ws.master_cv is None
     assert llm.calls == []
@@ -104,6 +104,85 @@ def test_upload_stores_without_llm_then_imports_on_demand(
         cv_service.store_cv(ws, "empty.txt", b"")
     with pytest.raises(ValueError, match="10 MB"):
         cv_service.store_cv(ws, "large.txt", b"x" * (cv_service.MAX_UPLOAD_BYTES + 1))
+
+
+def test_upload_deduplicates_content_and_preserves_same_filename(settings: Any) -> None:
+    ws = Workspace(settings)
+    original = b"A sufficiently detailed CV"
+
+    first = cv_service.store_cv(ws, "My CV.txt", original)
+    duplicate = cv_service.store_cv(ws, "Copy of My CV.txt", original)
+
+    assert duplicate.id == first.id
+    assert duplicate.filename == "My CV.txt"
+    assert [path.name for path in (settings.data_dir / "cvs").iterdir()] == ["My CV.txt"]
+
+    replacement = cv_service.store_cv(ws, "My CV.txt", b"An updated and sufficiently detailed CV")
+
+    assert replacement.id != first.id
+    assert replacement.filename == "My CV (2).txt"
+    assert [item.filename for item in cv_service.list_cvs(ws)] == ["My CV (2).txt", "My CV.txt"]
+
+
+def test_upload_hidden_filename_remains_selectable(settings: Any) -> None:
+    ws = Workspace(settings)
+
+    asset = cv_service.store_cv(ws, ".resume.txt", b"A sufficiently detailed hidden CV")
+
+    assert asset.filename == "resume.txt"
+    assert cv_service.list_cvs(ws)[0].id == asset.id
+
+
+def test_uploaded_file_replaces_legacy_master_library_entry(
+    master_cv: MasterCV, settings: Any
+) -> None:
+    ws = Workspace(settings)
+    ws.save_master_cv(master_cv)
+
+    uploaded = cv_service.store_cv(ws, "My CV.txt", b"A sufficiently detailed CV")
+
+    assert [(item.filename, item.selected) for item in cv_service.list_cvs(ws)] == [
+        ("My CV.txt", True)
+    ]
+    assert ws.active_cv_id == uploaded.id
+
+
+def test_legacy_hashed_uploads_migrate_to_real_filename(settings: Any) -> None:
+    ws = Workspace(settings)
+    directory = settings.data_dir / "cvs"
+    directory.mkdir()
+    data = b"A sufficiently detailed CV"
+    real_id = "1" * 24
+    duplicate_id = "2" * 24
+    (directory / f"{real_id}.source.pdf").write_bytes(data)
+    (directory / f"{real_id}.json").write_text(
+        json.dumps(
+            {
+                "id": real_id,
+                "filename": "My Real CV.pdf",
+                "size": len(data),
+                "kind": "uploaded",
+            }
+        )
+    )
+    (directory / f"{duplicate_id}.source.pdf").write_bytes(data)
+    (directory / f"{duplicate_id}.json").write_text(
+        json.dumps(
+            {
+                "id": duplicate_id,
+                "filename": f"{real_id}.source.pdf",
+                "size": len(data),
+                "kind": "uploaded",
+            }
+        )
+    )
+
+    assets = cv_service.list_cvs(ws)
+
+    assert [(item.filename, item.kind, item.selected) for item in assets] == [
+        ("My Real CV.pdf", "uploaded", True)
+    ]
+    assert [path.name for path in directory.iterdir()] == ["My Real CV.pdf"]
 
 
 def test_cv_library_lists_and_selects_generated_files(master_cv: MasterCV, settings: Any) -> None:

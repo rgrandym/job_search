@@ -42,7 +42,7 @@ body { background: var(--bg); color: var(--text-primary); font-size: 13px; }
   .card { @apply rounded-[10px] border border-border bg-panel; }
   .label { @apply text-[11px] font-medium uppercase tracking-wide text-faint; }
   .input {
-    @apply w-full rounded-md border border-border bg-surface px-2.5 py-1.5 text-[13px] text-fg
+    @apply w-full min-w-0 max-w-full rounded-md border border-border bg-surface px-2.5 py-1.5 text-[13px] text-fg
            placeholder:text-faint outline-none focus:border-accent;
   }
   .btn {

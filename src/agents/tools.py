@@ -10,7 +10,7 @@ from src.agents.registry import tool
 from src.agents.runtime import AgentContext
 from src.cv import master_cv_manager as mgr
 from src.cv.models import WorkArrangement
-from src.jobs.fetcher import ALL_SOURCES, build_sources
+from src.jobs.fetcher import SELECTABLE_SOURCES, build_sources
 from src.jobs.models import MatchResult
 from src.services import cv_service
 from src.services.search_service import SearchRequest, get_summary, run_search
@@ -95,7 +95,14 @@ class SummarizeArgs(BaseModel):
 async def summarize_profile_tool(args: SummarizeArgs, ctx: AgentContext) -> dict[str, Any]:
     query = ctx.query.model_copy(update={"titles": args.titles}) if args.titles else ctx.query
     cv = await cv_service.ensure_selected_cv(ctx.ws) if ctx.use_cv else None
-    summary, cached = await get_summary(ctx.ws, cv, query, args.refresh, ctx.emit)
+    summary, cached = await get_summary(
+        ctx.ws,
+        cv,
+        query,
+        args.refresh,
+        ctx.emit,
+        ctx.usage_sink("orchestrator"),
+    )
     await ctx.emit("profile_summary", {"summary": summary.model_dump(), "from_memory": cached})
     return {"from_memory": cached, "summary": summary.model_dump()}
 
@@ -123,7 +130,7 @@ class SearchArgs(BaseModel):
     salary_min: int | None = None
     salary_max: int | None = None
     work_arrangements: list[WorkArrangement] | None = None
-    sources: list[str] | None = Field(None, description=f"Any of {[*ALL_SOURCES, 'demo']}")
+    sources: list[str] | None = Field(None, description=f"Any of {list(SELECTABLE_SOURCES)}")
     smart: bool = Field(True, description="Screen the shortlist with job_matcher")
     threshold: float | None = None
     top: int = Field(10, ge=1, le=50, description="How many top matches to return")
@@ -139,7 +146,12 @@ async def search_jobs(args: SearchArgs, ctx: AgentContext) -> dict[str, Any]:
     overrides = args.model_dump(exclude_none=True, exclude={"smart", "threshold", "top"})
     query = ctx.query.model_copy(update=overrides)
     req = SearchRequest(query=query, use_cv=ctx.use_cv, smart=args.smart, threshold=args.threshold)
-    out = await run_search(ctx.ws, req, ctx.emit)
+    out = await run_search(
+        ctx.ws,
+        req,
+        ctx.emit,
+        ctx.usage_sink("job_search_expert", 1),
+    )
     rep = out.report
     return {
         "fetched": out.fetched,
@@ -187,7 +199,7 @@ async def get_job(args: JobArgs, ctx: AgentContext) -> dict[str, Any]:
 
 @tool("list_sources", "Which job sources are configured, and why others are skipped.", NoArgs)
 async def list_sources(_: NoArgs, ctx: AgentContext) -> dict[str, Any]:
-    sources, skipped = build_sources([*ALL_SOURCES, "demo"], settings=ctx.ws.settings)
+    sources, skipped = build_sources(list(SELECTABLE_SOURCES), settings=ctx.ws.settings)
     return {"available": [s.name for s in sources], "skipped": skipped}
 
 
@@ -196,7 +208,7 @@ async def list_sources(_: NoArgs, ctx: AgentContext) -> dict[str, Any]:
 
 @tool("get_master_cv", "The user's Master CV (JSON), or null if none is loaded.", NoArgs)
 async def get_master_cv(_: NoArgs, ctx: AgentContext) -> Any:
-    cv = await cv_service.ensure_selected_cv(ctx.ws)
+    cv = await cv_service.ensure_selected_cv(ctx.ws, ctx.usage_sink("cv_expert", 1))
     return cv.model_dump(mode="json", exclude_none=True)
 
 
@@ -215,7 +227,9 @@ async def tailor_cv(args: TailorArgs, ctx: AgentContext) -> dict[str, Any]:
     job = ctx.ws.job(args.job_id)
     if job is None:
         raise ValueError(f"job {args.job_id!r} not in the last search")
-    tailored, path = await cv_service.tailor_to_job(ctx.ws, job, args.template)
+    tailored, path = await cv_service.tailor_to_job(
+        ctx.ws, job, args.template, ctx.usage_sink("cv_expert", 1)
+    )
     url = f"/api/files/{path.name}"
     await ctx.emit("file_ready", {"name": path.name, "url": url, "job_id": job.id})
     return {

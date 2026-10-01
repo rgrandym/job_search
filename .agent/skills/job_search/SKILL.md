@@ -47,7 +47,7 @@ senior recruiter against an evidence-based **profile summary** of the candidate.
 | **Reed** | Official API. Search returns snippets; full text is fetched lazily for the shortlist (`ReedSource.enrich`). | `JOBSEARCH_REED_API_KEY` |
 | **CV-Library** | Official API (partner key). Verify the field mapping in `CVLibrarySource._to_posting`. | `JOBSEARCH_CV_LIBRARY_API_KEY` |
 | **Company sites** | Greenhouse / Lever / Ashby public feeds; schema.org JSON-LD for other careers pages (robots.txt checked) | `data/companies.json` |
-| **LinkedIn, Indeed** | Alert emails (`data/inbox/*.eml`) and user-saved postings (`data/inbox/postings/`) | none |
+| **LinkedIn, Indeed** | Individually selectable alert emails (`data/inbox/*.eml`) and user-saved postings (`data/inbox/postings/`) | none |
 | **demo** | `data/examples/jobs.example.json` | none |
 
 **Compliance (non-negotiable):** never scrape LinkedIn or Indeed, log in anywhere, bypass

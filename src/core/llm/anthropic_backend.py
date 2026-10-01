@@ -14,9 +14,11 @@ from src.core.llm.types import (
     ChatResponse,
     LLMConfig,
     LLMError,
+    ModelUsage,
     Role,
     ToolCall,
     ToolSpec,
+    UsageSink,
 )
 
 T = TypeVar("T", bound=BaseModel)
@@ -63,10 +65,18 @@ def _api_key(cfg: LLMConfig) -> str | None:
 class AnthropicStructured:
     """`LLMProvider` implementation: one call, validated Pydantic output."""
 
-    def __init__(self, cfg: LLMConfig, role: Role = "worker") -> None:
+    def __init__(
+        self,
+        cfg: LLMConfig,
+        role: Role = "worker",
+        usage_sink: UsageSink | None = None,
+        purpose: str = "structured output",
+    ) -> None:
         self.cfg = cfg
         self.model = cfg.model_for(role)
         self.client = anthropic.Anthropic(api_key=_api_key(cfg))
+        self.usage_sink = usage_sink
+        self.purpose = purpose
 
     def generate(self, *, system: str, prompt: str, output_model: type[T]) -> T:
         response = self.client.messages.parse(
@@ -84,6 +94,15 @@ class AnthropicStructured:
             raise LLMError("Response truncated at max_tokens; raise JOBSEARCH_LLM_MAX_TOKENS")
         if response.parsed_output is None:
             raise LLMError("Model returned no parseable structured output")
+        if self.usage_sink:
+            self.usage_sink(
+                ModelUsage(
+                    model=self.model,
+                    input_tokens=response.usage.input_tokens,
+                    output_tokens=response.usage.output_tokens,
+                    purpose=self.purpose,
+                )
+            )
         return response.parsed_output
 
 
