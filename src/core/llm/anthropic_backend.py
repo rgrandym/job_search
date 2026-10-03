@@ -24,6 +24,10 @@ from src.core.llm.types import (
 T = TypeVar("T", bound=BaseModel)
 
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
+NO_CREDENTIALS = (
+    "No Anthropic credentials: add an API key in Settings, or choose Claude Code (Pro/Max) "
+    "to use your Claude plan"
+)
 
 
 # Models that accept the server-side `fallbacks: "default"` refusal fallback.
@@ -58,6 +62,22 @@ def has_ambient_credentials() -> bool:
     return any(os.environ.get(v) for v in env) or (Path.home() / ".config" / "anthropic").exists()
 
 
+def subscription_env() -> dict[str, str]:
+    """Process env without Anthropic API credentials, so the Claude Code CLI uses its own
+    claude.ai sign-in instead of silently billing an inherited API key."""
+    import os
+
+    strip = {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "JOBSEARCH_ANTHROPIC_API_KEY"}
+    return {k: v for k, v in os.environ.items() if k not in strip}
+
+
+def _llm_error(exc: Exception) -> Exception:
+    """SDK failures as `LLMError`; the SDK signals missing credentials with a TypeError."""
+    if isinstance(exc, anthropic.APIError):
+        return LLMError(f"Claude API error: {exc}")
+    return LLMError(NO_CREDENTIALS) if "authentication" in str(exc) else exc
+
+
 def _api_key(cfg: LLMConfig) -> str | None:
     return cfg.api_key.get_secret_value() if cfg.api_key else None  # None -> SDK env/profile
 
@@ -68,26 +88,29 @@ class AnthropicStructured:
     def __init__(
         self,
         cfg: LLMConfig,
-        role: Role = "worker",
+        role: Role = "screening",
         usage_sink: UsageSink | None = None,
         purpose: str = "structured output",
     ) -> None:
-        self.cfg = cfg
+        self.cfg = cfg.for_role(role)
         self.model = cfg.model_for(role)
         self.client = anthropic.Anthropic(api_key=_api_key(cfg))
         self.usage_sink = usage_sink
         self.purpose = purpose
 
     def generate(self, *, system: str, prompt: str, output_model: type[T]) -> T:
-        response = self.client.messages.parse(
-            model=self.model,
-            max_tokens=self.cfg.max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": prompt}],
-            output_format=output_model,
-            **_effort(self.cfg, self.model),
-            **_extras(self.cfg, self.model),
-        )
+        try:
+            response = self.client.messages.parse(
+                model=self.model,
+                max_tokens=self.cfg.max_tokens,
+                system=system,
+                messages=[{"role": "user", "content": prompt}],
+                output_format=output_model,
+                **_effort(self.cfg, self.model),
+                **_extras(self.cfg, self.model),
+            )
+        except (anthropic.APIError, TypeError) as exc:
+            raise _llm_error(exc) from exc
         if response.stop_reason == "refusal":
             raise LLMError(f"Model declined the request: {response.stop_details}")
         if response.stop_reason == "max_tokens":
@@ -110,7 +133,7 @@ class AnthropicChat:
     """`ChatModel` implementation with tool use. Thinking blocks are replayed verbatim."""
 
     def __init__(self, cfg: LLMConfig, role: Role) -> None:
-        self.cfg = cfg
+        self.cfg = cfg.for_role(role)
         self.model = cfg.model_for(role)
         self.client = anthropic.AsyncAnthropic(api_key=_api_key(cfg))
 
@@ -121,16 +144,19 @@ class AnthropicChat:
             {"name": t.name, "description": t.description, "input_schema": t.parameters}
             for t in tools
         ]
-        resp = await self.client.messages.create(
-            model=self.model,
-            max_tokens=self.cfg.max_tokens,
-            system=system,
-            messages=cast(list[MessageParam], _to_anthropic(messages)),
-            tools=tool_params,
-            cache_control={"type": "ephemeral"},
-            **_effort(self.cfg, self.model),
-            **_extras(self.cfg, self.model),
-        )
+        try:
+            resp = await self.client.messages.create(
+                model=self.model,
+                max_tokens=self.cfg.max_tokens,
+                system=system,
+                messages=cast(list[MessageParam], _to_anthropic(messages)),
+                tools=tool_params,
+                cache_control={"type": "ephemeral"},
+                **_effort(self.cfg, self.model),
+                **_extras(self.cfg, self.model),
+            )
+        except (anthropic.APIError, TypeError) as exc:
+            raise _llm_error(exc) from exc
         if resp.stop_reason == "refusal":
             raise LLMError(f"Model declined the request: {resp.stop_details}")
         text = "".join(b.text for b in resp.content if b.type == "text")

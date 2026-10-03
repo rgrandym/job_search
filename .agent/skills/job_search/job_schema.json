@@ -130,6 +130,12 @@
           "default": null,
           "title": "Salary Max"
         },
+        "salary_maybe_estimated": {
+          "default": false,
+          "description": "The board may have estimated salary_range; never filter on it",
+          "title": "Salary Maybe Estimated",
+          "type": "boolean"
+        },
         "within_search_area": {
           "default": false,
           "description": "Source applied the location/distance filter server-side",
@@ -160,6 +166,20 @@
           ],
           "default": null,
           "title": "Posted At"
+        },
+        "closes_at": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Last day to apply, when the source states one (e.g. validThrough)",
+          "title": "Closes At"
         },
         "source": {
           "default": "manual",

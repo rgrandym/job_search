@@ -29,7 +29,7 @@ export function ChipInput({
         </span>
       ))}
       <input
-        className="min-w-[80px] max-w-full flex-1 bg-transparent outline-none placeholder:text-faint"
+        className="w-12 min-w-0 max-w-full flex-1 bg-transparent outline-none placeholder:text-faint"
         value={draft}
         placeholder={value.length ? "" : placeholder}
         onChange={(e) => setDraft(e.target.value)}
@@ -57,6 +57,19 @@ export function Field({ label, children, hint }: { label: string; children: Reac
   );
 }
 
+function Knob({ checked }: { checked: boolean }) {
+  return (
+    <span className={cn("relative block h-4 w-7 shrink-0 rounded-full transition-colors", checked ? "bg-accent" : "bg-border")}>
+      <span
+        className={cn(
+          "absolute top-0.5 h-3 w-3 rounded-full bg-white transition-all",
+          checked ? "left-[14px]" : "left-0.5",
+        )}
+      />
+    </span>
+  );
+}
+
 export function Toggle({
   checked,
   onChange,
@@ -80,15 +93,35 @@ export function Toggle({
       onClick={() => onChange(!checked)}
       className="flex w-full items-center justify-between gap-2 text-[13px] text-muted disabled:cursor-not-allowed disabled:opacity-40"
     >
-      <span>{label}</span>
-      <span className={cn("relative h-4 w-7 rounded-full transition-colors", checked ? "bg-accent" : "bg-border")}>
-        <span
-          className={cn(
-            "absolute top-0.5 h-3 w-3 rounded-full bg-white transition-all",
-            checked ? "left-[14px]" : "left-0.5",
-          )}
-        />
-      </span>
+      <span className="min-w-0 text-left">{label}</span>
+      <Knob checked={checked} />
+    </button>
+  );
+}
+
+/** A bare on/off switch; `label` names it for screen readers. */
+export function Switch({
+  checked,
+  onChange,
+  label,
+  disabled = false,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  label: string;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className="mt-0.5 flex shrink-0 disabled:cursor-not-allowed disabled:opacity-40"
+    >
+      <Knob checked={checked} />
     </button>
   );
 }

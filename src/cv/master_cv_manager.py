@@ -57,11 +57,12 @@ def update(cv: MasterCV, patch: dict[str, Any]) -> MasterCV:
 
     Lists are replaced wholesale. To edit one experience, send the full list.
     """
-    merged = _merge(cv.model_dump(mode="json"), patch)
+    merged = merge_patch(cv.model_dump(mode="json"), patch)
     return MasterCV.model_validate(merged)
 
 
-def _merge(base: Any, patch: Any) -> Any:
+def merge_patch(base: Any, patch: Any) -> Any:
+    """RFC 7386 merge: dicts merge recursively, null deletes, anything else (lists) replaces."""
     if not isinstance(patch, dict) or not isinstance(base, dict):
         return patch
     out = dict(base)
@@ -69,7 +70,7 @@ def _merge(base: Any, patch: Any) -> Any:
         if value is None:
             out.pop(key, None)
         else:
-            out[key] = _merge(base.get(key), value)
+            out[key] = merge_patch(base.get(key), value)
     return out
 
 

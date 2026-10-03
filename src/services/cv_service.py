@@ -1,4 +1,4 @@
-"""CV actions: import an uploaded CV, tailor it to a job, export .docx."""
+"""CV actions: import an uploaded CV, tailor it to a job, write a cover letter, export .docx."""
 
 from __future__ import annotations
 
@@ -13,11 +13,16 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict
 
 from src.core.llm import UsageSink
+from src.core.llm_provider import LLMProvider
 from src.cv import master_cv_manager as mgr
-from src.cv.docx_exporter import export_docx
-from src.cv.models import MasterCV, TailoredCV
-from src.cv.tailor import tailor
-from src.jobs.models import JobPosting
+from src.cv.ats import check_docx
+from src.cv.cover_letter import write_letter
+from src.cv.docx_exporter import export_cover_letter, export_docx
+from src.cv.models import CoverLetter, JDAnalysis, MasterCV, TailoredCV
+from src.cv.tailor import analyze_jd, tailor
+from src.jobs.models import JobPosting, JobVerdict
+from src.services import tracker
+from src.services.intent import get_intent
 from src.services.workspace import Workspace
 
 ACCEPTED = {".pdf", ".docx", ".md", ".txt"}
@@ -108,6 +113,19 @@ def list_cvs(ws: Workspace) -> list[CVAsset]:
     return [item.model_copy(update={"selected": item.id == ws.active_cv_id}) for item in assets]
 
 
+def cv_name(ws: Workspace, asset_id: str) -> str | None:
+    """File name of a stored CV, without touching the selection or the library."""
+    if asset_id == "master":
+        return "Master CV"
+    if asset_id.startswith("generated:"):
+        return asset_id.removeprefix("generated:")
+    if _asset_dir(ws).is_dir():
+        for path in _source_files(ws):
+            if _content_id(path.read_bytes()) == asset_id:
+                return path.name
+    return None
+
+
 def select_cv(ws: Workspace, asset_id: str) -> CVAsset:
     """Select a stored CV source; parsing remains lazy."""
     asset = next((item for item in list_cvs(ws) if item.id == asset_id), None)
@@ -116,6 +134,15 @@ def select_cv(ws: Workspace, asset_id: str) -> CVAsset:
     cv = mgr.load(ws.settings.master_cv_path) if asset.id == "master" else _parsed_cv(ws, asset.id)
     _select(ws, asset.id, cv)
     return asset.model_copy(update={"selected": True})
+
+
+def cached_selected_cv(ws: Workspace) -> MasterCV | None:
+    """The selected CV if it is already parsed; never calls the LLM."""
+    if ws.active_cv_id is None:
+        return None
+    if ws.active_cv_id == "master":
+        return ws.master_cv
+    return _parsed_cv(ws, ws.active_cv_id)
 
 
 async def ensure_selected_cv(ws: Workspace, usage_sink: UsageSink | None = None) -> MasterCV:
@@ -196,7 +223,7 @@ async def import_cv(
     cv = await asyncio.to_thread(
         mgr.from_text,
         text,
-        ws.structured("worker", usage_sink, "CV parsing"),
+        ws.structured("quality", usage_sink, "CV parsing"),
     )
     if save:  # summaries are keyed by CV content, so a new CV naturally gets new ones
         save_selected_cv(ws, cv)
@@ -379,17 +406,106 @@ async def tailor_to_job(
     template: str = "classic",
     usage_sink: UsageSink | None = None,
 ) -> tuple[TailoredCV, Path]:
-    """Tailor the Master CV to `job` and export it to .docx."""
+    """Tailor the Master CV to `job` (steered by the job_matcher's verdict on it, then
+    reviewed and revised), export it to .docx and check what an ATS reads from the file."""
     master_cv = await ensure_selected_cv(ws, usage_sink)
-    jd = f"{job.title} at {job.company}\n{job.location or ''}\n\n{job.description}"
-    tailored = await asyncio.to_thread(
-        tailor,
-        master_cv,
-        jd,
-        ws.structured("worker", usage_sink, "CV tailoring"),
-    )
+    llm = ws.structured("quality", usage_sink, "CV tailoring")
+    text = _job_text(job)
+    jd = await _analysis(ws, text, llm)
+    guidance = matcher_guidance(_verdict(ws, job.id))
+    tailored = await asyncio.to_thread(tailor, master_cv, text, llm, guidance, True, jd)
+    path = export_docx(tailored, _new_output_path(ws, _file_stem(master_cv, job)), template)
+    keywords = tailored.matched_keywords + tailored.missing_keywords
+    tailored = tailored.model_copy(update={"ats": check_docx(path, tailored.cv, keywords)})
     ws.tailored[job.id] = tailored
-    name = master_cv.basics.name.replace(" ", "_")
-    company = re.sub(r"[^A-Za-z0-9]+", "_", job.company).strip("_") or "Company"
-    path = export_docx(tailored, ws.output_dir / f"{name}_{company}.docx", template)
+    # The user's rule: a CV tailored for a job means it was applied for (change it if not).
+    tracking = tracker.set_status(ws, job, "applied", cv_file=path.name)
+    tracker.update_result(ws, job.id, tracking)
     return tailored, path
+
+
+async def export_general_cv(
+    ws: Workspace,
+    template: str = "classic",
+    usage_sink: UsageSink | None = None,
+) -> tuple[Path, int]:
+    """Export every role from the selected CV as an editable, general Word CV."""
+    cv = await ensure_selected_cv(ws, usage_sink)
+    name = re.sub(r"[^A-Za-z0-9]+", "_", cv.basics.name).strip("_") or "Candidate"
+    path = export_docx(cv, _new_output_path(ws, f"{name}_General_CV"), template)
+    return path, len(cv.experience)
+
+
+async def write_cover_letter(
+    ws: Workspace,
+    job: JobPosting,
+    template: str = "classic",
+    usage_sink: UsageSink | None = None,
+) -> tuple[CoverLetter, Path]:
+    """A guarded cover letter for `job` (claims cite the Master CV; motivation only from the
+    user's career intent), exported to .docx."""
+    master_cv = await ensure_selected_cv(ws, usage_sink)
+    llm = ws.structured("quality", usage_sink, "Cover letter")
+    text = _job_text(job)
+    jd = await _analysis(ws, text, llm)
+    letter = await asyncio.to_thread(write_letter, master_cv, jd, text, llm, motivation(ws))
+    if not letter.paragraphs:
+        raise ValueError("Every drafted paragraph was rejected by the guards; try again")
+    path = _new_output_path(ws, f"{_file_stem(master_cv, job)}_cover_letter")
+    return letter, export_cover_letter(letter, master_cv, path, template)
+
+
+def motivation(ws: Workspace) -> str:
+    """The user's own reasons, from the career intent (the only source a letter may use)."""
+    intent = get_intent(ws)
+    parts = [intent.direction, *intent.energising_work, *intent.target_areas]
+    return "; ".join(p for p in parts if p)
+
+
+def matcher_guidance(verdict: JobVerdict | None) -> str:
+    """The job_matcher's reading of the job, for the tailoring plan to lead with."""
+    if verdict is None:
+        return ""
+    lines = [f"fit {verdict.fit_score} ({verdict.band}): {verdict.fit_summary}"]
+    for label, items in (
+        ("reasons", verdict.reasons),
+        ("transferable", verdict.transferable),
+        ("gaps", verdict.gaps),
+    ):
+        if items:
+            lines.append(f"{label}: " + "; ".join(items))
+    return "\n".join(lines)
+
+
+def _verdict(ws: Workspace, job_id: str) -> JobVerdict | None:
+    result = ws.result(job_id)  # the current search or a saved job
+    return result.verdict if result is not None else None
+
+
+async def _analysis(ws: Workspace, text: str, llm: LLMProvider) -> JDAnalysis:
+    """The job description's analysis, made once per job text (CV and letter share it)."""
+    key = hashlib.sha256(text.encode()).hexdigest()
+    if key not in ws.jd_analyses:
+        ws.jd_analyses[key] = await asyncio.to_thread(analyze_jd, text, llm)
+    return ws.jd_analyses[key]
+
+
+def _job_text(job: JobPosting) -> str:
+    return f"{job.title} at {job.company}\n{job.location or ''}\n\n{job.description}"
+
+
+def _file_stem(cv: MasterCV, job: JobPosting) -> str:
+    name = re.sub(r"[^A-Za-z0-9]+", "_", cv.basics.name).strip("_") or "Candidate"
+    company = re.sub(r"[^A-Za-z0-9]+", "_", job.company).strip("_") or "Company"
+    role = re.sub(r"[^A-Za-z0-9]+", "_", job.title).strip("_") or "Role"
+    return f"{name}_{company}_{role}"
+
+
+def _new_output_path(ws: Workspace, stem: str) -> Path:
+    """Give every generated document a new path, preserving earlier editable versions."""
+    path = ws.output_dir / f"{stem}.docx"
+    number = 2
+    while path.exists():
+        path = ws.output_dir / f"{stem}_{number}.docx"
+        number += 1
+    return path

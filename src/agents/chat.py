@@ -1,4 +1,4 @@
-"""Chat sessions: the orchestrator's conversation history per browser tab (in memory)."""
+"""Chat sessions: the assistant's conversation history per browser tab (in memory)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 import uuid
 from dataclasses import dataclass, field
 
-from src.agents.definitions import ORCHESTRATOR
+from src.agents.definitions import ASSISTANT
 from src.agents.runtime import AgentContext, Cancelled, Emit, run_agent
 from src.core.llm import ChatMessage, LLMError
 from src.jobs.models import SearchQuery
@@ -32,12 +32,17 @@ def get_session(session_id: str | None) -> ChatSession:
 
 
 async def handle_user_message(
-    ws: Workspace, session: ChatSession, text: str, query: SearchQuery, use_cv: bool, emit: Emit
+    ws: Workspace,
+    session: ChatSession,
+    text: str,
+    query: SearchQuery,
+    use_cv: bool,
+    emit: Emit,
 ) -> None:
-    """Run one orchestrator turn. On failure the turn is rolled back so history stays valid."""
+    """Run one assistant turn. On failure the turn is rolled back so history stays valid."""
     ctx = AgentContext(ws=ws, emit=emit, query=query, use_cv=use_cv)
     session.ctx = ctx
-    ui = {
+    ui: dict[str, object] = {
         "filters": query.model_dump(exclude_defaults=True),
         "match_against_cv": use_cv,
         "cv_selected": ws.active_cv_id is not None,
@@ -47,7 +52,7 @@ async def handle_user_message(
         ChatMessage(role="user", content=f"<ui_context>\n{json.dumps(ui)}\n</ui_context>\n\n{text}")
     )
     try:
-        await run_agent(ORCHESTRATOR, session.messages, ctx)
+        await run_agent(ASSISTANT, session.messages, ctx)
         await ctx.flush_usage()
         await emit("done", {"tokens": ctx.tokens})
     except Cancelled:

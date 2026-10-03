@@ -81,7 +81,7 @@ def cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
-def get_llm_provider(role: Role = "worker", config: LLMConfig | None = None) -> LLMProvider:
+def get_llm_provider(role: Role = "screening", config: LLMConfig | None = None) -> LLMProvider:
     """Structured-output provider for the configured backend. Tests pass fakes instead."""
     from src.core.llm import make_structured
 

@@ -6,7 +6,8 @@
 **Frontend (`web/`):** React 18 · TypeScript (strict) · Vite · Tailwind (CSS tokens in `index.css`) · Zustand · TanStack Query · Lucide · react-resizable-panels
 **Conda env:** `job_search`. Always activate it before running Python commands.
 **LLMs:** Claude (Anthropic SDK), OpenAI or OpenRouter (Chat Completions), selected in the UI. Separate
-orchestrator and subagent models. Default `claude-opus-5-5`. All model access goes through `src/core/llm/`.
+quality model (profile, CV and letters, second opinions, assistant) and screening model (job matching),
+each with its own effort. All model access goes through `src/core/llm/`.
 **Scope (user preference):** keep it simple. No audit or trace infrastructure. Effort goes into
 search quality and profile matching.
 
@@ -28,6 +29,7 @@ python -m src.cv.master_cv_manager validate data/master_cv.json
 python -m src.cv.master_cv_manager export-schema     # after changing src/cv/models.py
 python -m src.jobs.fetcher export-schema             # after changing src/jobs/models.py
 python -m src.jobs.fetcher fetch --keywords "ml engineer" --out data/jobs.json
+python -m src.services.company_discovery [--stale | --all]   # same pass the app runs (Update button)
 python .agent/skills/job_search/scoring_engine.py --cv data/examples/master_cv.example.json \
     --jobs data/examples/jobs.example.json --show-rejected
 python .agent/skills/cv_writer/docx_templates.py --cv <cv.json> --template classic --out output/cv.docx
@@ -45,14 +47,28 @@ cd web && npm run typecheck && npm run lint && npm run build
 src/
   core/        config.py (Settings) · llm_provider.py (protocols, embedder, factory)
     llm/       types.py · anthropic_backend.py · openai_backend.py (OpenAI + OpenRouter)
-  cv/          models.py · master_cv_manager.py · tailor.py · docx_exporter.py
+  cv/          models.py · master_cv_manager.py · tailor.py (guards + review) · cover_letter.py
+               ats.py (docx read-back) · docx_exporter.py
   jobs/        models.py · fetcher.py · matcher.py + scorer.py (pre-filter)
-               profile_memory.py (orchestrator summary + memory) · screener.py (job_matcher)
-    sources/   base.py (HTTP, robots, JSON-LD) · job_boards.py (Reed, CV-Library)
-               companies.py (Greenhouse, Lever, Ashby, careers pages) · inbox.py (LinkedIn/Indeed alerts, saved postings)
+               profile_memory.py (summary, role families, memory) · screener.py (job_matcher)
+    sources/   base.py (HTTP, robots, JSON-LD) · job_boards.py (Reed, CV-Library, Adzuna)
+               feeds.py (Biotechnology Jobs public feed)
+               public_boards.py (LinkedIn public search, Totaljobs, jobs.ac.uk, NHS Jobs)
+               companies.py (Greenhouse, Lever, Ashby, Workable, SmartRecruiters, Recruitee, Personio,
+               Teamtailor, Pinpoint, Workday, iCIMS, BambooHR, careers pages) · directories.py (BioPharmGuy)
+               inbox.py (LinkedIn/Indeed alerts, saved postings)
   tools/       search_tools.py (pure text utils) · docx_tools.py (python-docx primitives)
   services/    workspace.py (state) · search_service.py (THE search pipeline) · cv_service.py
-  agents/      registry.py · runtime.py (loop + delegate) · tools.py · definitions.py · prompts/*.md · chat.py
+               tracker.py (applied / N/A / New / Open + outcome stages, data/job_tracker.json)
+               history.py (+ source and role-family yield) · intent.py (career intent, per CV)
+               calibration.py (read-only outcome review) · enrichment.py (evidence review queue)
+               saved.py (saved jobs, data/saved_jobs.json; status from the tracker)
+               labels.py (your yes/maybe/no per job + snapshot, data/job_labels.json; measures models)
+               learning.py (preferences learned from labels, accepted by the user, applied to profiles)
+               model_compare.py (CLI: score model setups against your labels) · compare_usage.py
+               (its cost per model, plan usage and progress bar)
+               company_discovery.py (directory -> data/companies.json; run by searches + Update button)
+  agents/      the assistant: registry.py · runtime.py (loop) · tools.py · definitions.py · prompts/assistant.md · chat.py
   web/         app.py (REST + /api/ws/chat + serves web/dist)
 web/src/       App.tsx · components/ · stores/ (zustand) · lib/ (api.ts, types.ts mirror the models)
 .agent/skills/ SKILL.md + generated JSON schemas + thin CLI entrypoints
@@ -70,7 +86,7 @@ data/examples/ committed fixtures · data/* and output/ are git-ignored (persona
    Only the agent loop uses free-form chat with tool calling.
 3. **Who decides what.** Hard constraints (location, arrangement, salary floor, certifications,
    seniority gap) are deterministic (`scorer.hard_exclusions`). **Whether a job truly matches is
-   the job_matcher's semantic verdict** against the orchestrator's profile summary, not keyword
+   the job_matcher's semantic verdict** against the profile summary, not keyword
    overlap. The pre-filter score only builds the shortlist. CV tailoring stays "LLM proposes,
    code decides" (`tailor.apply_plan`).
 4. **One path per action.** Search, summary, tailoring and CV import live in `src/services/`.
@@ -81,10 +97,12 @@ data/examples/ committed fixtures · data/* and output/ are git-ignored (persona
 7. **Layering:** `tools` ← `core` ← `cv` ← `jobs` ← `services` ← `agents` ← `web`. `tools/` is pure. No upward imports.
 8. **Matching contract.** Changes to exclusions, pre-filter weights, the summary or matcher prompts,
    or thresholds must update the code, `.agent/skills/job_search/SKILL.md`, the agent configs and the tests **together**.
-9. **Agents.** Add a tool with `@tool(name, description, ArgsModel)` in `src/agents/tools.py` (thin
-   wrapper over a service). Add a subagent with `register_agent(...)` in `definitions.py`, a prompt
-   in `prompts/`, and the `delegate` Literal. Frontend types in `web/src/lib/types.ts` mirror the
-   backend models. Update both together.
+9. **Buttons first, one assistant.** Search, screening, tailoring, cover letters, saving and
+   tracking are buttons calling `src/services/`; no agent sits in those paths. The assistant
+   (`src/agents/`) only updates records the user describes (career intent, preferences, proposed
+   CV facts). Add one of its tools with `@tool(name, description, ArgsModel)` in
+   `src/agents/tools.py` (thin wrapper over a service) and list it in `definitions.py`. Frontend
+   types in `web/src/lib/types.ts` mirror the backend models. Update both together.
 
 ## No-Fabrication Contract (MANDATORY)
 
@@ -96,16 +114,31 @@ A CV is a factual document. Tailoring may rephrase and reorder. It may never inv
   `missing_keywords` to the user.
 - New facts go into the Master CV (after the user confirms them), never straight into a tailored CV.
 
-## Job Source Compliance (MANDATORY)
+## Job Sources (MANDATORY)
 
-- Official APIs (Reed, CV-Library), public ATS feeds (Greenhouse, Lever, Ashby), or JSON-LD
-  from careers pages whose `robots.txt` allows us. All HTTP goes through `sources.base.HttpFetcher`
-  (User-Agent, per-host delay, robots checks).
-- **LinkedIn and Indeed: no scraping, ever.** No logins, no search-page crawling, no headless
-  browsers, no proxy rotation, no CAPTCHA or anti-bot circumvention. Capture them only via
-  the user's alert emails (`data/inbox/*.eml`) and postings the user saved (`data/inbox/postings/`).
+Personal job-search tool: public job pages may be read, within reason.
+
+- Official APIs (Reed, CV-Library), public ATS feeds (Greenhouse, Lever, Ashby, Workable,
+  SmartRecruiters, Recruitee, Personio, Teamtailor RSS, Pinpoint), JSON endpoints that a careers site's own pages call
+  (Workday `/wday/cxs/`, iCIMS job lists, BambooHR `/careers/list`) **when that host's `robots.txt` allows them**, or
+  JSON-LD from careers pages whose `robots.txt` allows us. All HTTP goes through
+  `sources.base.HttpFetcher` (User-Agent, per-host delay, robots checks); careers-site endpoints
+  always pass `check_robots=True`. Open postings one by one only for titles that fit the search,
+  capped by `company_max_details`.
+- Company directories (BioPharmGuy) are read once per discovery run, never per search, and only
+  pages their `robots.txt` allows.
+- **Public job boards** (`sources/public_boards.py`): LinkedIn's logged-out job search, Totaljobs,
+  jobs.ac.uk, NHS Jobs. List result cards per search; open full postings only in `enrich` (the
+  shortlist). LinkedIn ignores robots.txt but is slow (`linkedin_delay_s`), capped
+  (`linkedin_max_pages`, `linkedin_max_details`) and stops at the first refusal (429/999); the
+  others stay within their robots.txt.
+- **Never:** logins or session cookies, CAPTCHA solving, proxy rotation, or other anti-bot
+  circumvention. A board that blocks plain HTTP (Indeed) is reached through the user's alert
+  emails (`data/inbox/*.eml`, Gmail alerts) and saved postings instead; no headless browsers.
 - New source = new adapter in `src/jobs/sources/` implementing `fetch(SearchQuery) -> list[JobPosting]`,
-  registered in `fetcher.build_sources`, tested with `httpx.MockTransport`.
+  registered in `fetcher.build_sources` and listed in `fetcher.SOURCE_CATALOG` (label, category:
+  job_boards / company / alerts; the UI's source panels are built from it), tested with
+  `httpx.MockTransport`.
 - Unverified third-party field mappings must say so in the docstring (see `CVLibrarySource`).
 
 ## Code Style
@@ -134,7 +167,7 @@ A CV is a factual document. Tailoring may rephrase and reorder. It may never inv
 
 ## Protected: Never Modify or Commit
 
-`.env` · `data/master_cv.json`, `data/llm_config.json` (API keys), `data/profile_summaries.json` and anything else under `data/` except `data/examples/` · `output/` · `web/dist/` · generated schemas by hand
+`.env` · `data/master_cv.json`, `data/llm_config.json` (API keys), `data/profile_summaries.json`, `data/job_tracker.json` and anything else under `data/` except `data/examples/` · `output/` · `web/dist/` · generated schemas by hand
 
 Never print or log CV contents, API keys, or email bodies beyond what the task needs.
 
@@ -143,7 +176,7 @@ Never print or log CV contents, API keys, or email bodies beyond what the task n
 | Category | Examples |
 | --- | --- |
 | Run freely | `grep`, `find`, `ls`, `git status`, `git diff`, `git log`, `pytest`, `ruff`, `mypy` |
-| Run and report | `python -m src.jobs.fetcher fetch` (hits live APIs, uses quota) |
+| Run and report | `python -m src.jobs.fetcher fetch` (hits live APIs, uses quota), `python -m src.services.company_discovery` (crawls ~1,000 sites, writes `data/companies.json`; normally run from the app) |
 | Always ask first | `git commit`, `git push`, `pip install`, `conda install`, `npm install <pkg>`, anything calling the paid LLM in a loop |
 | Never run | `rm -rf`, `sudo`, `git push --force`, `git reset --hard` |
 

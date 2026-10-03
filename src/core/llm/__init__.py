@@ -4,7 +4,8 @@
     make_chat(cfg, role)       -> ChatModel    (tool-calling turns for the agent loop)
 
 Providers: "anthropic" (Claude, official SDK), "openai" and "openrouter" (Chat Completions),
-"codex" (the official Codex CLI signed in with a ChatGPT account; see codex_backend).
+"codex" (the official Codex CLI signed in with a ChatGPT account; see codex_backend),
+"claude_code" (the official Claude Code CLI signed in with a Claude plan; see claude_code_backend).
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ __all__ = [
 
 def make_structured(
     cfg: LLMConfig,
-    role: Role = "worker",
+    role: Role = "screening",
     usage_sink: UsageSink | None = None,
     purpose: str = "structured output",
 ) -> LLMProvider:
@@ -56,6 +57,10 @@ def make_structured(
         from src.core.llm.codex_backend import CodexStructured
 
         return CodexStructured(cfg, role, usage_sink, purpose)
+    if cfg.provider == "claude_code":
+        from src.core.llm.claude_code_backend import ClaudeCodeStructured
+
+        return ClaudeCodeStructured(cfg, role, usage_sink, purpose)
     if cfg.provider == "anthropic":
         from src.core.llm.anthropic_backend import AnthropicStructured
 
@@ -71,6 +76,10 @@ def make_chat(cfg: LLMConfig, role: Role) -> ChatModel:
         from src.core.llm.codex_backend import CodexChat
 
         return CodexChat(cfg, role)
+    if cfg.provider == "claude_code":
+        from src.core.llm.claude_code_backend import ClaudeCodeChat
+
+        return ClaudeCodeChat(cfg, role)
     if cfg.provider == "anthropic":
         from src.core.llm.anthropic_backend import AnthropicChat
 

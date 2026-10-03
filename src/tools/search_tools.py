@@ -262,6 +262,61 @@ def title_core(title: str) -> set[str]:
     return {t for t in expand_title(title).split() if t not in _TITLE_STOPWORDS}
 
 
+# Words any department's titles use; overlap on these says nothing about the role family.
+_GENERIC_TITLE_WORDS = {
+    "head", "lead", "leader", "group", "team", "global", "regional", "manager", "management",
+    "director", "officer", "specialist", "associate", "assistant", "coordinator", "project",
+    "projects", "programme", "program", "development", "research", "data", "operations",
+    "business", "uk", "emea", "europe", "remote", "hybrid", "contract", "permanent", "month",
+    "months", "ftc", "full", "part", "time", "with", "for", "in", "on", "at", "to", "a",
+}  # fmt: skip
+_COMPANY_SUFFIXES = re.compile(
+    r"\b(plc|ltd|limited|inc|incorporated|llc|gmbh|ag|sa|bv|co|corp|corporation|group|holdings"
+    r"|therapeutics|pharmaceuticals?|pharma|biotechnolog(?:y|ies)|biosciences?|uk)\b\.?",
+    re.IGNORECASE,
+)
+
+
+def role_words(title: str) -> set[str]:
+    """The role-specific words of a title: `title_core` minus words every department uses."""
+    return title_core(title) - _GENERIC_TITLE_WORDS
+
+
+def shares_role_words(title: str, targets: Iterable[str]) -> bool:
+    """Whether a title shares a role-specific word with any target title ("Scientist, Genetic
+    Assays" vs "Principal Scientist Cell Therapy": yes; "HR Business Lead": no). A target made
+    only of words every department uses ("Business Development Manager") matches a title
+    containing all of its words instead."""
+    targets = list(targets)
+    wanted = set().union(*(role_words(t) for t in targets))
+    if role_words(title) & wanted:
+        return True
+    core = title_core(title)
+    generic = [title_core(t) for t in targets if not role_words(t)]
+    return any(len(g) >= 2 and g <= core for g in generic)
+
+
+def company_key(name: str) -> str:
+    """Company name without legal or sector suffixes, for matching one employer across sources
+    ("Moderna Therapeutics" = "Moderna", "GSK plc" = "GSK")."""
+    aliases = {
+        "ukri": "ukri",
+        "research and innovation": "ukri",
+        "glaxosmithkline": "gsk",
+        "glaxo smith kline": "gsk",
+    }
+    plain = re.sub(r"[^\w\s&]", " ", name.lower())
+    core = " ".join(_COMPANY_SUFFIXES.sub(" ", plain).split())
+    return aliases.get(core, core) or " ".join(name.lower().split())
+
+
+def posting_description(text: str) -> str:
+    """Normalize presentation-only differences without discarding job requirements."""
+    plain = re.sub(r"^\s*(?:job )?description[ \t]*(?::|[-–]|\n)\s*", "", text, flags=re.I)
+    plain = " ".join(plain.split())
+    return plain.casefold()
+
+
 def extract_skills(text: str, extra_vocab: Iterable[str] = ()) -> list[str]:
     """Canonical skills from `TECH_SKILLS` (+ `extra_vocab`) mentioned in free text.
 
@@ -299,3 +354,171 @@ def jaccard(a: set[str], b: set[str]) -> float:
 def extract_numbers(text: str) -> set[str]:
     """Numeric facts in `text`, normalised (e.g. '40%', '$2m', '12')."""
     return {re.sub(r"[\s,]", "", m.group(0)).lower() for m in _NUMBER_RE.finditer(text)}
+
+
+_PARENTHETICAL = re.compile(r"\([^)]*\)")
+_ALTERNATIVE = re.compile(r"\s*/\s*|\s+or\s+", re.IGNORECASE)
+
+
+def _alternatives(text: str) -> list[str]:
+    """ "Cell Therapy / iPSC" -> ["Cell Therapy", "iPSC"]."""
+    return [" ".join(p.split()) for p in _ALTERNATIVE.split(text) if p.strip()]
+
+
+def board_terms(roles: Iterable[str], keywords: Iterable[str] = (), limit: int = 16) -> list[str]:
+    """Short, advertisable job-board search terms from long profile role titles.
+
+    "Principal Scientist, Cell Therapy / iPSC" -> "Principal Scientist Cell Therapy",
+    "Principal Scientist iPSC". Boards match every word (Adzuna) or rank loosely (Reed), so
+    one long composite title finds little or noise. Order: the first variant of every role,
+    then the profile keywords (broad, high-recall terms such as "iPSC"), then the remaining
+    variants round-robin, so a limit never drops a whole role family.
+    """
+    per_role: list[list[str]] = []
+    for role in roles:
+        head, _, focus = _PARENTHETICAL.sub(" ", role).partition(",")
+        variants = [
+            " ".join(f"{h} {f}".split())
+            for h in _alternatives(head)
+            for f in (_alternatives(focus) or [""])
+            if len(h.split()) > 1 or f  # a lone word ("Research") is not a title
+        ]
+        per_role.append(variants or [" ".join(role.split())])
+    ranks = [
+        [r[i] for r in per_role if i < len(r)] for i in range(max(map(len, per_role), default=0))
+    ]
+    firsts, later = (ranks[0] if ranks else []), [v for rank in ranks[1:] for v in rank]
+    ordered = [*firsts, *(" ".join(k.split()) for k in keywords if k.strip()), *later]
+    seen: set[str] = set()
+    terms = []
+    for term in ordered:
+        if term.lower() not in seen and len(term.split()) <= 6:
+            seen.add(term.lower())
+            terms.append(term)
+    return terms[:limit]
+
+
+# ------------------------------------------------------------------ posting excerpts
+
+# Headings that start the requirements part of a posting (often past the first screenful).
+_REQUIREMENT_HEADINGS = re.compile(
+    r"(?:essential|desirable)\s+(?:criteria|requirements|skills|experience)|person specification"
+    r"|requirements|qualifications|about you|who you are|what you(?:'ll| will) (?:bring|need)"
+    r"|you will (?:have|bring|need)|skills (?:and|&) experience|experience (?:and|&) skills"
+    r"|the ideal candidate|we(?:'re| are) looking for|what we(?:'re| are) looking for",
+    re.IGNORECASE,
+)
+
+
+def posting_excerpt(text: str, limit: int) -> str:
+    """At most `limit` characters of a posting, keeping its requirements: when a requirements
+    heading falls past the cut, the excerpt is the opening plus the requirements section,
+    because essential criteria usually come last."""
+    if len(text) <= limit:
+        return text
+    found = [m for m in _REQUIREMENT_HEADINGS.finditer(text) if m.start() > limit // 3]
+    if not found:
+        return text[:limit]
+    start = found[0].start()
+    if start + 200 >= limit:  # most of the requirements already fit after the opening
+        head = limit // 3
+        return f"{text[:head]} […] {text[start : start + limit - head]}"
+    return text[:limit]
+
+
+# ------------------------------------------------------------------ languages & eligibility
+
+LANGUAGE_NAMES = (
+    "english", "german", "french", "spanish", "italian", "dutch", "flemish", "portuguese",
+    "swedish", "danish", "norwegian", "finnish", "icelandic", "polish", "czech", "slovak",
+    "hungarian", "romanian", "bulgarian", "greek", "turkish", "russian", "ukrainian", "arabic",
+    "hebrew", "hindi", "urdu", "bengali", "mandarin", "cantonese", "chinese", "japanese",
+    "korean", "vietnamese", "thai", "indonesian", "malay", "welsh", "irish", "catalan",
+)  # fmt: skip
+# Level cues, strongest first: 4 native · 3 professional · 2 conversational · 1 basic.
+_LEVEL_CUES: tuple[tuple[int, str], ...] = (
+    (4, r"native|mother[ -]tongue|bilingual|first language|\bc2\b"),
+    (3, r"fluen\w*|proficien\w*|business[- ]level|professional|full working|\bc1\b|advanced"),
+    (2, r"conversational|intermediate|working knowledge|good command|\bb[12]\b|good\b"),
+    (1, r"basic|beginner|elementary|\ba[12]\b"),
+)
+# A sentence naming a language is a requirement only with one of these cues: "the German
+# market" or "our French subsidiary" is not.
+_LANGUAGE_CUE = re.compile(
+    r"fluen|proficien|native|mother[ -]tongue|bilingual|speak|spoken|written|language|"
+    r"business[- ]level|working knowledge|conversational|\b[abc][12]\b",
+    re.IGNORECASE,
+)
+_OPTIONAL_CUE = re.compile(
+    r"desirabl|advantage|a plus|bonus|nice to have|preferred|beneficial|ideally|welcome",
+    re.IGNORECASE,
+)
+_SENTENCES = re.compile(r"(?<=[.;!?•\n])\s+|\n+")
+
+
+def _level(text: str, default: int) -> int:
+    low = text.lower()
+    return next((lvl for lvl, cue in _LEVEL_CUES if re.search(cue, low)), default)
+
+
+def parse_language(entry: str) -> tuple[str, int] | None:
+    """("Spanish (C1)" -> ("spanish", 3)). A language listed without a level counts as
+    conversational (2), so a posting needing fluency raises a flag rather than passing."""
+    low = entry.lower()
+    name = next((n for n in LANGUAGE_NAMES if re.search(rf"\b{n}\b", low)), None)
+    return None if name is None else (name, _level(low, 2))
+
+
+def language_requirements(text: str) -> list[tuple[str, int, bool, str]]:
+    """Explicit language requirements of a posting: (language, level 1-4, essential, the
+    sentence that says so). The language a posting is written in is not a requirement; only
+    a stated one is. A requirement without a level cue counts as professional (3)."""
+    out: dict[str, tuple[str, int, bool, str]] = {}
+    for sentence in _SENTENCES.split(text):
+        low = sentence.lower()
+        if not _LANGUAGE_CUE.search(low):
+            continue
+        names = [n for n in LANGUAGE_NAMES if re.search(rf"\b{n}\b", low)]
+        if not names:
+            continue
+        essential = not _OPTIONAL_CUE.search(low)
+        level = _level(low, 3)
+        for name in names:
+            known = out.get(name)
+            if known is None or (essential, level) > (known[2], known[1]):
+                out[name] = (name, level, essential, " ".join(sentence.split())[:200])
+    return list(out.values())
+
+
+ELIGIBILITY_PATTERNS: dict[str, str] = {
+    "right to work": r"right to work|work permit|visa sponsorship|sponsorship is not|"
+    r"(?:unable|not able) to (?:offer|provide) (?:visa )?sponsorship|eligible to work",
+    "security clearance": r"security clearance|\b(?:sc|dv|nv\d?)\b[- ]clear|clearance (?:is )?"
+    r"required|vetting",
+    "driving licence": r"driving licen[cs]e|driver'?s licen[cs]e",
+    "professional registration": r"\b(?:hcpc|gmc|nmc|gphc|ucp|cipd|aca|acca|cima)\b[^.]{0,40}"
+    r"regist|registered (?:with|as)|chartered status",
+}
+
+
+def eligibility_requirements(text: str) -> list[tuple[str, str]]:
+    """Eligibility conditions a posting states: (kind, the sentence that says so). Flagged for
+    the user to confirm, never used to exclude (`ELIGIBILITY_PATTERNS` lists the kinds)."""
+    out: dict[str, str] = {}
+    for sentence in _SENTENCES.split(text):
+        for kind, pattern in ELIGIBILITY_PATTERNS.items():
+            if kind not in out and re.search(pattern, sentence, re.IGNORECASE):
+                out[kind] = " ".join(sentence.split())[:200]
+    return list(out.items())
+
+
+def confirms(confirmed: Iterable[str], kind: str) -> bool:
+    """Whether a confirmed eligibility statement covers `kind` ("Right to work in the UK"
+    covers "right to work"; "SC cleared" covers "security clearance")."""
+    keys = {
+        "right to work": ("right to work", "visa", "citizen", "settled status", "work permit"),
+        "security clearance": ("clearance", "cleared", "vetting", "vetted"),
+        "driving licence": ("driving", "driver"),
+        "professional registration": ("regist", "chartered", "hcpc", "gmc", "nmc", "gphc"),
+    }[kind]
+    return any(k in c.lower() for c in confirmed for k in keys)

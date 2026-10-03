@@ -45,6 +45,13 @@ CLAUDE: list[tuple[str, str, int, float, float, str]] = [
 ]
 
 
+def claude_code_models() -> list[ModelInfo]:
+    """Same Claude family, without API prices: usage comes from the Claude plan's limits."""
+    return [
+        m.model_copy(update={"input_price": None, "output_price": None}) for m in claude_models()
+    ]
+
+
 def _group(model_id: str) -> str:
     for family in ("opus", "sonnet", "fable", "haiku"):
         if family in model_id:
@@ -164,6 +171,8 @@ def models_for(cfg: LLMConfig) -> list[ModelInfo]:
     key = cfg.api_key.get_secret_value() if cfg.api_key else None
     if cfg.provider == "anthropic":
         return claude_models()
+    if cfg.provider == "claude_code":
+        return claude_code_models()
     if cfg.provider == "openai":
         return openai_models(key)
     if cfg.provider == "openrouter":

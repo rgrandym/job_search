@@ -9,7 +9,11 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from src.core.config import LLMProviderName, Settings
 
-Role = Literal["orchestrator", "worker"]
+# quality: rare, accuracy-critical work (profile summary, CV parsing and tailoring, cover
+# letters, second opinions, the assistant). screening: the job_matcher's first pass, hundreds
+# of calls per search.
+Role = Literal["quality", "screening"]
+Effort = Literal["low", "medium", "high", "xhigh", "max"]
 
 
 class ModelUsage(BaseModel):
@@ -33,15 +37,26 @@ class LLMConfig(BaseModel):
     """Which provider/models to use. Built from Settings, editable from the web UI."""
 
     provider: LLMProviderName
-    orchestrator_model: str
-    worker_model: str
-    effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
+    quality_model: str
+    screening_model: str
+    quality_effort: Effort = "medium"
+    screening_effort: Effort = "medium"
     max_tokens: int = 16000
     refusal_fallback: bool = True
     api_key: SecretStr | None = None
+    effort: Effort = Field(
+        "medium", exclude=True, description="Set by `for_role`: the effort this client uses"
+    )
 
     def model_for(self, role: Role) -> str:
-        return self.orchestrator_model if role == "orchestrator" else self.worker_model
+        return self.quality_model if role == "quality" else self.screening_model
+
+    def effort_for(self, role: Role) -> Effort:
+        return self.quality_effort if role == "quality" else self.screening_effort
+
+    def for_role(self, role: Role) -> LLMConfig:
+        """The config one client uses: its role's effort in `effort`."""
+        return self.model_copy(update={"effort": self.effort_for(role)})
 
     @classmethod
     def from_settings(cls, s: Settings, provider: LLMProviderName | None = None) -> LLMConfig:
@@ -51,12 +66,16 @@ class LLMConfig(BaseModel):
             "openai": s.openai_api_key,
             "openrouter": s.openrouter_api_key,
             "codex": None,  # the Codex CLI signs in with the ChatGPT account itself
+            "claude_code": None,  # the Claude Code CLI signs in with the Claude plan itself
         }[provider]
+        if key is not None and not key.get_secret_value().strip():
+            key = None  # `ANTHROPIC_API_KEY=` left empty in .env is not a credential
         return cls(
             provider=provider,
-            orchestrator_model=s.orchestrator_model,
-            worker_model=s.worker_model,
-            effort=s.llm_effort,
+            quality_model=s.quality_model,
+            screening_model=s.screening_model,
+            quality_effort=s.quality_effort,
+            screening_effort=s.screening_effort,
             max_tokens=s.llm_max_tokens,
             refusal_fallback=s.llm_refusal_fallback,
             api_key=key,

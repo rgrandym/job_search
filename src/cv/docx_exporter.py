@@ -6,6 +6,7 @@ no headers/footers holding content, native bullet lists, standard section names.
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 from typing import Literal
 
@@ -15,7 +16,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt
 from pydantic import BaseModel, Field
 
-from src.cv.models import MasterCV, TailoredCV
+from src.cv.models import CoverLetter, MasterCV, TailoredCV
 from src.tools import docx_tools as dt
 
 Section = Literal[
@@ -205,3 +206,25 @@ def _languages(doc: DocxDocument, cv: MasterCV, tpl: DocxTemplate) -> None:
     if cv.languages:
         _heading(doc, "Languages", tpl)
         doc.add_paragraph(", ".join(cv.languages))
+
+
+def export_cover_letter(
+    letter: CoverLetter, cv: MasterCV, path: Path, template: str = "classic"
+) -> Path:
+    """Write a guarded cover letter to `path` (.docx), styled like the CV template."""
+    if template not in TEMPLATES:
+        raise ValueError(f"Unknown template {template!r}. Choose from {sorted(TEMPLATES)}")
+    tpl = TEMPLATES[template]
+    doc = Document()
+    dt.set_margins(doc, max(tpl.margins_in, 0.9))
+    dt.set_base_font(doc, tpl.font, tpl.body_pt + 0.5)
+    _header(doc, cv, tpl)
+    dt.add_text(doc, date.today().strftime("%d %B %Y"), space_after_pt=12)
+    doc.add_paragraph(letter.greeting)
+    for para in letter.paragraphs:
+        doc.add_paragraph(para)
+    doc.add_paragraph(letter.closing)
+    doc.add_paragraph(cv.basics.name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(str(path))
+    return path

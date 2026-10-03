@@ -1,7 +1,8 @@
-"""LinkedIn & Indeed (and any board) via the user's own inbox, not scraping.
+"""LinkedIn & Indeed (and any board) via the user's own inbox.
 
-LinkedIn and Indeed offer no public job-search API, and their terms prohibit automated
-scraping. This module captures their postings through channels the user controls:
+Indeed blocks plain HTTP clients, so its alerts are its only path into the app; LinkedIn also
+has a public search adapter (`public_boards.LinkedInSource`), and its alerts merge with it
+(same `linkedin:<id>` ids). This module captures postings through channels the user controls:
 
 1. Job-alert emails  `data/inbox/*.eml`
    Alerts from LinkedIn, Indeed, Reed, CV-Library, … saved as .eml (or pulled by an agent
@@ -17,7 +18,9 @@ from __future__ import annotations
 
 import email
 import re
+from datetime import date
 from email import policy
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 from src.core.config import Settings, get_settings
@@ -40,11 +43,28 @@ JOB_LINK_PATTERNS: dict[str, re.Pattern[str]] = {
 }
 CANONICAL_URL = {
     "linkedin": "https://www.linkedin.com/jobs/view/{id}",
-    "indeed": "https://www.indeed.com/viewjob?jk={id}",
+    "indeed": "https://uk.indeed.com/viewjob?jk={id}",
     "reed": "https://www.reed.co.uk/jobs/{id}",
     "cv_library": "https://www.cv-library.co.uk/job/{id}",
 }
 _ANCHOR_RE = re.compile(r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", re.I | re.S)
+# Bump when parsing changes so cached alert results are rebuilt (see gmail_alerts).
+ALERT_PARSER_VERSION = 3  # 3: posted_at from the email date
+# Indeed alerts wrap every job link in a click-tracking redirect (engage./cts.indeed.com),
+# so the job id is not in the URL. Jobs are recognised by layout instead: a title link
+# followed by "Company [rating] - Location" (or company and location on separate lines).
+_INDEED_HOST = re.compile(r"^https?://(?:[\w-]+\.)*indeed\.[a-z.]+/", re.I)
+_NOT_A_TITLE = {
+    "unsubscribe", "privacy policy", "terms", "help centre", "help center", "manage job alerts",
+    "unsubscribe from this job alert", "view job", "learn more", "edit profile", "edit",
+    "pause these emails", "yes", "no", "find jobs", "sign in", "this is a bad match",
+}  # fmt: skip
+_SALARY_LINE = re.compile(r"£|\$|€|\ba (?:year|month|week|day)\b|\ban hour\b", re.I)
+_NOISE_LINE = re.compile(
+    r"^(?:easily apply|just posted|salary|new|\d+\+? days? ago|urgently hiring)$", re.I
+)
+_RATING = re.compile(r"\s+\d\.\d$")
+_INVISIBLE = re.compile(r"[\u200b-\u200f\u2000-\u200a\u2060\ufeff]")
 
 
 def parse_alert_email(raw: bytes) -> list[JobPosting]:
@@ -59,15 +79,22 @@ def parse_alert_email(raw: bytes) -> list[JobPosting]:
         anchors = list(_ANCHOR_RE.finditer(content))
         for i, m in enumerate(anchors):
             href, inner = m.group(1).replace("&amp;", "&"), html_to_text(m.group(2))
-            board, job_id = _match_board(href)
-            if not board or not inner or len(inner) < 4 or f"{board}:{job_id}" in jobs:
+            if len(inner) < 4 or inner.lower().startswith("jobs similar to"):
                 continue
             # Alert layouts put "Company · Location" in the text right after the title link.
             nxt = anchors[i + 1].start() if i + 1 < len(anchors) else m.end() + 400
             tail = [
-                ln.strip() for ln in html_to_text(content[m.end() : nxt]).splitlines() if ln.strip()
+                ln.strip()
+                for ln in html_to_text(content[m.end() : nxt]).splitlines()
+                if ln.strip() and not ln.strip().startswith("<")
             ]
-            jobs[f"{board}:{job_id}"] = _partial(board, job_id, inner, tail)
+            board, job_id = _match_board(href)
+            if board and f"{board}:{job_id}" not in jobs:
+                jobs[f"{board}:{job_id}"] = _partial(board, job_id, inner, tail)
+            elif not board and _INDEED_HOST.match(href):
+                job = _indeed_tracked(href, inner, tail)
+                if job is not None:
+                    jobs.setdefault(job.id, job)
     else:
         for board, pattern in JOB_LINK_PATTERNS.items():
             for m in pattern.finditer(content):
@@ -75,7 +102,16 @@ def parse_alert_email(raw: bytes) -> list[JobPosting]:
                 if key not in jobs:
                     line = content[: m.start()].rstrip().splitlines()[-1:] or ["Untitled"]
                     jobs[key] = _partial(board, m.group(1), line[0].strip(), [])
-    return list(jobs.values())
+    # An alert lists jobs posted no later than it was sent: the closest date we have.
+    sent = _sent_on(msg.get("Date"))
+    return [j.model_copy(update={"posted_at": j.posted_at or sent}) for j in jobs.values()]
+
+
+def _sent_on(header: object) -> date | None:
+    try:
+        return parsedate_to_datetime(str(header)).date() if header else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _match_board(href: str) -> tuple[str | None, str]:
@@ -98,6 +134,41 @@ def _partial(board: str, job_id: str, title: str, tail: list[str]) -> JobPosting
         work_arrangement=infer_arrangement(title, location),
         url=CANONICAL_URL[board].format(id=job_id),
         source=f"{board}_alert",
+    )
+
+
+def _indeed_tracked(href: str, title: str, tail: list[str]) -> JobPosting | None:
+    """A job from an Indeed alert whose link is a tracking redirect (no job id in the URL)."""
+    title = " ".join(_INVISIBLE.sub(" ", title).split())
+    if title.lower() in _NOT_A_TITLE or not tail or len(title) > 150:
+        return None
+    first = tail[0].replace("\xa0", " ")
+    if " - " in first:  # "Company  4.1  - Location"
+        company, location = (x.strip() for x in first.rsplit(" - ", 1))
+        rest = tail[1:]
+    elif len(tail) > 1 and not _SALARY_LINE.search(tail[1]):  # "Company" / "Location"
+        company, location, rest = first.strip(), tail[1].strip(), tail[2:]
+    else:
+        return None
+    company = _RATING.sub("", " ".join(company.split()))
+    # Real entries are short lines; footers and banners are not.
+    if not company or company.lower() in _NOT_A_TITLE or len(company) > 80 or len(location) > 60:
+        return None
+    rest = [r for r in rest if not _NOISE_LINE.match(r)]
+    salary = next((r for r in rest[:2] if _SALARY_LINE.search(r) and len(r) < 60), None)
+    snippet = next((r for r in rest if len(r) > 60), "")
+    return JobPosting(
+        id=f"indeed:{stable_id(title.lower(), company.lower(), location.lower())}",
+        title=title,
+        company=company[:120],
+        location=location or None,
+        work_arrangement=infer_arrangement(title, location, snippet),
+        description=snippet,
+        # Indeed estimates missing salaries, so keep it as text only: never filter on it.
+        salary_range=salary,
+        salary_maybe_estimated=salary is not None,
+        url=href,
+        source="indeed_alert",
     )
 
 
@@ -154,7 +225,7 @@ class InboxSource:
                     self.errors[path.name] = str(exc)
         if self.board:
             jobs = [j for j in jobs if j.source.startswith(f"{self.board}_")]
-        jobs = [j for j in jobs if query.is_relevant(j)]
+        jobs = [j for j in jobs if query.is_relevant(j) and query.is_recent(j)]
         if query.remote_only:
             jobs = [j for j in jobs if j.work_arrangement == "remote"]
         return jobs[: query.limit]

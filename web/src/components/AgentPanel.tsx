@@ -1,20 +1,14 @@
-import { useQuery } from "@tanstack/react-query";
-import { Bot, Download, Loader2, RefreshCw, RotateCcw, Send, Square } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Bot, Loader2, RefreshCw, RotateCcw, Send, Square } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api } from "../lib/api";
-import type { CodexUsage, LLMView, ModelInfo, UsageWindow } from "../lib/types";
+import type { ClaudeCodeUsage, ClaudeLimitWindow, CodexUsage, LLMView, ModelInfo, UsageWindow } from "../lib/types";
 import { cn } from "../lib/utils";
 import { useChat, type ChatItem, type SessionModelUsage } from "../stores/chatStore";
 import { useSearch } from "../stores/searchStore";
 import { Empty } from "./ui";
-
-const SUGGESTIONS = [
-  "Find roles that truly match my CV in my preferred locations",
-  "Which of these matches should I apply to first, and why?",
-  "Tailor my CV to the best match",
-];
 
 function Activity({ item }: { item: Extract<ChatItem, { kind: "activity" }> }) {
   return (
@@ -31,23 +25,94 @@ const tokens = (value: number) => {
   return `${(value / 1_000_000).toFixed(1)}m`;
 };
 
-function resetLabel(window: UsageWindow | null) {
-  if (!window?.resets_at) return "reset unavailable";
-  return `resets ${new Date(window.resets_at * 1000).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}`;
+function resetLabel(resetsAt: number | null) {
+  if (!resetsAt) return "reset unavailable";
+  return `resets ${new Date(resetsAt * 1000).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}`;
+}
+
+/** One allowance bar, shared by the OpenAI and Claude plans so both read the same way. */
+function UsageBar({ label, remaining, value, tone = "text-fg", footer }: {
+  label: string;
+  remaining: number | null;
+  value: string;
+  tone?: string;
+  footer: string;
+}) {
+  return (
+    <div>
+      <div className="flex justify-between text-[11px]">
+        <span className="text-muted">{label}</span>
+        <span className={tone}>{value}</span>
+      </div>
+      <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-surface">
+        {/* Unknown share: a neutral full track, so it never reads as an empty allowance. */}
+        <div className={cn("h-full", remaining == null ? "bg-border" : "bg-accent")} style={{ width: `${remaining ?? 100}%` }} />
+      </div>
+      <p className="mt-0.5 text-[10px] text-faint">{footer}</p>
+    </div>
+  );
 }
 
 function Limit({ label, window }: { label: string; window: UsageWindow | null }) {
   if (!window) return null;
   return (
-    <div>
-      <div className="flex justify-between text-[11px]">
-        <span className="text-muted">{label}</span>
-        <span>{window.remaining_percent}% left</span>
+    <UsageBar
+      label={label}
+      remaining={window.remaining_percent}
+      value={`${window.remaining_percent}% left`}
+      footer={resetLabel(window.resets_at)}
+    />
+  );
+}
+
+const WINDOW_LABEL: Record<string, string> = {
+  five_hour: "5-hour allowance",
+  seven_day: "Weekly allowance",
+  seven_day_opus: "Weekly Opus allowance",
+  seven_day_sonnet: "Weekly Sonnet allowance",
+};
+
+const CLAUDE_STATUS: Record<string, { text: string; tone: string }> = {
+  allowed: { text: "within limit", tone: "text-good" },
+  allowed_warning: { text: "nearing limit", tone: "text-warn" },
+  rejected: { text: "limit reached", tone: "text-bad" },
+};
+
+function ClaudeLimit({ window }: { window: ClaudeLimitWindow }) {
+  const status = CLAUDE_STATUS[window.status ?? ""] ?? { text: window.status ?? "unknown", tone: "text-muted" };
+  // Anthropic only reports utilisation as a window nears its limit; a rejected window is spent.
+  const used = window.utilization != null ? Math.round(window.utilization * 100) : window.status === "rejected" ? 100 : null;
+  const remaining = used == null ? null : Math.max(0, 100 - used);
+  return (
+    <UsageBar
+      label={WINDOW_LABEL[window.window] ?? window.window}
+      remaining={remaining}
+      value={remaining != null ? `${remaining}% left` : status.text}
+      tone={remaining != null && window.status === "allowed" ? "text-fg" : status.tone}
+      footer={`${resetLabel(window.resets_at)}${remaining == null ? " · exact % shown as it nears the limit" : ""}${window.using_overage ? " · using extra usage" : ""}`}
+    />
+  );
+}
+
+function ClaudeAccount({ usage, loading, error, refresh }: { usage?: ClaudeCodeUsage; loading: boolean; error: Error | null; refresh: () => void }) {
+  return (
+    <div className="space-y-2 rounded-md border border-border p-2">
+      <div className="flex items-center justify-between">
+        <span className="font-medium text-fg">Claude plan</span>
+        <button title="Refresh plan usage" className="text-faint hover:text-fg" onClick={refresh}><RefreshCw size={11} /></button>
       </div>
-      <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-surface">
-        <div className="h-full bg-accent" style={{ width: `${window.remaining_percent}%` }} />
-      </div>
-      <p className="mt-0.5 text-[10px] text-faint">{resetLabel(window)}</p>
+      {loading && <p className="text-faint">Loading plan limits…</p>}
+      {error && <p className="text-bad">Usage unavailable: {error.message}</p>}
+      {usage && usage.windows.length === 0 && (
+        <p className="text-faint">Limits appear after the first Claude Code call in this app (a search or an agent turn).</p>
+      )}
+      {usage?.windows.map((window) => <ClaudeLimit key={window.window} window={window} />)}
+      {usage && usage.windows.length > 0 && (
+        <p className="text-faint">
+          Reported by Anthropic on each call; the remaining percentage is only shared as a window nears its limit. Usage is
+          shared with Claude Code in VS Code.
+        </p>
+      )}
     </div>
   );
 }
@@ -65,6 +130,12 @@ function UsagePanel({ llm }: { llm: LLMView }) {
     enabled: llm.provider === "codex",
     refetchInterval: 60_000,
   });
+  const claude = useQuery({
+    queryKey: ["claude-code-usage"],
+    queryFn: api.claudeCodeUsage,
+    enabled: llm.provider === "claude_code",
+    refetchInterval: 15_000,
+  });
   const catalog = new Map((models.data ?? []).map((model) => [model.id, model]));
   const session = Object.values(chat.modelUsage);
   const cost = session.reduce((total, usage) => {
@@ -78,21 +149,28 @@ function UsagePanel({ llm }: { llm: LLMView }) {
   });
 
   return (
-    <details open className="border-b border-border bg-panel px-3 py-2 text-[11px]">
+    <details open className="max-h-[40vh] shrink-0 overflow-y-auto border-b border-border bg-panel px-3 py-2 text-[11px] scroll-thin">
       <summary className="cursor-pointer text-muted">Models, limits & live usage</summary>
       <div className="mt-2 space-y-3">
         <div className="space-y-1 rounded-md bg-surface p-2">
-          <ModelPurpose label="Orchestrator" model={llm.orchestrator_model} purpose="Planning, delegation and profile summaries" />
-          <ModelPurpose label="Workers" model={llm.worker_model} purpose="Search, job matching, CV parsing and tailoring" />
-          <p className="text-faint">Provider: {llm.provider} · effort: {llm.effort}</p>
+          <ModelPurpose
+            label={`Quality · ${llm.quality_effort}`}
+            model={llm.quality_model}
+            purpose="Profile summary, CV and cover letters, second opinions, this assistant"
+          />
+          <ModelPurpose label={`Screening · ${llm.screening_effort}`} model={llm.screening_model} purpose="First-pass job matching" />
+          <p className="text-faint">Provider: {llm.provider}</p>
         </div>
+        {llm.provider === "claude_code" && (
+          <ClaudeAccount usage={claude.data} loading={claude.isPending} error={claude.error as Error | null} refresh={() => claude.refetch()} />
+        )}
         {llm.provider === "codex" && (
           <CodexAccount usage={account.data} loading={account.isPending} error={account.error as Error | null} refresh={() => account.refetch()} />
         )}
         <div className="space-y-1.5">
           <div className="flex justify-between">
-            <span className="font-medium text-fg">This agent session</span>
-            <span>{costKnown ? `$${cost.toFixed(4)}` : llm.provider === "codex" ? "ChatGPT plan" : "cost unavailable"}</span>
+            <span className="font-medium text-fg">This session (searches + agent)</span>
+            <span>{costKnown ? `$${cost.toFixed(4)}` : llm.provider === "codex" ? "ChatGPT plan" : llm.provider === "claude_code" ? "Claude plan" : "cost unavailable"}</span>
           </div>
           {session.length === 0 ? (
             <p className="text-faint">Usage appears after the first model turn.</p>
@@ -143,15 +221,35 @@ function ModelSession({ usage, model }: { usage: SessionModelUsage; model?: Mode
   );
 }
 
-export function AgentPanel({ ready, llm }: { ready: boolean; llm?: LLMView }) {
+const EXAMPLES = [
+  "I'd like to move into business development",
+  "Add Cambridge to my locations; I won't relocate",
+  "I also led a team of 6 at my last job",
+];
+
+/** The assistant: plain-language updates to the career intent, preferences and CV facts. */
+export function AgentPanel({ ready, llm, hasCv }: { ready: boolean; llm?: LLMView; hasCv: boolean }) {
   const chat = useChat();
   const { query, useCv } = useSearch();
+  const qc = useQueryClient();
+  const running = chat.running;
+  // A finished turn may have changed the intent, the CV's preferences or proposed CV facts.
+  useEffect(() => {
+    if (running) return;
+    for (const key of ["intent", "profiles", "evidence", "state"]) void qc.invalidateQueries({ queryKey: [key] });
+  }, [running, qc]);
   const [draft, setDraft] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
   const connect = chat.connect;
 
-  useEffect(() => connect(), [connect]);
-  useEffect(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), [chat.items.length, chat.status]);
+  // Block bodies: an effect may only return a cleanup function, and newer browsers return a
+  // Promise from scrollIntoView, which React would then call on unmount.
+  useEffect(() => {
+    connect();
+  }, [connect]);
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chat.items.length, chat.status]);
 
   const submit = (text = draft) => {
     if (!text.trim() || chat.running) return;
@@ -160,11 +258,11 @@ export function AgentPanel({ ready, llm }: { ready: boolean; llm?: LLMView }) {
   };
 
   return (
-    <div className="flex h-full flex-col">
-      <header className="flex items-center justify-between border-b border-border px-3 py-2.5">
+    <div className="flex h-full min-w-0 flex-col">
+      <header className="flex shrink-0 items-center justify-between border-b border-border px-3 py-2.5">
         <div className="flex items-center gap-2">
           <Bot size={15} className="text-accent" />
-          <span className="font-semibold">Agent</span>
+          <span className="font-semibold">Assistant</span>
           <span className={cn("h-1.5 w-1.5 rounded-full", chat.connected ? "bg-good" : "bg-bad")} />
         </div>
         <div className="flex items-center gap-2 text-[11px] text-faint">
@@ -179,23 +277,26 @@ export function AgentPanel({ ready, llm }: { ready: boolean; llm?: LLMView }) {
 
       {llm && <UsagePanel llm={llm} />}
 
-      <div className="flex-1 space-y-2 overflow-y-auto p-3 scroll-thin">
+      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto overflow-x-hidden p-3 scroll-thin [overflow-wrap:anywhere]">
         {chat.items.length === 0 ? (
-          <Empty title="Orchestrator + specialists">
-            <p className="mb-3">
-              The orchestrator summarises your profile (remembered for similar searches), sends the search to{" "}
-              <b>job_search_expert</b>, and <b>job_matcher</b> keeps only true matches. <b>cv_expert</b> tailors your CV.
+          <Empty title="Tell me what to update">
+            <p className="mb-2">
+              The buttons do the work: <b>Search</b> finds and screens jobs; each job has <b>Tailor CV</b> and{" "}
+              <b>Cover letter</b>. Here you can say, in your own words, what should change in your records: your career
+              direction, search preferences, or a fact your CV is missing (you approve it before it is added).
             </p>
-            {ready ? (
+            {!ready ? (
+              <p className="text-warn">Configure an LLM provider in Settings to start.</p>
+            ) : !hasCv ? (
+              <p>Select or upload a CV on the left first.</p>
+            ) : (
               <div className="space-y-1.5">
-                {SUGGESTIONS.map((s) => (
-                  <button key={s} className="btn-ghost w-full justify-start text-left text-[12px]" onClick={() => submit(s)}>
-                    {s}
+                {EXAMPLES.map((e) => (
+                  <button key={e} className="btn-ghost w-full justify-start text-left text-[12px]" onClick={() => setDraft(e)}>
+                    “{e}”
                   </button>
                 ))}
               </div>
-            ) : (
-              <p className="text-warn">Configure an LLM provider in Settings to start.</p>
             )}
           </Empty>
         ) : (
@@ -203,7 +304,7 @@ export function AgentPanel({ ready, llm }: { ready: boolean; llm?: LLMView }) {
             switch (item.kind) {
               case "user":
                 return (
-                  <div key={i} className="ml-8 rounded-lg bg-accent-bg px-3 py-2 text-[13px]">
+                  <div key={i} className="ml-8 whitespace-pre-wrap rounded-lg bg-accent-bg px-3 py-2 text-[13px]">
                     {item.text}
                   </div>
                 );
@@ -215,12 +316,6 @@ export function AgentPanel({ ready, llm }: { ready: boolean; llm?: LLMView }) {
                 );
               case "activity":
                 return <Activity key={i} item={item} />;
-              case "file":
-                return (
-                  <a key={i} href={item.url} className="btn-primary w-fit py-1 text-[12px]">
-                    <Download size={12} /> {item.name}
-                  </a>
-                );
               case "error":
                 return (
                   <p key={i} className="rounded-md border border-bad/40 px-2 py-1.5 text-[12px] text-bad">
@@ -238,12 +333,12 @@ export function AgentPanel({ ready, llm }: { ready: boolean; llm?: LLMView }) {
         <div ref={endRef} />
       </div>
 
-      <div className="border-t border-border p-2.5">
+      <div className="shrink-0 border-t border-border p-2.5">
         <div className="flex items-end gap-2">
           <textarea
             className="input min-h-[38px] resize-none"
             rows={2}
-            placeholder={ready ? "Ask the agent… (uses your filters)" : "Configure an LLM in Settings"}
+            placeholder={ready ? "e.g. avoid roles with heavy travel…" : "Configure an LLM in Settings"}
             disabled={!ready}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}

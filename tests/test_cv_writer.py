@@ -13,7 +13,7 @@ from pydantic import ValidationError
 
 from src.cv import master_cv_manager as mgr
 from src.cv.docx_exporter import TEMPLATES, export_docx, fmt_date
-from src.cv.models import JDAnalysis, MasterCV, RewrittenBullet, TailoringPlan
+from src.cv.models import CVCritique, JDAnalysis, MasterCV, RewrittenBullet, TailoringPlan
 from src.cv.tailor import apply_plan, keyword_coverage, tailor
 from src.services import cv_service
 from src.services.workspace import Workspace
@@ -274,11 +274,13 @@ def test_keyword_coverage(master_cv: MasterCV) -> None:
 
 
 def test_tailor_end_to_end(master_cv: MasterCV) -> None:
-    llm = FakeLLM({JDAnalysis: JD, TailoringPlan: TailoringPlan(headline="Staff ML Engineer")})
+    plan = TailoringPlan(headline="Senior Machine Learning Engineer | MLOps")
+    llm = FakeLLM({JDAnalysis: JD, TailoringPlan: plan, CVCritique: CVCritique()})
     out = tailor(master_cv, "We need a Staff ML Engineer...", llm)
-    assert out.cv.basics.headline == "Staff ML Engineer"
+    assert out.cv.basics.headline == "Senior Machine Learning Engineer | MLOps"
     assert out.target_company == "Orbit AI"
     assert 0 < out.keyword_coverage < 1
+    assert [m for _, m in llm.calls].count(TailoringPlan) == 1  # no issues: no revision
 
 
 # ---------------------------------------------------------------- docx export

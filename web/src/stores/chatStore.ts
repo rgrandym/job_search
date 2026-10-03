@@ -1,12 +1,10 @@
 import { create } from "zustand";
-import type { ChatEvent, SearchQuery } from "../lib/types";
-import { useSearch } from "./searchStore";
+import type { ChatEvent, ModelUsageEvent, SearchQuery } from "../lib/types";
 
 export type ChatItem =
   | { kind: "user"; text: string }
   | { kind: "assistant"; text: string }
   | { kind: "activity"; agent: string; depth: number; text: string; ok?: boolean; detail?: string }
-  | { kind: "file"; name: string; url: string }
   | { kind: "error"; text: string };
 
 export interface SessionModelUsage {
@@ -32,6 +30,7 @@ interface ChatState {
   send: (text: string, filters: SearchQuery, useCv: boolean) => void;
   cancel: () => void;
   reset: () => void;
+  recordUsage: (event: ModelUsageEvent | (Omit<ModelUsageEvent, "depth"> & { depth?: number })) => void;
 }
 
 const SESSION_KEY = "jobsearch.session";
@@ -56,66 +55,37 @@ export const useChat = create<ChatState>()((set, get) => {
         set({ status: `${ev.agent} is thinking…` });
         break;
       case "model_usage":
-        set((s) => {
-          const current = s.modelUsage[ev.model];
-          const input = (current?.input ?? 0) + ev.input_tokens;
-          const output = (current?.output ?? 0) + ev.output_tokens;
-          return {
-            tokens: {
-              input: s.tokens.input + ev.input_tokens,
-              output: s.tokens.output + ev.output_tokens,
-            },
-            modelUsage: {
-              ...s.modelUsage,
-              [ev.model]: {
-                model: ev.model,
-                input,
-                output,
-                estimated: (current?.estimated ?? false) || ev.estimated,
-                latestContext: ev.input_tokens + ev.output_tokens,
-                agents: Array.from(new Set([...(current?.agents ?? []), ev.agent])),
-                purposes: Array.from(new Set([...(current?.purposes ?? []), ev.purpose])),
-              },
-            },
-          };
-        });
+        get().recordUsage(ev);
         break;
       case "agent_message":
         if (ev.depth === 0 && ev.final) push({ kind: "assistant", text: ev.text });
         else push({ kind: "activity", agent: ev.agent, depth: ev.depth, text: ev.text });
         break;
       case "tool_call":
-        if (ev.tool !== "delegate")
-          push({ kind: "activity", agent: ev.agent, depth: ev.depth, text: `${ev.tool}(${describeArgs(ev.args)})` });
+        push({ kind: "activity", agent: ev.agent, depth: ev.depth, text: `${ev.tool}(${describeArgs(ev.args)})` });
         break;
       case "tool_result":
         if (!ev.ok) push({ kind: "activity", agent: ev.agent, depth: ev.depth, text: `${ev.tool} failed`, ok: false, detail: ev.preview });
         break;
-      case "delegate_start":
-        push({ kind: "activity", agent: "orchestrator", depth: ev.depth - 1, text: `→ ${ev.agent}`, detail: ev.task });
+      case "cv_updated":
+        push({ kind: "activity", agent: "assistant", depth: 0, text: `search preferences updated: ${ev.reason}` });
         break;
-      case "search_progress":
-        set({ status: ev.message });
-        useSearch.getState().set({ progress: ev.message });
-        break;
-      case "search_results":
-        useSearch.getState().set({ outcome: ev.outcome, progress: null, error: null });
-        if (ev.outcome.report.summary)
-          useSearch.getState().set({
-            summary: { summary: ev.outcome.report.summary, fromMemory: !!ev.outcome.summary_from_memory },
-          });
-        break;
-      case "profile_summary":
-        useSearch.getState().set({ summary: { summary: ev.summary, fromMemory: ev.from_memory } });
+      case "intent_updated":
         push({
           kind: "activity",
-          agent: "orchestrator",
+          agent: "assistant",
           depth: 0,
-          text: `profile summary ${ev.from_memory ? "recalled from memory" : "built"}`,
+          text: "career intent updated (Profiles › Career intent)",
+          detail: ev.changes.join("\n"),
         });
         break;
-      case "file_ready":
-        push({ kind: "file", name: ev.name, url: ev.url });
+      case "evidence_proposed":
+        push({
+          kind: "activity",
+          agent: "assistant",
+          depth: 0,
+          text: `${ev.count} CV fact(s) proposed: review them in Profiles › Add evidence`,
+        });
         break;
       case "done":
         set((s) => ({
@@ -167,7 +137,7 @@ export const useChat = create<ChatState>()((set, get) => {
       const ws = get().socket;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       push({ kind: "user", text });
-      set({ running: true, status: "orchestrator is thinking…" });
+      set({ running: true, status: "assistant is thinking…" });
       ws.send(JSON.stringify({ type: "user_message", text, filters, use_cv: useCv }));
     },
 
@@ -177,5 +147,28 @@ export const useChat = create<ChatState>()((set, get) => {
       get().socket?.send(JSON.stringify({ type: "reset" }));
       set({ items: [], tokens: { input: 0, output: 0 }, modelUsage: {}, status: null });
     },
+    // Session token usage per model, from agent turns and from Search-button runs alike.
+    recordUsage: (ev) =>
+      set((s) => {
+        const current = s.modelUsage[ev.model];
+        return {
+          tokens: {
+            input: s.tokens.input + ev.input_tokens,
+            output: s.tokens.output + ev.output_tokens,
+          },
+          modelUsage: {
+            ...s.modelUsage,
+            [ev.model]: {
+              model: ev.model,
+              input: (current?.input ?? 0) + ev.input_tokens,
+              output: (current?.output ?? 0) + ev.output_tokens,
+              estimated: (current?.estimated ?? false) || ev.estimated,
+              latestContext: ev.input_tokens + ev.output_tokens,
+              agents: Array.from(new Set([...(current?.agents ?? []), ev.agent])),
+              purposes: Array.from(new Set([...(current?.purposes ?? []), ev.purpose])),
+            },
+          },
+        };
+      }),
   };
 });

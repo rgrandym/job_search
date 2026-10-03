@@ -16,8 +16,8 @@ from src.core.llm import codex_backend as backend
 def _config() -> LLMConfig:
     return LLMConfig(
         provider="codex",
-        orchestrator_model="gpt-test",
-        worker_model="gpt-test",
+        quality_model="gpt-test",
+        screening_model="gpt-test",
     )
 
 
@@ -136,7 +136,7 @@ def test_codex_chat_decodes_emulated_tool_calls(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(backend, "run_codex_async", fake_run)
     response = asyncio.run(
-        backend.CodexChat(_config(), "orchestrator").chat(
+        backend.CodexChat(_config(), "quality").chat(
             system="Help the user",
             messages=[ChatMessage(role="user", content="Find roles")],
             tools=[

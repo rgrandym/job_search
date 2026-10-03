@@ -63,6 +63,8 @@ body { background: var(--bg); color: var(--text-primary); font-size: 13px; }
 .prose-chat a { color: var(--accent); text-decoration: underline; }
 .prose-chat strong { color: var(--text-primary); }
 .prose-chat code { background: var(--bg-surface); padding: 0 0.3em; border-radius: 4px; }
-.prose-chat table { border-collapse: collapse; font-size: 12px; margin: 0.4em 0; }
+/* Wide tables and code scroll inside the reply instead of widening the panel. */
+.prose-chat table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 12px; margin: 0.4em 0; }
+.prose-chat pre { max-width: 100%; overflow-x: auto; }
 .prose-chat th, .prose-chat td { border: 1px solid var(--border); padding: 2px 6px; text-align: left; }
 .prose-chat h1, .prose-chat h2, .prose-chat h3 { font-weight: 600; margin: 0.5em 0 0.25em; }

@@ -1,6 +1,6 @@
 ---
 name: cv_writer
-description: Create or update the structured Master CV, tailor it to a job description with ATS keywords and STAR-format bullets (no fabricated facts), and export it to a styled Word (.docx) document. Use when the user wants to import/edit their CV, tailor a CV to a job, or produce a .docx CV.
+description: Create or update the structured Master CV (including evidence from documents the user supplies, accepted one by one), tailor it to a job description with ATS keywords and STAR-format bullets (no fabricated facts; reviewed and revised once), write guarded cover letters, and export them to styled Word (.docx) documents with an ATS read-back. Use when the user wants to import/edit their CV, tailor a CV to a job, write a cover letter, or produce a .docx CV.
 ---
 
 # cv_writer
@@ -12,8 +12,11 @@ Turns a factual **Master CV** into job-specific, ATS-optimised CVs and exports t
 | `master_cv_schema.json` | JSON Schema of the Master CV. **Generated** from `src/cv/models.py::MasterCV`. Never hand-edit. |
 | `docx_templates.py` | CLI to render a CV JSON to `.docx` with a named template. |
 | `src/cv/master_cv_manager.py` | load / save / validate / import / merge-patch the Master CV |
-| `src/cv/tailor.py` | JD analysis → tailoring plan (LLM) → guarded application (deterministic) |
-| `src/cv/docx_exporter.py` | Word rendering + template definitions (`TEMPLATES`) |
+| `src/cv/tailor.py` | JD analysis → tailoring plan (LLM) → guarded application (deterministic) → review → one revision |
+| `src/cv/cover_letter.py` | Cover-letter draft (LLM) → guarded paragraphs (deterministic) |
+| `src/cv/ats.py` | Reads the exported .docx back the way an ATS does |
+| `src/cv/docx_exporter.py` | Word rendering (CV and cover letter) + template definitions (`TEMPLATES`) |
+| `src/services/enrichment.py` | Evidence review queue: document → proposed CV additions → user accepts |
 
 The Master CV lives at `data/master_cv.json` (git-ignored, personal data). Example:
 `data/examples/master_cv.example.json`.
@@ -49,6 +52,16 @@ replaced whole) followed by `save()`, which keeps a `.bak`.
 
 If you change `MasterCV`, regenerate the schema: `python -m src.cv.master_cv_manager export-schema`.
 
+**Evidence from other documents** (`services/enrichment.py`; Profiles › "Add evidence";
+`POST /api/evidence/upload|text`, `GET /api/evidence`, `POST /api/evidence/{id}`): the user
+uploads or pastes a document (portfolio page, project report, publication list, reference
+letter, certificate). The LLM proposes skills, certifications, projects and achievement
+bullets (for a role the CV has) with a verbatim quote and a confidence. Code drops any
+proposal whose quote is not in the document, whose numbers are not in its quote, or that the
+CV already has. Proposals wait in `data/evidence_queue.json`; **only the ones the user accepts**
+(optionally reworded) are written to the selected Master CV: skills under "Additional",
+bullets with fresh ids and their numbers as `metrics`. Inferred items stay suggestions.
+
 ---
 
 ## 2. Analyse the job description
@@ -69,7 +82,10 @@ If you change `MasterCV`, regenerate the schema: `python -m src.cv.master_cv_man
 
 ## 3. Rewrite bullets as STAR accomplishments, without hallucinating
 
-`tailor.propose_plan(...) -> TailoringPlan`, then `tailor.apply_plan(...)` enforces the rules.
+`tailor.propose_plan(..., guidance) -> TailoringPlan`, then `tailor.apply_plan(...)` enforces
+the rules. `guidance` is the job_matcher's verdict on this job (fit summary, reasons,
+transferable evidence, gaps), passed by `cv_service.tailor_to_job` so the plan leads with
+what the matcher found and never papers over its gaps.
 
 For each relevant Master CV bullet, produce one `RewrittenBullet` with `source_id` = that
 bullet's id. Compress STAR into one sentence:
@@ -85,8 +101,8 @@ dropping irrelevant detail, promoting relevant bullets, omitting irrelevant ones
 
 **Forbidden, and auto-rejected by `apply_plan`:**
 - Any number, %, currency amount or count not present in the source bullet or its `metrics`.
-- Any JD hard skill / must-have not evidenced by the source bullet **and** absent from the
-  Master CV's skills.
+- Any skill (JD hard skill / must-have, a CV skill, or a known technology) the source bullet
+  does not evidence in its text or `skills` list, even if the CV shows it in another role.
 - Unknown `source_id`s, or merging facts from two bullets into one.
 - Inventing employers, titles, dates, team sizes, or scope ("global", "company-wide") the source lacks.
 
@@ -95,8 +111,21 @@ Rejected rewrites keep the original bullet. Every decision is logged in `Tailore
 missing keyword is a gap to discuss, never something to paper over. If the user confirms they
 do have that experience, add it to the **Master CV** first, then re-tailor.
 
-Also produced: `headline` (target role), `summary` (2–3 sentences, numbers must exist in the
-CV), `bullet_order`, `skills_priority` (re-orders existing skills only).
+Also produced, and guarded the same way (recorded in `changes` as `headline` / `summary`):
+- `headline`: rejected if it claims a seniority above any title held (or the CV headline), a
+  role the CV does not show (role words of the title part, before a comma, "|" or dash), or
+  skills or numbers the CV lacks. "Staff ML Engineer" for a Senior is rejected.
+- `summary` (2–3 sentences): numbers and skills must exist somewhere in the CV.
+- `bullet_order` (keep ≥ 2 per role) and `skills_priority` (re-orders existing skills only).
+  If the order left out the only bullet carrying a JD keyword, the bullet is put back
+  (`restored_keywords`); `missing_keywords` are then true gaps.
+
+**Review and revision** (`tailor(..., review=True)`, the default): a second, fresh reader
+(`critique_cv`, `CVCritique`) lists JD requirements a Master CV bullet evidences but the
+tailored CV leaves out or buries (citing that bullet; points citing unknown ids are dropped),
+weak bullets (passive, generic, result buried), and up to 3 order notes. If it finds any,
+`revise_plan` produces one revised plan, which passes `apply_plan` again; the points are kept
+in `TailoredCV.critique`. No issues: no revision call.
 
 Run end to end in code:
 ```python
@@ -108,6 +137,19 @@ tailored = tailor.tailor(mgr.load(Path("data/master_cv.json")), jd_text, get_llm
 Path("output/tailored_acme.json").write_text(tailor.dump_tailored(tailored))
 ```
 `tailored.keyword_coverage` is the ATS hit-rate (0–1) over JD hard skills + must-haves.
+
+## 3b. Cover letters
+
+`cover_letter.write_letter(master, jd, jd_text, llm, motivation) -> CoverLetter`
+(`cv_service.write_cover_letter`, `POST /api/jobs/{job_id}/cover-letter`, agent tool
+`write_cover_letter`). The LLM drafts 3–4 paragraphs, each citing in `source_ids` the Master
+CV bullet, role or project ids its claims come from. `apply_letter` keeps a paragraph only if
+every cited id exists, every number is in its cited sources or in the job description (facts
+about the employer may be quoted), and every skill it names is evidenced by its cited sources.
+Motivation comes **only** from the user's career intent (direction, energising work, target
+areas); without one, it stays to one brief sentence about the role. Every paragraph is
+recorded in `CoverLetter.changes`; rejected ones are reported. Exported as
+`<First>_<Last>_<Company>_cover_letter.docx`.
 
 ---
 
@@ -130,3 +172,9 @@ standard section names (Summary, Experience, Skills, Education, Certifications);
 `Mon YYYY – Mon YYYY`.
 
 Name output files `<First>_<Last>_<Company>.docx` under `output/` (git-ignored).
+
+**ATS read-back** (`ats.check_docx(path, cv, keywords) -> ATSReport`, run after every
+tailored export and returned as `TailoredCV.ats`): reads the file's text as a parser would,
+and reports contact details not readable as plain text, keyword coverage of the exported
+text, an estimated page count (500 words a page; warns above 2), tables, and contact details
+placed in the page header.

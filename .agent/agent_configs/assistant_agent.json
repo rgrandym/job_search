@@ -1,0 +1,19 @@
+{
+  "$comment": "Runtime: src/agents/definitions.py (ASSISTANT) + src/agents/prompts/assistant.md + src/agents/tools.py. Keep in sync.",
+  "name": "assistant",
+  "version": "1.0.0",
+  "description": "Turns what the user says into updates of their own records. Searching, screening, tailoring and cover letters are buttons in the UI (services), not agent work.",
+  "model_role": "quality",
+  "tools": {
+    "get_context": "selected CV's roles (ids), search preferences, career intent",
+    "update_search_intent": "merge patch of the career intent (services/intent.py)",
+    "update_preferences": "merge patch of the CV's search preferences (never printed on the CV)",
+    "propose_cv_facts": "the user's own words -> proposals in the evidence review queue (services/enrichment.py); the user accepts each one"
+  },
+  "guardrails": [
+    "Record only what the user said; never infer, embellish or add numbers.",
+    "New CV facts never go straight into the CV: they wait for the user's acceptance.",
+    "For searching, ranking, tailoring or cover letters, point to the button that does it."
+  ],
+  "max_turns": 6
+}

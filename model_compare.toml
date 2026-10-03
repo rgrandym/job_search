@@ -1,0 +1,52 @@
+# Model comparison plan, run by /compare_models
+# (python -m src.services.model_compare --config model_compare.toml).
+#
+# Each setup re-screens the SAME jobs and is scored against the reference. It calls the paid
+# model (or your Codex / Claude Code plan) for every job: comment out setups you do not need.
+
+# "labels": every job you labelled Would apply or No in the app (Maybe is left out), judged
+# with the profile, filters and threshold stored with the label. About 40 calls per setup
+# for ~45 labels (first pass in batches of 3, plus second opinions on matches).
+# "history": past verdicts instead (uses `sample` and `baseline` below).
+reference = "labels"
+
+# Learning from your labels ("Your labels" > Suggest profile updates):
+# learned = true applies the preferences you accepted to each label's profile, to measure
+# what they change on the same labels (run once with false, once with true).
+# labels_since = 2026-10-10 scores only labels given on or after that date: labels that did
+# not shape the preferences are the honest test of them.
+learned = false
+# labels_since = 2026-10-10
+
+# History reference only: postings re-screened per setup, and which past searches count.
+sample = 24
+baseline = ["screening gpt-6-sol", "matcher gpt-6-sol"]
+
+# Two ways to write a setup (the quality model gives the second opinions):
+#   "screening:effort/quality:effort"   runs on the provider chosen in Settings (now Codex)
+#   { provider = "...", screening = "model:effort", quality = "model:effort" }
+#                                        runs on another provider; name both models
+# Providers: codex, claude_code (your Claude plan), anthropic (API key), openai, openrouter.
+# One setup = one provider (screening and quality cannot come from two providers).
+# Efforts: low, medium, high, xhigh, max. Model names as in the Settings dropdowns.
+setups = [
+   # "gpt-6-sol:medium/gpt-6-sol:medium",   # strongest GPT setup: the bar to match
+   # "gpt-6-luna:medium/gpt-6-sol:medium",
+   # "gpt-6-luna:low/gpt-6-sol:medium",
+   # "gpt-6-sol:low/gpt-6-sol:medium",
+
+    # Claude, through the Claude Code CLI (no API key configured)
+    { provider = "claude_code", screening = "claude-sonnet-5-5:medium", quality = "claude-opus-5-5:medium" },
+    { provider = "claude_code", screening = "claude-sonnet-5-5:low", quality = "claude-opus-5-5:medium" },
+    { provider = "claude_code", screening = "claude-opus-5:medium", quality = "claude-opus-5-5:medium" },
+    # { provider = "claude_code", screening = "claude-sonnet-5-5:medium", quality = "claude-sonnet-5-5:medium" },
+    # { provider = "claude_code", screening = "claude-opus-5-5:medium", quality = "claude-opus-5-5:medium" },
+]
+
+# API-equivalent prices, USD per 1M tokens: [input, output]. Claude prices come from the app's
+# model catalogue; Codex (ChatGPT-account) models publish none, so add them here from OpenAI's
+# API price list to see a cost for GPT setups. Without a price, a model shows "no price known".
+# On Codex and Claude Code you pay with plan limits: the "plan" lines show the share used.
+[prices]
+# "gpt-6-sol" = [0.0, 0.0]
+# "gpt-6-luna" = [0.0, 0.0]

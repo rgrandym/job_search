@@ -55,11 +55,11 @@ class OpenAICompatStructured:
     def __init__(
         self,
         cfg: LLMConfig,
-        role: Role = "worker",
+        role: Role = "screening",
         usage_sink: UsageSink | None = None,
         purpose: str = "structured output",
     ) -> None:
-        self.cfg = cfg
+        self.cfg = cfg.for_role(role)
         self.model = cfg.model_for(role)
         self.url = f"{BASE_URLS[cfg.provider]}/chat/completions"
         self.usage_sink = usage_sink
@@ -121,7 +121,7 @@ class OpenAICompatChat:
     """`ChatModel` via Chat Completions function calling."""
 
     def __init__(self, cfg: LLMConfig, role: Role) -> None:
-        self.cfg = cfg
+        self.cfg = cfg.for_role(role)
         self.model = cfg.model_for(role)
         self.url = f"{BASE_URLS[cfg.provider]}/chat/completions"
 

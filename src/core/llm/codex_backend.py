@@ -25,6 +25,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
+from src.core.llm.calls import run_cli
 from src.core.llm.types import (
     ChatMessage,
     ChatResponse,
@@ -337,13 +338,14 @@ def run_codex(cfg: LLMConfig, model: str, prompt: str, schema: dict[str, Any]) -
         raise LLMError("Codex CLI not found")
     workdir, schema_path, out_path = _prepare(schema)
     try:
-        proc = subprocess.run(
+        proc = run_cli(  # cancellable by the search that started it
             _command(binary, cfg, model, workdir, schema_path, out_path),
             input=prompt,
-            capture_output=True,
-            text=True,
             timeout=TIMEOUT_S,
         )
+    except LLMError:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise
     except subprocess.TimeoutExpired as exc:
         shutil.rmtree(workdir, ignore_errors=True)
         raise LLMError(f"codex exec timed out after {TIMEOUT_S}s") from exc
@@ -380,11 +382,11 @@ class CodexStructured:
     def __init__(
         self,
         cfg: LLMConfig,
-        role: Role = "worker",
+        role: Role = "screening",
         usage_sink: UsageSink | None = None,
         purpose: str = "structured output",
     ) -> None:
-        self.cfg = cfg
+        self.cfg = cfg.for_role(role)
         self.model = cfg.model_for(role)
         self.usage_sink = usage_sink
         self.purpose = purpose
@@ -417,52 +419,62 @@ class CodexChat:
     """`ChatModel` with tool calling emulated through a strict JSON turn format."""
 
     def __init__(self, cfg: LLMConfig, role: Role) -> None:
-        self.cfg = cfg
+        self.cfg = cfg.for_role(role)
         self.model = cfg.model_for(role)
 
     async def chat(
         self, *, system: str, messages: list[ChatMessage], tools: list[ToolSpec]
     ) -> ChatResponse:
-        names = [t.name for t in tools]
-        call_item: dict[str, Any] = {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", **({"enum": names} if names else {})},
-                "arguments_json": {"type": "string", "description": "JSON-encoded arguments"},
-            },
-            "required": ["name", "arguments_json"],
-        }
-        schema = {
-            "type": "object",
-            "properties": {
-                "message": {"type": "string"},
-                "tool_calls": {"type": "array", "items": call_item},
-            },
-            "required": ["message", "tool_calls"],
-        }
-        prompt = _render(system, messages, tools)
-        data = await run_codex_async(self.cfg, self.model, prompt, schema)
-        turn = _Turn.model_validate(data)
-        calls = []
-        for c in turn.tool_calls:
-            try:
-                args = json.loads(c.get("arguments_json") or "{}")
-            except json.JSONDecodeError:
-                args = {"_invalid_json": c.get("arguments_json")}
-            calls.append(
-                ToolCall(
-                    id=f"call_{uuid.uuid4().hex[:10]}",
-                    name=c.get("name", ""),
-                    arguments=args if isinstance(args, dict) else {},
-                )
-            )
+        prompt = render_turn(system, messages, tools)
+        data = await run_codex_async(self.cfg, self.model, prompt, turn_schema(tools))
+        message = parse_turn(data)
         return ChatResponse(
-            message=ChatMessage(role="assistant", content=turn.message, tool_calls=calls),
-            stop_reason="tool_use" if calls else "end_turn",
+            message=message,
+            stop_reason="tool_use" if message.tool_calls else "end_turn",
             input_tokens=_estimate_tokens(prompt),
             output_tokens=_estimate_tokens(json.dumps(data)),
             usage_estimated=True,
         )
+
+
+def turn_schema(tools: list[ToolSpec]) -> dict[str, Any]:
+    """JSON Schema of one emulated agent turn: `{message, tool_calls[]}`."""
+    names = [t.name for t in tools]
+    call_item: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", **({"enum": names} if names else {})},
+            "arguments_json": {"type": "string", "description": "JSON-encoded arguments"},
+        },
+        "required": ["name", "arguments_json"],
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "message": {"type": "string"},
+            "tool_calls": {"type": "array", "items": call_item},
+        },
+        "required": ["message", "tool_calls"],
+    }
+
+
+def parse_turn(data: Any) -> ChatMessage:
+    """Decode an emulated turn into an assistant message with real `ToolCall`s."""
+    turn = _Turn.model_validate(data)
+    calls = []
+    for c in turn.tool_calls:
+        try:
+            args = json.loads(c.get("arguments_json") or "{}")
+        except json.JSONDecodeError:
+            args = {"_invalid_json": c.get("arguments_json")}
+        calls.append(
+            ToolCall(
+                id=f"call_{uuid.uuid4().hex[:10]}",
+                name=c.get("name", ""),
+                arguments=args if isinstance(args, dict) else {},
+            )
+        )
+    return ChatMessage(role="assistant", content=turn.message, tool_calls=calls)
 
 
 def _estimate_tokens(text: str) -> int:
@@ -470,8 +482,8 @@ def _estimate_tokens(text: str) -> int:
     return max(1, (len(text) + 3) // 4)
 
 
-def _render(system: str, messages: list[ChatMessage], tools: list[ToolSpec]) -> str:
-    """Flatten system prompt, tool catalogue and transcript into one Codex prompt."""
+def render_turn(system: str, messages: list[ChatMessage], tools: list[ToolSpec]) -> str:
+    """Flatten system prompt, tool catalogue and transcript into one CLI prompt."""
     catalogue = (
         "\n".join(
             f"- {t.name}: {t.description}\n  arguments schema: {json.dumps(t.parameters)}"

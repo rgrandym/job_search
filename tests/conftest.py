@@ -11,8 +11,10 @@ from pydantic import BaseModel
 
 from src.core.config import Settings
 from src.cv.models import MasterCV
+from src.services import search_service
 
 T = TypeVar("T", bound=BaseModel)
+ENSURE_COMPANY_BOARDS = search_service._ensure_company_boards  # the real hook, for its own tests
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = ROOT / "data" / "examples"
 
@@ -42,9 +44,20 @@ def settings(tmp_path: Path) -> Settings:
     return Settings(
         _env_file=None,  # type: ignore[call-arg]
         request_delay_s=0,
+        linkedin_delay_s=0,
         data_dir=tmp_path,
         output_dir=tmp_path / "output",
         master_cv_path=tmp_path / "master_cv.json",
         inbox_dir=tmp_path / "inbox",
         companies_path=tmp_path / "companies.json",
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_company_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Searches with company sites would discover ~1,000 live websites on first use."""
+
+    async def skip(*_: Any) -> None:
+        return None
+
+    monkeypatch.setattr(search_service, "_ensure_company_boards", skip)

@@ -195,6 +195,51 @@ class ChangeRecord(_Strict):
     reason: str | None = None
 
 
+class MissedRequirement(_Strict):
+    """A JD requirement the Master CV evidences but the tailored CV does not show."""
+
+    requirement: str
+    source_id: str = Field(description="Master CV bullet id that evidences it")
+
+
+class BulletIssue(_Strict):
+    source_id: str
+    issue: str = Field(description="What is weak: passive, generic, result buried, off-target")
+
+
+class CVCritique(_Strict):
+    """A second reader's review of a tailored CV (LLM output). It may only point at facts
+    already in the Master CV; the revision still goes through `apply_plan`."""
+
+    missed_requirements: list[MissedRequirement] = Field(default_factory=list)
+    weak_bullets: list[BulletIssue] = Field(default_factory=list)
+    order_notes: list[str] = Field(default_factory=list, description="Bullet or section order")
+
+    def has_issues(self) -> bool:
+        return bool(self.missed_requirements or self.weak_bullets or self.order_notes)
+
+    def notes(self) -> list[str]:
+        """One line per point, for the user."""
+        return [
+            *(f"Surface {m.requirement} ({m.source_id})" for m in self.missed_requirements),
+            *(f"Strengthen {b.source_id}: {b.issue}" for b in self.weak_bullets),
+            *self.order_notes,
+        ]
+
+
+class ATSReport(_Strict):
+    """What an applicant-tracking system reads from the exported .docx."""
+
+    words: int
+    est_pages: float = Field(description="Rough page count from the word count")
+    contact_missing: list[str] = Field(
+        default_factory=list, description="Contact details not found as plain text"
+    )
+    keyword_coverage: float = Field(ge=0, le=1, description="JD keywords found in the file text")
+    missing_keywords: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class TailoredCV(_Strict):
     """A tailored CV plus its full audit trail back to the Master CV."""
 
@@ -203,5 +248,69 @@ class TailoredCV(_Strict):
     target_company: str | None = None
     keyword_coverage: float = Field(ge=0, le=1)
     matched_keywords: list[str] = Field(default_factory=list)
-    missing_keywords: list[str] = Field(default_factory=list)
+    missing_keywords: list[str] = Field(
+        default_factory=list, description="JD keywords the Master CV does not evidence (gaps)"
+    )
+    restored_keywords: list[str] = Field(
+        default_factory=list,
+        description="JD keywords the tailoring dropped with a bullet; the bullet was put back",
+    )
     changes: list[ChangeRecord] = Field(default_factory=list)
+    critique: list[str] = Field(
+        default_factory=list, description="Reviewer points the revision was asked to address"
+    )
+    ats: ATSReport | None = None
+
+
+class LetterParagraph(_Strict):
+    """One cover-letter paragraph and the Master CV ids its claims come from."""
+
+    text: str
+    source_ids: list[str] = Field(
+        default_factory=list, description="Bullet, role or project ids backing every claim"
+    )
+
+
+class CoverLetterDraft(_Strict):
+    """LLM output: untrusted until `cover_letter.apply_letter`."""
+
+    greeting: str = "Dear Hiring Manager,"
+    paragraphs: list[LetterParagraph] = Field(default_factory=list)
+    closing: str = "Yours sincerely,"
+
+
+class CoverLetter(_Strict):
+    """A guarded cover letter: only paragraphs whose claims trace to the Master CV."""
+
+    target_title: str
+    target_company: str | None = None
+    greeting: str
+    paragraphs: list[str]
+    closing: str
+    changes: list[ChangeRecord] = Field(
+        default_factory=list, description="Every proposed paragraph, accepted or rejected"
+    )
+
+
+# ---------------------------------------------------------------- evidence enrichment
+
+EvidenceKind = Literal["skill", "certification", "project", "bullet"]
+
+
+class EvidenceProposal(_Strict):
+    """A fact found in a document the user supplied, proposed for the Master CV."""
+
+    kind: EvidenceKind
+    text: str = Field(description="Skill or certification name, project description or bullet")
+    name: str | None = Field(None, description="Project name (projects only)")
+    attach_to: str | None = Field(None, description="Experience id a bullet belongs to")
+    quote: str = Field(description="Verbatim passage of the document that states it")
+    confidence: Literal["high", "medium", "low"] = Field(
+        description="high: stated outright · medium: clearly shown by described work · low: hinted"
+    )
+
+
+class EvidenceProposals(_Strict):
+    """LLM output: untrusted until `services.enrichment` checks each quote."""
+
+    items: list[EvidenceProposal] = Field(default_factory=list)

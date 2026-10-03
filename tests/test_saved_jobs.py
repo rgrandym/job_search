@@ -1,0 +1,71 @@
+"""Saved jobs: kept across searches, status read live from the tracker, usable for tailoring
+after a new search."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+from fastapi.testclient import TestClient
+
+from src.core.config import Settings
+from src.cv.models import MasterCV
+from src.jobs.matcher import build_profile
+from src.jobs.models import JobPosting, MatchReport, MatchResult
+from src.services import saved, tracker
+from src.services.workspace import Workspace
+
+
+def _report(ws: Workspace, *ids: str) -> MatchReport:
+    assert ws.master_cv is not None
+    jobs = [JobPosting(id=i, title=f"Scientist {i}", company=f"Co {i}") for i in ids]
+    return MatchReport(
+        profile=build_profile(ws.master_cv),
+        threshold=60,
+        matches=[MatchResult(job=j) for j in jobs],
+    )
+
+
+@pytest.fixture
+def ws(settings: Settings, master_cv: MasterCV, monkeypatch: pytest.MonkeyPatch) -> Workspace:
+    w = Workspace(settings)
+    w.master_cv, w.active_cv_id = master_cv, "master"
+    monkeypatch.setattr(w, "llm_ready", lambda: True)
+    return w
+
+
+def test_saved_jobs_outlive_the_search_and_track_applications_live(ws: Workspace) -> None:
+    ws.last_report = _report(ws, "a", "b")
+    assert [s.result.job.id for s in saved.save(ws, ["a", "b", "a"])] == ["a", "b"]
+    assert saved.save(ws, ["a"]) == []  # already saved: kept as it is
+    with pytest.raises(ValueError, match="Not in the current search: zz"):
+        saved.save(ws, ["zz"])
+
+    ws.last_report = _report(ws, "c")  # a new search: saved jobs are still found
+    job = ws.job("a")
+    assert job is not None and job.title == "Scientist a"
+    tracker.set_status(ws, job, "applied", stage="interview")
+    status = {s.result.job.id: s.result.tracking for s in saved.list_saved(ws)}
+    assert status["a"] and status["a"].status == "applied" and status["a"].stage == "interview"
+    assert status["b"] is None
+
+    assert saved.remove(ws, ["a", "nope"]) == 1
+    assert [s.result.job.id for s in saved.list_saved(ws)] == ["b"]
+    assert any(e.title == "Scientist a" for e in tracker.register(ws))  # application kept
+
+
+def test_api_save_list_and_remove(ws: Workspace, monkeypatch: Any) -> None:
+    from src.web import app as webapp
+
+    monkeypatch.setattr(webapp, "get_workspace", lambda: ws)
+    client = TestClient(webapp.app)
+    ws.last_report = _report(ws, "a")
+    assert client.get("/api/saved").json() == []
+    assert len(client.post("/api/saved", json={"job_ids": ["a"]}).json()) == 1
+    assert client.post("/api/saved", json={"job_ids": ["zz"]}).status_code == 404
+    listed = client.get("/api/saved").json()
+    assert listed[0]["result"]["job"]["id"] == "a" and listed[0]["saved_at"]
+    ws.last_report = _report(ws, "b")
+    marked = client.put("/api/jobs/a/tracking", json={"status": "applied"})  # a saved job
+    assert marked.status_code == 200 and marked.json()["status"] == "applied"
+    assert client.post("/api/saved/remove", json={"job_ids": ["a"]}).json() == {"removed": 1}

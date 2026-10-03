@@ -2,5 +2,8 @@
   { "name": "Example Greenhouse Co", "ats": "greenhouse", "token": "examplegreenhouse" },
   { "name": "Example Lever Co", "ats": "lever", "token": "examplelever" },
   { "name": "Example Ashby Co", "ats": "ashby", "token": "exampleashby" },
+  { "name": "Example Workable Co", "ats": "workable", "token": "exampleworkable" },
+  { "name": "GSK", "ats": "workday", "url": "https://gsk.wd5.myworkdayjobs.com/GSKCareers" },
+  { "name": "Example iCIMS Co", "ats": "icims", "url": "https://careers-example.icims.com" },
   { "name": "Example Corp", "ats": "careers_page", "url": "https://careers.example.com/jobs" }
 ]

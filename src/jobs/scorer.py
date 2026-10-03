@@ -14,28 +14,39 @@ remaining weights are renormalised.
 from __future__ import annotations
 
 import re
+from datetime import date
 
 from src.core.config import ScoringWeights, get_settings
-from src.jobs.models import CandidateProfile, JobPosting, ScoreBreakdown
+from src.jobs.models import LANGUAGE_LEVELS, CandidateProfile, JobPosting, ScoreBreakdown
 from src.tools.search_tools import (
+    confirms,
+    eligibility_requirements,
     extract_skills,
     jaccard,
+    language_requirements,
     mentions,
     normalize_skill,
+    parse_language,
     seniority_level,
     seniority_name,
+    shares_role_words,
     title_core,
 )
 
-# Seniority gap (in ladder steps) at which a job is excluded outright.
+# Seniority gap (in ladder steps) at which a job is excluded outright. A step up is allowed
+# further than a step down: science ladders (principal -> associate director -> director)
+# compress, so a 3-step move up is scored by the job_matcher rather than dropped.
 MAX_SENIORITY_GAP = 3
+MAX_SENIORITY_GAP_UP = 4
 # Raw cosine similarities are mapped linearly from [FLOOR, CEIL] onto [0, 1].
 SEMANTIC_FLOOR = 0.05
 SEMANTIC_CEIL = 0.50
 # Share of the skills sub-score given to required (vs preferred) skills.
 REQUIRED_SKILL_SHARE = 0.75
-# Location sub-scores.
+# Location sub-scores. UNVERIFIED: a town we cannot place (no country, no shared name), so
+# the distance is unknown; it lowers the score but never excludes (the job_matcher judges it).
 LOC_SAME_CITY, LOC_SAME_COUNTRY, LOC_UNKNOWN, LOC_RELOCATE = 1.0, 0.4, 0.7, 0.6
+LOC_UNVERIFIED = 0.3
 
 _LOC_NOISE = {
     "greater",
@@ -77,6 +88,20 @@ def _job_level(job: JobPosting) -> int:
     return seniority_level(job.seniority or job.title)
 
 
+_KNOWN_COUNTRIES = {
+    *_COUNTRY_ALIASES.values(), "france", "ireland", "netherlands", "belgium", "switzerland",
+    "italy", "portugal", "sweden", "denmark", "norway", "finland", "austria", "poland",
+    "canada", "australia", "india", "singapore", "japan", "china", "new zealand",
+    "south africa", "brazil", "mexico",
+}  # fmt: skip
+
+
+def _same_place(a: set[str], b: set[str]) -> bool:
+    """Shared place name, counting a county as its town ("oxford" ~ "oxfordshire")."""
+    return any(x == y or (min(len(x), len(y)) >= 4 and (x.startswith(y) or y.startswith(x)))
+               for x in a for y in b)  # fmt: skip
+
+
 def _loc_tokens(part: str) -> set[str]:
     part = part.strip().lower()
     part = _COUNTRY_ALIASES.get(part, part)
@@ -85,7 +110,8 @@ def _loc_tokens(part: str) -> set[str]:
 
 
 def location_match(candidate_locations: list[str], job: JobPosting) -> float:
-    """1.0 same city / source-verified radius · 0.4 same country only · 0.7 unknown · 0 none."""
+    """1.0 same town or county / source-verified radius · 0.4 same country · 0.7 unknown ·
+    0.3 unplaced town (distance unverified) · 0 a different, known country."""
     if job.within_search_area:
         return LOC_SAME_CITY
     if not job.location or not candidate_locations:
@@ -98,10 +124,16 @@ def location_match(candidate_locations: list[str], job: JobPosting) -> float:
         if not parts:
             continue
         cand_all = set().union(*(_loc_tokens(p) for p in parts))
-        if _loc_tokens(parts[0]) & job_all or _loc_tokens(job_parts[0]) & cand_all:
+        if _same_place(_loc_tokens(parts[0]), job_all) or _same_place(
+            _loc_tokens(job_parts[0]), cand_all
+        ):
             return LOC_SAME_CITY
         if _loc_tokens(parts[-1]) & _loc_tokens(job_parts[-1]):
             best = max(best, LOC_SAME_COUNTRY)
+    if best == 0.0 and not job_all & _KNOWN_COUNTRIES:
+        # A whole-country search cannot place a town either, but has no distance to verify.
+        country_only = all(_loc_tokens(c) <= _KNOWN_COUNTRIES for c in candidate_locations)
+        return LOC_UNKNOWN if country_only else LOC_UNVERIFIED  # e.g. "Abingdon"
     return best
 
 
@@ -112,9 +144,14 @@ def _has_skill(profile: CandidateProfile, skill: str) -> bool:
 # ------------------------------------------------------------------ exclusions
 
 
-def hard_exclusions(profile: CandidateProfile, job: JobPosting) -> list[str]:
+def hard_exclusions(
+    profile: CandidateProfile, job: JobPosting, today: date | None = None
+) -> list[str]:
     """Reasons this job must be dropped regardless of score. Empty list = eligible."""
     reasons: list[str] = []
+
+    if job.closes_at is not None and job.closes_at < (today or date.today()):
+        reasons.append(f"closed: applications closed on {job.closes_at.isoformat()}")
 
     missing_certs = [
         c
@@ -140,14 +177,67 @@ def hard_exclusions(profile: CandidateProfile, job: JobPosting) -> list[str]:
             f"salary up to {job.salary_max:,.0f} is below minimum {profile.salary_min:,.0f}"
         )
 
+    reasons += _language_exclusions(profile, job)
+
     gap = _job_level(job) - profile.seniority_level
-    if profile.cv_based and abs(gap) >= MAX_SENIORITY_GAP:
+    # A move the user chose (career intent) often starts a level or two lower: the job_matcher
+    # judges the level there instead of a fixed ladder rule.
+    pivot = bool(profile.pivot_titles) and shares_role_words(job.title, profile.pivot_titles)
+    if (
+        profile.cv_based
+        and not pivot
+        and (gap >= MAX_SENIORITY_GAP_UP or -gap >= MAX_SENIORITY_GAP)
+    ):
         direction = "above" if gap > 0 else "below"
         reasons.append(
             f"seniority {seniority_name(_job_level(job))} is {abs(gap)} levels {direction} "
             f"candidate ({seniority_name(profile.seniority_level)})"
         )
     return reasons
+
+
+def _known_languages(profile: CandidateProfile) -> dict[str, int]:
+    """Declared languages by name and level (1-4). A CV read in English evidences
+    professional English even when no language is listed."""
+    known = {"english": 3} if profile.cv_based else {}
+    for skill in profile.languages:
+        parsed = parse_language(skill.language)
+        if parsed is not None:
+            known[parsed[0]] = max(known.get(parsed[0], 0), LANGUAGE_LEVELS[skill.level])
+    return known
+
+
+def _language_exclusions(profile: CandidateProfile, job: JobPosting) -> list[str]:
+    """An essential language the candidate has declared they do not speak at all. Only when
+    languages were declared: otherwise the gap is a flag (`eligibility_flags`)."""
+    if not profile.languages:
+        return []
+    known = _known_languages(profile)
+    return [
+        f'requires {name.title()}, not among your languages: "{said}"'
+        for name, _, essential, said in language_requirements(job.description)
+        if essential and name not in known
+    ]
+
+
+def eligibility_flags(profile: CandidateProfile, job: JobPosting) -> list[str]:
+    """Points the user should check before applying, with the posting's own words: a language
+    level above the declared one (or undeclared languages), and eligibility conditions
+    (right to work, clearance, driving licence, registration) not confirmed in the intent."""
+    flags: list[str] = []
+    known = _known_languages(profile)
+    for name, level, essential, said in language_requirements(job.description):
+        have = known.get(name)
+        if not essential or (have is not None and have >= level):
+            continue
+        if have is None and profile.languages:
+            continue  # already an exclusion
+        what = "not declared" if have is None else "above your declared level"
+        flags.append(f'{name.title()} ({what}): "{said}"')
+    for kind, said in eligibility_requirements(job.description):
+        if not confirms(profile.eligibility, kind):
+            flags.append(f'{kind[0].upper()}{kind[1:]}: "{said}"')
+    return flags
 
 
 # ------------------------------------------------------------------ sub-scores
@@ -265,6 +355,8 @@ def score(
         notes.append("skills inferred from the description")
     if location == LOC_SAME_COUNTRY:
         notes.append("same country; exact distance unknown")
+    elif location == LOC_UNVERIFIED:
+        notes.append("town not recognised; distance not verified")
     return ScoreBreakdown(
         title=round(title, 4),
         skills=round(skills, 4),

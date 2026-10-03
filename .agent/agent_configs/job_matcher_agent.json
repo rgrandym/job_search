@@ -1,11 +1,29 @@
 {
-  "$comment": "Runtime: src/jobs/screener.py (MATCHER_SYSTEM). Invoked inside search_jobs; not a chat-loop agent.",
+  "$comment": "Runtime: src/jobs/screener.py (MATCHER_SYSTEM). Runs inside the search pipeline (services/search_service.run_search); not a chat agent.",
   "name": "job_matcher",
-  "version": "0.2.0",
-  "description": "Semantic screening: judges each shortlisted posting against the profile summary and returns a verdict.",
-  "model_role": "worker",
-  "input": ["ProfileSummary", "search constraints", "posting digests (batch)"],
-  "output": "JobVerdict {job_id, match, fit_score 0-100, verdict, reasons, gaps, dealbreakers}",
-  "batching": { "shortlist": 40, "batch_size": 6, "concurrency": 4 },
-  "decision": "match = verdict.match AND fit_score >= threshold (default 70)"
+  "version": "0.7.0",
+  "description": "Semantic screening: judges each shortlisted posting against the profile summary (realistic role families only) and the career intent, and returns a verdict.",
+  "model_role": "screening (first pass); quality (second opinions on every match and near the threshold)",
+  "input": [
+    "ProfileSummary (role families code rejected are removed), with the preferences the user accepted from their labels (services.learning)",
+    "career intent (optional)",
+    "candidate base + search constraints",
+    "posting digests (batch of 3, or 1 for a second opinion); long descriptions keep their requirements section (3000 chars)"
+  ],
+  "output": "JobAssessment {job_id, fit_summary, reasons, transferable, gaps, essential_unmet, unknowns, dealbreakers, alignment (against|neutral|aligned), alignment_note, ratings {function, domain, seniority, leadership, sector, practicality: level 0-4}} -> screener.finalize -> JobVerdict {+ dimensions (points: level/4 of weights 30/20/20/10/10/10), fit_score, band, priority, match, borderline, cap_reason, reviewed, from_memory}",
+  "batching": {
+    "shortlist": "every posting sharing a role word with the target roles + 10 best others (screen_extra), ceiling 250 (screen_max_jobs); 40 when there are no target roles",
+    "shortlist_order": "titles sharing a role-specific word with the target roles first, then pre-filter score; one per (employer, title)",
+    "batch_size": 3,
+    "batch_order": "fixed (by cache key)",
+    "concurrency": 6,
+    "batch_timeout_s": 240,
+    "retries": 1
+  },
+  "decision": "code: points = level/4 of each weight; fit_score = their sum, capped at 65 if an essential is unmet or a dimension < 40% of its weight; match = fit_score >= threshold (default 60) AND no dealbreakers; borderline = |fit_score - threshold| <= 5 and no dealbreakers; alignment never changes fit_score: 'against' caps priority at 'consider' and lowers the rank by 10 points",
+  "consistency": {
+    "memory": "data/verdict_cache.json keyed by normalized posting text (known company aliases and presentation-only description labels) + profile summary + career intent + constraints + provider:screening model:effort|review:quality model:effort + MATCHER_VERSION",
+    "second_opinion": "every first-pass match, postings within 5 points of the threshold, or scoring 65-80 with seniority and leadership both at levels 2-3: one more single-posting assessment by the quality model, levels averaged and rounded down"
+  },
+  "sector_and_domain": "profile-driven (the profile's domains), not tied to one industry; adjacent role families are rated on how much of the work their evidence covers, never a dealbreaker on discipline alone"
 }

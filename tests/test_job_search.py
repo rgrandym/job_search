@@ -18,10 +18,10 @@ from src.cv.models import Experience, MasterCV
 from src.jobs import fetcher, scorer
 from src.jobs.matcher import JobMatcher, build_profile, years_of_experience
 from src.jobs.models import JobPosting, SearchQuery
-from src.jobs.sources.base import HttpFetcher, extract_jsonld_jobs, posting_from_jsonld
+from src.jobs.sources.base import HttpFetcher, SourceError, extract_jsonld_jobs, posting_from_jsonld
 from src.jobs.sources.companies import CompanyBoard, CompanyCareersSource
 from src.jobs.sources.inbox import InboxSource, parse_alert_email
-from src.jobs.sources.job_boards import ReedSource
+from src.jobs.sources.job_boards import AdzunaSource, ReedSource
 from tests.conftest import EXAMPLES
 
 
@@ -108,6 +108,68 @@ def test_location_mismatch_excluded_without_relocation(
     assert scorer.score_location(relocatable, berlin) == 0.6
 
 
+def test_country_filter_scopes_sources_and_location_matching(
+    settings: Settings, master_cv: MasterCV
+) -> None:
+    q = SearchQuery(titles=["scientist"], locations=["Oxford"], country="United Kingdom")
+    assert q.place_names() == ["Oxford, United Kingdom"]
+    assert SearchQuery(country="United Kingdom").place_names() == ["United Kingdom"]
+
+    reed = ReedSource(
+        _http(settings, {}), settings.model_copy(update={"reed_api_key": SecretStr("k")})
+    )
+    with pytest.raises(SourceError, match="UK jobs only"):
+        reed.fetch(SearchQuery(titles=["scientist"], country="Germany"))
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"count": 0, "results": []})
+
+    keys = {"adzuna_app_id": SecretStr("id"), "adzuna_app_key": SecretStr("k")}
+    adz_settings = settings.model_copy(update=keys)
+    http = HttpFetcher(adz_settings, httpx.Client(transport=httpx.MockTransport(handler)))
+    AdzunaSource(http, adz_settings).fetch(SearchQuery(titles=["scientist"], country="Germany"))
+    assert seen[0].url.path == "/v1/api/jobs/de/search/1"
+
+    whole_uk = build_profile(master_cv, query=SearchQuery(country="United Kingdom"))
+    town = JobPosting(id="t", title="Scientist", company="A", location="Abingdon")
+    assert scorer.location_match(whole_uk.locations, town) == scorer.LOC_UNKNOWN
+    abroad = JobPosting(id="b", title="Scientist", company="A", location="Berlin, Germany")
+    assert scorer.location_match(whole_uk.locations, abroad) == 0.0
+
+
+def test_seniority_gate_allows_a_bigger_step_up_than_down(master_cv: MasterCV) -> None:
+    profile = build_profile(master_cv).model_copy(
+        update={"seniority_level": 4, "locations": [], "work_arrangements": []}
+    )  # staff / lead
+
+    def gated(title: str) -> bool:
+        job = JobPosting(id=title, title=title, company="A", work_arrangement="remote")
+        return any("seniority" in r for r in scorer.hard_exclusions(profile, job))
+
+    assert not gated("Director, Cell Therapy")  # 3 up: scored by the job_matcher
+    assert gated("Chief Scientific Officer")  # 4 up
+    assert gated("Graduate Lab Technician")  # 3 down
+
+
+def test_county_matches_town_and_unplaced_towns_are_kept(master_cv: MasterCV) -> None:
+    profile = build_profile(master_cv).model_copy(
+        update={"locations": ["Oxford, UK"], "work_arrangements": [], "willing_to_relocate": False}
+    )
+
+    def at(where: str) -> JobPosting:
+        return JobPosting(id=where, title="Scientist", company="A", location=where)
+
+    assert scorer.location_match(profile.locations, at("Oxfordshire (On-site)")) == 1.0
+    assert scorer.hard_exclusions(profile, at("Oxfordshire (On-site)")) == []
+    abingdon = at("Abingdon")  # no country, no shared name: distance unknown, not excluded
+    assert scorer.location_match(profile.locations, abingdon) == scorer.LOC_UNVERIFIED
+    assert not any("location" in r for r in scorer.hard_exclusions(profile, abingdon))
+    assert any("location" in r for r in scorer.hard_exclusions(profile, at("Berlin, Germany")))
+
+
 def test_matcher_pipeline_buckets_every_job(
     master_cv: MasterCV, jobs: list[JobPosting], settings: Settings
 ) -> None:
@@ -124,11 +186,13 @@ def test_matcher_pipeline_buckets_every_job(
     assert total == len(jobs)
 
 
-def test_retrieval_top_k_cut(
+def test_retrieval_has_no_cap_unless_configured(
     master_cv: MasterCV, jobs: list[JobPosting], settings: Settings
 ) -> None:
-    settings = settings.model_copy(update={"retrieval_top_k": 1})
     report = JobMatcher(HashingEmbedder(256), settings).match(master_cv, jobs, threshold=0)
+    assert report.not_retrieved == []  # scoring is local: every eligible posting is scored
+    capped = settings.model_copy(update={"retrieval_top_k": 1})
+    report = JobMatcher(HashingEmbedder(256), capped).match(master_cv, jobs, threshold=0)
     assert len(report.matches) == 1 and len(report.not_retrieved) == 1
 
 
@@ -194,6 +258,87 @@ def test_reed_source(settings: Settings) -> None:
     assert job.posted_at == date(2026, 9, 15)
 
 
+def test_blank_keys_and_missing_watchlist_are_skipped_not_failed(
+    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = tmp_path / ".env"
+    env.write_text("JOBSEARCH_REED_API_KEY=\nJOBSEARCH_CV_LIBRARY_API_KEY=\n", encoding="utf-8")
+    monkeypatch.delenv("JOBSEARCH_REED_API_KEY", raising=False)
+    monkeypatch.delenv("JOBSEARCH_CV_LIBRARY_API_KEY", raising=False)
+    blank = Settings(_env_file=env)  # type: ignore[call-arg]
+    assert blank.reed_api_key is None and blank.cv_library_api_key is None
+
+    blank = blank.model_copy(update={"companies_path": settings.companies_path})
+    sources, skipped = fetcher.build_sources(["reed", "cv_library", "company"], settings=blank)
+    assert set(skipped) == {"reed", "cv_library"}
+    assert [s.name for s in sources] == ["company"]  # boards are discovered at search time
+
+
+def test_adzuna_source_uk_search(settings: Settings) -> None:
+    settings = settings.model_copy(
+        update={"adzuna_app_id": SecretStr("id"), "adzuna_app_key": SecretStr("secret")}
+    )
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        page = int(request.url.path.rsplit("/", 1)[-1])
+        size = int(request.url.params["results_per_page"])
+        item = {
+            "id": "",
+            "title": "Remote ML Engineer",
+            "company": {"display_name": "Acme"},
+            "location": {"display_name": "London"},
+            "description": "<p>Python role</p>",
+            "salary_min": 70000,
+            "salary_max": 90000,
+            "salary_is_predicted": 0,
+            "redirect_url": "https://www.adzuna.co.uk/jobs/land/ad/1",
+            "created": "2026-09-15T12:00:00Z",
+        }
+        items = [{**item, "id": f"{page}-{i}"} for i in range(size)]
+        return httpx.Response(200, json={"count": 500, "results": items})
+
+    http = HttpFetcher(settings, httpx.Client(transport=httpx.MockTransport(handler)))
+    jobs = AdzunaSource(http, settings).fetch(
+        SearchQuery(
+            titles=["ml engineer"],
+            locations=["London"],
+            distance_miles=25,
+            salary_min=60000,
+            limit=60,
+            work_arrangements=["remote"],
+        )
+    )
+    assert len(jobs) == 60 and jobs[0].id == "adzuna:1-0" and jobs[-1].id == "adzuna:2-9"
+    assert len(seen) == 2  # one search's share (60) = a full page of 50, then a second page
+    assert jobs[0].description == "Python role"
+    assert jobs[0].salary_min == 70000 and jobs[0].salary_max == 90000
+    assert jobs[0].within_search_area and jobs[0].posted_at == date(2026, 9, 15)
+    assert seen[0].url.path == "/v1/api/jobs/gb/search/1"
+    assert seen[1].url.path == "/v1/api/jobs/gb/search/2"
+    assert seen[0].url.params["distance"] == "41"
+    assert seen[0].url.params["where"] == "London"
+    assert seen[0].url.params["salary_min"] == "60000"
+
+
+def test_adzuna_error_does_not_expose_key(settings: Settings) -> None:
+    settings = settings.model_copy(
+        update={"adzuna_app_id": SecretStr("id"), "adzuna_app_key": SecretStr("secret")}
+    )
+    http = _http(settings, {})
+    with pytest.raises(SourceError, match=r"Adzuna API request failed \(HTTP 404\)") as exc:
+        AdzunaSource(http, settings).fetch(SearchQuery(titles=["engineer"]))
+    assert "secret" not in str(exc.value)
+
+    rejected = HttpFetcher(
+        settings, httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(401)))
+    )
+    with pytest.raises(SourceError, match="rejected the credentials") as exc:
+        AdzunaSource(rejected, settings).fetch(SearchQuery(titles=["engineer"]))
+    assert "secret" not in str(exc.value) and "ADZUNA_APP_KEY" in str(exc.value)
+
+
 def test_company_ats_sources(settings: Settings) -> None:
     http = _http(
         settings,
@@ -246,6 +391,10 @@ def test_company_ats_sources(settings: Settings) -> None:
     assert jobs["LV"].work_arrangement == "hybrid"
     assert jobs["AB"].work_arrangement == "remote"
     assert "Broken" in src.errors  # one failing board does not abort the others
+    skipped = {j.company for j in src.fetch(SearchQuery(exclude_boards=["lever:lv"]))}
+    assert skipped == {"GH", "AB"}  # a board switched off in the UI is not read
+    with pytest.raises(SourceError, match="switched off"):
+        src.fetch(SearchQuery(exclude_boards=[c.key for c in companies]))
 
 
 JSONLD_PAGE = """<html><head><script type="application/ld+json">
@@ -293,6 +442,39 @@ def _alert_eml(html: str) -> bytes:
     return bytes(msg)
 
 
+def test_indeed_alerts_with_tracking_links_are_parsed_by_layout() -> None:
+    track = "https://engage.indeed.com/f/a/Abc~~/AAR9hBA~/x{}"
+    digest = _alert_eml(
+        f'<a href="{track.format(1)}">\u200b Edit \u200b</a><p>Salaries estimated if unavailable.'
+        " When a job posting doesn't include a salary, we estimate it from similar jobs.</p>"
+        f'<a href="{track.format(2)}">Principal Scientist, Stem Cells</a>'
+        "<p>Cellica Bio\xa0\xa04.1\xa0\xa0- Oxford</p><p>£60,000 - £70,000 a year</p>"
+        "<p>Easily apply</p><p>Lead iPSC differentiation programmes and a team of four scientists"
+        " across our cell therapy pipeline.</p><p>Just posted</p>"
+        f'<a href="{track.format(3)}">unsubscribe</a><p>.</p>'
+        '<a href="https://www.linkedin.com/comm/jobs/view/42/">Jobs similar to Scientist at X</a>'
+    )
+    [job] = parse_alert_email(digest)
+    assert (job.title, job.company, job.location) == (
+        "Principal Scientist, Stem Cells",
+        "Cellica Bio",
+        "Oxford",
+    )
+    assert job.source == "indeed_alert" and job.id.startswith("indeed:")
+    assert job.salary_range == "£60,000 - £70,000 a year" and job.salary_min is None
+    assert job.description.startswith("Lead iPSC") and job.url == track.format(2)
+
+    match = _alert_eml(
+        '<a href="https://cts.indeed.com/v3/H4sI">\u200b View job \u200b</a>'
+        '<a href="https://cts.indeed.com/v3/H4sJ">Group Leader, Cell Biology</a>'
+        "<p>Oxbridge Therapeutics</p><p>Abingdon</p><p>Salary</p>"
+        '<a href="https://cts.indeed.com/v3/H4sK">\u200b Yes \u200b</a>'
+        "<p>Keep your Indeed profile up to date</p><p>Some Name</p>"
+    )
+    [lead] = parse_alert_email(match)
+    assert (lead.company, lead.location) == ("Oxbridge Therapeutics", "Abingdon")
+
+
 def test_linkedin_and_indeed_alert_emails(settings: Settings, tmp_path: Path) -> None:
     linkedin = _alert_eml(
         '<a href="https://www.linkedin.com/comm/jobs/view/3901234567/?trk=x">Senior ML Engineer</a>'
@@ -309,6 +491,7 @@ def test_linkedin_and_indeed_alert_emails(settings: Settings, tmp_path: Path) ->
     assert li.url == "https://www.linkedin.com/jobs/view/3901234567"
     [ind] = parse_alert_email(indeed)
     assert ind.id == "indeed:a1b2c3d4e5" and ind.company == "Datawell"
+    assert ind.url == "https://uk.indeed.com/viewjob?jk=a1b2c3d4e5"
 
     inbox = tmp_path / "inbox"
     (inbox / "postings").mkdir(parents=True)
@@ -329,12 +512,42 @@ def test_dedupe_prefers_richer_posting() -> None:
     assert fetcher.dedupe([partial, full]) == [full]
 
 
+def test_dedupe_merges_acronym_and_near_identical_full_text() -> None:
+    body = "Investigate stem cell differentiation and lead six month research projects. " * 5
+    first = JobPosting(
+        id="a",
+        title="Investigator Scientist",
+        company="UKRI",
+        location="Oxford",
+        description=body,
+    )
+    renamed = first.model_copy(
+        update={
+            "id": "b",
+            "company": "UK Research and Innovation",
+            "description": "Description:\n" + body,
+        }
+    )
+    different = first.model_copy(
+        update={
+            "id": "c",
+            "company": "Another Company",
+            "description": body.replace("stem cell", "clinical"),
+        }
+    )
+    assert fetcher.dedupe([first, renamed, different]) == [renamed, different]
+    other = renamed.model_copy(update={"company": "Other"})
+    assert fetcher.dedupe([first, other]) == [other]
+    one_word = other.model_copy(update={"description": body + " Apply now."})
+    assert fetcher.dedupe([first, one_word]) == [one_word]
+
+
 def test_build_sources_skips_unconfigured(settings: Settings) -> None:
     sources, skipped = fetcher.build_sources(
-        ["reed", "cv_library", "linkedin", "indeed", "inbox"], settings=settings
+        ["reed", "cv_library", "adzuna", "linkedin", "indeed", "inbox"], settings=settings
     )
     assert [s.name for s in sources] == ["linkedin", "indeed", "inbox"]
-    assert set(skipped) == {"reed", "cv_library"}
+    assert set(skipped) == {"reed", "cv_library", "adzuna"}
 
 
 def test_inbox_source_can_focus_on_one_board(tmp_path: Path, settings: Settings) -> None:
@@ -351,3 +564,180 @@ def test_inbox_source_can_focus_on_one_board(tmp_path: Path, settings: Settings)
 
     assert {job.source for job in linkedin.fetch(SearchQuery())} == {"linkedin_alert"}
     assert {job.source for job in indeed.fetch(SearchQuery())} == {"indeed_alert"}
+
+
+def test_job_matcher_verdict_is_computed_by_code_from_levels() -> None:
+    from src.jobs.models import FIT_WEIGHTS, FitRatings, JobAssessment
+    from src.jobs.screener import finalize
+
+    def assess(levels: tuple[int, ...], **extra: Any) -> JobAssessment:
+        return JobAssessment(
+            job_id="j",
+            ratings=FitRatings(**dict(zip(FIT_WEIGHTS, levels, strict=True))),
+            fit_summary="test",
+            **extra,
+        )
+
+    strong = finalize(assess((4, 4, 3, 3, 4, 3)), threshold=60)  # 30+20+15+8+10+8
+    assert (strong.fit_score, strong.band, strong.priority, strong.match) == (
+        91,
+        "exceptional",
+        "apply_now",
+        True,
+    )
+    assert strong.cap_reason is None and strong.dimensions.leadership == 8
+
+    unmet = finalize(assess((4, 4, 3, 3, 4, 3), essential_unmet=["GMP licence"]), 60)
+    assert unmet.fit_score == 65 and "GMP licence" in (unmet.cap_reason or "")
+    assert (unmet.band, unmet.priority, unmet.match) == ("stretch", "consider", True)
+
+    far_away = finalize(assess((4, 4, 4, 4, 4, 1)), 60)  # practicality level 1: 3/10 < 40%
+    assert far_away.fit_score == 65 and far_away.cap_reason == "weak on practicality"
+
+    blocked = finalize(assess((3, 3, 3, 3, 3, 3), dealbreakers=["sales role"]), 60)
+    assert blocked.fit_score == 77 and not blocked.match and blocked.priority == "low"
+
+    assert not strong.borderline and unmet.borderline  # 91 vs 65, threshold 60
+    near_miss = finalize(assess((3, 2, 2, 2, 2, 2)), 60)  # 58: just below
+    assert near_miss.borderline and not near_miss.match
+    assert not blocked.borderline  # a dealbreaker is a clear "no", however it scores
+
+    weak = finalize(assess((1, 2, 2, 1, 1, 1)), 60)
+    assert (weak.fit_score, weak.band, weak.match) == (37, "weak", False)
+    assert weak.cap_reason is None  # already below the cap: nothing to explain
+
+
+def test_board_terms_split_composite_roles_and_cover_every_family() -> None:
+    from src.tools.search_tools import board_terms
+
+    roles = [
+        "Principal Scientist, Cell Therapy / iPSC",
+        "Group Leader / Associate Director, Stem Cell Research",
+        "Head of iPSC / Cell Therapy Process Development or Research",
+        "Scientist",
+    ]
+    terms = board_terms(roles, ["iPSC", "stem cell"], limit=16)
+    assert terms[:4] == [  # first variant of every role family, before any second variant
+        "Principal Scientist Cell Therapy",
+        "Group Leader Stem Cell Research",
+        "Head of iPSC",
+        "Scientist",  # a plain one-word title is kept
+    ]
+    assert terms[4:6] == ["iPSC", "stem cell"]  # broad keywords next
+    assert {"Principal Scientist iPSC", "Associate Director Stem Cell Research"} <= set(terms)
+    assert "Research" not in terms  # a lone word left over from "or Research" is not a title
+    assert len(board_terms(roles * 10, limit=5)) == 5
+
+
+def test_search_budget_shares_the_limit_across_terms() -> None:
+    q = SearchQuery(titles=[f"t{i}" for i in range(16)], limit=200)
+    assert q.search_budget() == (20, 320)  # every term gets 20, not the first term all 200
+    assert SearchQuery(titles=["a"], limit=200).search_budget() == (200, 200)
+
+
+def test_biotechnology_jobs_feed_is_parsed_cached_hourly_and_uk_only(settings: Settings) -> None:
+    from src.jobs.sources.feeds import BiotechnologyJobsSource
+
+    calls: list[str] = []
+    item = {
+        "id": "https://biotechnologyjobs.co.uk/jobs/principal-scientist-ipsc-acme",
+        "url": "https://biotechnologyjobs.co.uk/jobs/principal-scientist-ipsc-acme",
+        "title": "Principal Scientist, iPSC · Acme Bio · Oxford",
+        "summary": "Lead iPSC differentiation.",
+        "tags": ["permanent", "hybrid", "senior"],
+        "_company": "Acme Bio",
+        "_location": "Oxford, Oxfordshire",
+        "_jobposting": {
+            "@type": "JobPosting",
+            "title": "Principal Scientist, iPSC",
+            "hiringOrganization": {"@type": "Organization", "name": "Acme Bio"},
+            "identifier": {"@type": "PropertyValue", "value": "principal-scientist-ipsc-acme"},
+            "datePosted": "2026-10-01T13:44:11+00:00",
+            "description": "<p>Lead our <b>iPSC</b> team.</p>",
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nDisallow: /dashboard\n")
+        return httpx.Response(200, json={"version": "1.1", "items": [item]})
+
+    http = HttpFetcher(settings, httpx.Client(transport=httpx.MockTransport(handler)))
+    src = BiotechnologyJobsSource(http, settings)
+    [job] = src.fetch(SearchQuery(titles=["principal scientist"]))
+    assert (job.id, job.title, job.company) == (
+        "biotechnologyjobs:principal-scientist-ipsc-acme",
+        "Principal Scientist, iPSC",
+        "Acme Bio",
+    )
+    assert job.location == "Oxford, Oxfordshire" and job.work_arrangement == "hybrid"
+    assert job.description == "Lead our iPSC team." and job.url == item["url"]
+    assert src.fetch(SearchQuery(titles=["data engineer"])) == []  # local title filter
+
+    feed_calls = [c for c in calls if c == "/jobs.json"]
+    assert feed_calls == ["/jobs.json"]  # second search served from the hourly cache
+    with pytest.raises(SourceError, match="UK jobs only"):
+        src.fetch(SearchQuery(country="Germany"))
+    assert fetcher.build_sources(["biotechnologyjobs"], settings=settings)[1] == {}
+
+
+def test_adzuna_gets_the_date_window(settings: Settings) -> None:
+    settings = settings.model_copy(
+        update={"adzuna_app_id": SecretStr("id"), "adzuna_app_key": SecretStr("secret")}
+    )
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"count": 0, "results": []})
+
+    http = HttpFetcher(settings, httpx.Client(transport=httpx.MockTransport(handler)))
+    AdzunaSource(http, settings).fetch(SearchQuery(titles=["x"], posted_within_days=3))
+    assert seen[0].url.params["max_days_old"] == "3"
+
+
+def test_alert_postings_are_dated_by_the_email() -> None:
+    msg = EmailMessage()
+    msg["Subject"] = "Jobs for you"
+    msg["Date"] = "Tue, 29 Sep 2026 08:00:00 +0000"
+    msg.set_content("ML Engineer\nhttps://www.linkedin.com/jobs/view/3901234567/\n")
+    [job] = parse_alert_email(bytes(msg))
+    assert job.posted_at == date(2026, 9, 29)
+
+
+def test_role_words_ignore_words_every_department_uses() -> None:
+    from src.tools.search_tools import company_key, role_words, shares_role_words
+
+    targets = [
+        "Principal Scientist Cell Therapy",
+        "Group Leader Stem Cell Research",
+        "Head of iPSC",
+    ]
+    assert role_words("Group Leader Stem Cell Research") == {"stem", "cell"}
+    assert shares_role_words("Scientist, Genetic Assays", targets)
+    assert shares_role_words("iPSC Process Development Lead", targets)
+    for unrelated in ("Group Leader - Holiday Camp", "HR Business Lead", "Global Credit Controller",
+                      "Head, Global Market Access and Pricing"):  # fmt: skip
+        assert not shares_role_words(unrelated, targets), unrelated
+    assert company_key("Moderna Therapeutics") == company_key("Moderna") == "moderna"
+    assert company_key("Oxford Biomedica (UK) Ltd") == "oxford biomedica"
+    assert company_key("UKRI") == company_key("UK Research and Innovation")
+    assert company_key("GSK") == company_key("GlaxoSmithKline")
+
+
+def test_retrieval_cap_keeps_role_relevant_titles(master_cv: MasterCV, settings: Settings) -> None:
+    settings = settings.model_copy(update={"retrieval_top_k": 1})
+    camp = JobPosting(
+        id="camp", title="Group Leader - Holiday Camp", company="A", work_arrangement="remote",
+        description="Python machine learning PyTorch group leader",
+    )  # fmt: skip
+    role = JobPosting(
+        id="role", title="Machine Learning Engineer", company="B", work_arrangement="remote"
+    )
+    query = SearchQuery(titles=["Machine Learning Engineer"])
+    report = JobMatcher(HashingEmbedder(256), settings).match(
+        master_cv, [camp, role], threshold=0, query=query
+    )
+    retrieved = [r.job.id for r in (*report.matches, *report.below_threshold)]
+    assert retrieved == ["role"] and report.not_retrieved == ["camp"]

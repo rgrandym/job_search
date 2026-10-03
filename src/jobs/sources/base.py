@@ -1,9 +1,10 @@
 """Shared plumbing for job sources: polite HTTP, robots.txt, HTML/JSON-LD parsing.
 
-Compliance rules (enforced here, documented in CLAUDE.md):
-- Only official APIs, public ATS feeds, or pages whose robots.txt allows us.
-- Identify ourselves with a real User-Agent and rate-limit every host.
-- No login walls, no CAPTCHA/anti-bot circumvention, no proxies to evade blocks.
+Source rules (documented in CLAUDE.md; this is a personal job-search tool):
+- Official APIs, public ATS feeds, and public job pages that need no login.
+- Rate-limit every host. Careers sites and directories are read within their robots.txt;
+  LinkedIn's public job search is read slowly, capped, and without robots.txt.
+- No logins, no CAPTCHA/anti-bot circumvention, no proxies to evade blocks.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import hashlib
 import html
 import json
 import re
+import threading
 import time
 from datetime import date, datetime
 from typing import Any
@@ -32,45 +34,76 @@ class SourceError(RuntimeError):
 class HttpFetcher:
     """httpx wrapper with per-host delay and robots.txt checks. Inject `client` in tests."""
 
-    def __init__(self, settings: Settings | None = None, client: httpx.Client | None = None):
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        client: httpx.Client | None = None,
+        *,
+        delay_s: float | None = None,
+        user_agent: str | None = None,
+    ):
         self.settings = settings or get_settings()
+        self.delay_s = self.settings.request_delay_s if delay_s is None else delay_s
         self.client = client or httpx.Client(
             timeout=self.settings.http_timeout_s,
-            headers={"User-Agent": self.settings.http_user_agent},
+            headers={"User-Agent": user_agent or self.settings.http_user_agent},
             follow_redirects=True,
         )
         self._last_hit: dict[str, float] = {}
         self._robots: dict[str, RobotFileParser] = {}
+        self._lock = threading.Lock()  # sources fetch boards from several threads at once
 
     def get(self, url: str, *, check_robots: bool = False, **kwargs: Any) -> httpx.Response:
         """GET with politeness delay. `check_robots=True` for non-API page fetches."""
         host = urlsplit(url).netloc
         if check_robots and not self._allowed(url):
             raise SourceError(f"robots.txt disallows {url}")
-        wait = self.settings.request_delay_s - (time.monotonic() - self._last_hit.get(host, 0.0))
-        if wait > 0:
-            time.sleep(wait)
+        self._wait_turn(host)
         try:
             resp = self.client.get(url, **kwargs)
             resp.raise_for_status()
         except httpx.HTTPError as exc:
             raise SourceError(f"GET {url} failed: {exc}") from exc
-        finally:
-            self._last_hit[host] = time.monotonic()
         return resp
+
+    def post(self, url: str, *, check_robots: bool = False, **kwargs: Any) -> httpx.Response:
+        """POST an API request with the same timeout, per-host delay and robots option as GET."""
+        host = urlsplit(url).netloc
+        if check_robots and not self._allowed(url):
+            raise SourceError(f"robots.txt disallows {url}")
+        self._wait_turn(host)
+        try:
+            resp = self.client.post(url, **kwargs)
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise SourceError(f"POST {url} failed: {exc}") from exc
+        return resp
+
+    def _wait_turn(self, host: str) -> None:
+        """Sleep until `host` may be hit again. Slots are reserved under the lock, so threads
+        sharing a host (e.g. every Greenhouse board) still keep the delay between requests."""
+        with self._lock:
+            now = time.monotonic()
+            slot = max(now, self._last_hit.get(host, 0.0) + self.delay_s)
+            self._last_hit[host] = slot
+        if slot > now:
+            time.sleep(slot - now)
 
     def _allowed(self, url: str) -> bool:
         parts = urlsplit(url)
         root = f"{parts.scheme}://{parts.netloc}"
-        if root not in self._robots:
+        with self._lock:
+            cached = self._robots.get(root)
+        if cached is None:
             rp = RobotFileParser()
             try:
                 resp = self.client.get(f"{root}/robots.txt")
                 rp.parse(resp.text.splitlines() if resp.status_code == 200 else [])
             except httpx.HTTPError:
                 rp.parse([])
-            self._robots[root] = rp
-        return self._robots[root].can_fetch(self.settings.http_user_agent, url)
+            with self._lock:
+                cached = self._robots.setdefault(root, rp)
+        return cached.can_fetch(self.settings.http_user_agent, url)
 
 
 # ------------------------------------------------------------------ parsing helpers
@@ -89,6 +122,37 @@ def html_to_text(raw: str) -> str:
     text = _BLOCK_RE.sub("\n", text)
     text = html.unescape(_TAG_RE.sub("", text))
     return re.sub(r"\n\s*\n+", "\n\n", re.sub(r"[ \t]+", " ", text)).strip()
+
+
+# Country names the UI offers -> ISO 3166 alpha-2 (as job APIs use, e.g. Adzuna's path).
+COUNTRY_CODES: dict[str, str] = {
+    "united kingdom": "gb", "uk": "gb", "great britain": "gb", "united states": "us",
+    "usa": "us", "canada": "ca", "australia": "au", "new zealand": "nz", "ireland": "ie",
+    "germany": "de", "france": "fr", "netherlands": "nl", "belgium": "be", "switzerland": "ch",
+    "austria": "at", "spain": "es", "italy": "it", "poland": "pl", "singapore": "sg",
+    "india": "in", "south africa": "za", "brazil": "br", "mexico": "mx",
+}  # fmt: skip
+
+
+def country_code(name: str | None) -> str | None:
+    """ISO alpha-2 code for a country name ("United Kingdom" -> "gb"), None if unknown/unset."""
+    return COUNTRY_CODES.get((name or "").strip().lower())
+
+
+# Extra names ATS location lists use for a country ("UK - Cambridge", "London - England").
+COUNTRY_ALIASES: dict[str, tuple[str, ...]] = {
+    "gb": ("united kingdom", "uk", "great britain", "gb", "gbr", "england", "scotland", "wales",
+           "northern ireland"),
+    "us": ("united states", "usa", "us"),
+}  # fmt: skip
+
+
+def country_names(name: str | None) -> list[str]:
+    """Lower-case names a country goes by in ATS location lists ("United Kingdom" -> uk, ...)."""
+    if not name or not name.strip():
+        return []
+    code = country_code(name)
+    return sorted({name.strip().lower(), *COUNTRY_ALIASES.get(code or "", ())})
 
 
 def stable_id(*parts: object) -> str:
@@ -182,5 +246,6 @@ def posting_from_jsonld(node: dict[str, Any], *, source: str, url: str | None) -
         required_skills=[s.strip() for s in skills.split(",")] if isinstance(skills, str) else [],
         url=node.get("url") or url,
         posted_at=parse_date(node.get("datePosted")),
+        closes_at=parse_date(node.get("validThrough")),
         source=source,
     )

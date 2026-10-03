@@ -18,13 +18,24 @@ from src.cv.models import Experience, MasterCV, TailoredCV
 from src.cv.tailor import cv_to_text
 from src.jobs import scorer
 from src.jobs.models import (
+    LANGUAGE_LEVELS,
     CandidateProfile,
     JobPosting,
+    LanguageSkill,
     MatchReport,
     MatchResult,
+    SearchIntent,
     SearchQuery,
 )
-from src.tools.search_tools import DEFAULT_LEVEL, normalize_skills, seniority_level
+from src.tools.search_tools import (
+    DEFAULT_LEVEL,
+    normalize_skills,
+    parse_language,
+    seniority_level,
+    shares_role_words,
+)
+
+_LEVEL_NAMES = {v: k for k, v in LANGUAGE_LEVELS.items()}
 
 
 def years_of_experience(experience: list[Experience], today: date | None = None) -> float:
@@ -75,8 +86,33 @@ def build_profile(
         certifications=[c.name for c in master.certifications],
         salary_min=prefs.min_salary,
         text=cv_to_text(master),
+        languages=cv_languages(master.languages),
     )
     return apply_query(profile, query) if query else profile
+
+
+def cv_languages(entries: list[str]) -> list[LanguageSkill]:
+    """The CV's free-text languages ("Spanish (C1)") as structured skills; unknown names skip."""
+    out: list[LanguageSkill] = []
+    for entry in entries:
+        parsed = parse_language(entry)
+        if parsed is not None:
+            name, level = parsed
+            out.append(LanguageSkill(language=name.title(), level=_LEVEL_NAMES[level]))
+    return out
+
+
+def apply_intent(
+    profile: CandidateProfile, intent: SearchIntent | None, pivot_titles: list[str]
+) -> CandidateProfile:
+    """Overlay the user's confirmed languages and eligibility, and the titles of areas they
+    chose to move into (career intent), onto a profile."""
+    update: dict[str, object] = {"pivot_titles": pivot_titles}
+    if intent is not None:
+        if intent.languages:
+            update["languages"] = intent.languages
+        update["eligibility"] = intent.eligibility
+    return profile.model_copy(update=update)
 
 
 def apply_query(profile: CandidateProfile, query: SearchQuery) -> CandidateProfile:
@@ -84,8 +120,8 @@ def apply_query(profile: CandidateProfile, query: SearchQuery) -> CandidateProfi
     update: dict[str, object] = {}
     if query.titles:
         update["target_titles"] = query.titles
-    if query.locations:
-        update["locations"] = query.locations
+    if query.locations or query.country:
+        update["locations"] = query.place_names()
     if query.work_arrangements:
         update["work_arrangements"] = query.work_arrangements
     if query.salary_min:
@@ -104,12 +140,27 @@ def profile_from_query(query: SearchQuery) -> CandidateProfile:
         skills=sorted(normalize_skills(query.keywords)),
         years_experience=0,
         seniority_level=seniority_level(query.titles[0]) if query.titles else DEFAULT_LEVEL,
-        locations=query.locations,
+        locations=query.place_names(),
         work_arrangements=query.work_arrangements,
         salary_min=float(query.salary_min) if query.salary_min else None,
         cv_based=False,
         text="\n".join([*query.titles, *query.keywords]),
     )
+
+
+def _exclude(
+    profile: CandidateProfile, jobs: list[JobPosting]
+) -> tuple[list[MatchResult], list[JobPosting]]:
+    """Split jobs into (excluded with reasons, eligible)."""
+    excluded: list[MatchResult] = []
+    eligible: list[JobPosting] = []
+    for job in jobs:
+        reasons = scorer.hard_exclusions(profile, job)
+        if reasons:
+            excluded.append(MatchResult(job=job, excluded=True, exclusion_reasons=reasons))
+        else:
+            eligible.append(job)
+    return excluded, eligible
 
 
 class JobMatcher:
@@ -125,28 +176,32 @@ class JobMatcher:
         jobs: list[JobPosting],
         threshold: float | None = None,
         query: SearchQuery | None = None,
+        intent: SearchIntent | None = None,
+        pivot_titles: list[str] | None = None,
     ) -> MatchReport:
-        """Score `jobs` for `cv` (or, with no CV, for the `query` filters alone)."""
+        """Score `jobs` for `cv` (or, with no CV, for the `query` filters alone). `intent` adds
+        confirmed languages and eligibility; `pivot_titles` are areas the user chose to enter."""
         threshold = self.settings.score_threshold if threshold is None else threshold
         if cv is None:
             profile = profile_from_query(query or SearchQuery())
         else:
             profile = build_profile(cv, query=query)
+        profile = apply_intent(profile, intent, pivot_titles or [])
 
-        # Stage 1: hard exclusions
-        excluded, eligible = [], []
-        for job in jobs:
-            reasons = scorer.hard_exclusions(profile, job)
-            if reasons:
-                excluded.append(MatchResult(job=job, excluded=True, exclusion_reasons=reasons))
-            else:
-                eligible.append(job)
+        excluded, eligible = _exclude(profile, jobs)  # Stage 1: hard exclusions
 
-        # Stage 2: semantic retrieval
+        # Stage 2: semantic retrieval. Titles sharing a role-specific word with the target roles
+        # rank first, so an optional cap never cuts a scientist role for an unrelated one.
         sims = self._similarities(profile, eligible)
-        ranked = sorted(zip(eligible, sims, strict=True), key=lambda p: p[1], reverse=True)
-        retrieved = ranked[: self.settings.retrieval_top_k]
-        not_retrieved = [j.id for j, _ in ranked[self.settings.retrieval_top_k :]]
+        targets = profile.target_titles
+        ranked = sorted(
+            zip(eligible, sims, strict=True),
+            key=lambda p: (not targets or shares_role_words(p[0].title, targets), p[1]),
+            reverse=True,
+        )
+        cut = self.settings.retrieval_top_k or len(ranked)  # scoring is local: no cap by default
+        retrieved = ranked[:cut]
+        not_retrieved = [j.id for j, _ in ranked[cut:]]
 
         # Stage 3 + 4: score, threshold, rank
         passed: list[MatchResult] = []
@@ -154,7 +209,13 @@ class JobMatcher:
         for job, sim in retrieved:
             breakdown = scorer.score(profile, job, sim, self.settings.weights)
             ok = breakdown.total >= threshold
-            result = MatchResult(job=job, similarity=round(sim, 4), score=breakdown, passed=ok)
+            result = MatchResult(
+                job=job,
+                similarity=round(sim, 4),
+                score=breakdown,
+                passed=ok,
+                flags=scorer.eligibility_flags(profile, job),
+            )
             (passed if ok else below).append(result)
 
         def by_total(r: MatchResult) -> float:

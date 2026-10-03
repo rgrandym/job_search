@@ -1,18 +1,23 @@
-"""Job boards with official APIs: Reed and CV-Library.
+"""Job boards with official APIs: Reed, CV-Library and Adzuna.
 
 Reed:       https://www.reed.co.uk/developers/jobseeker   (free key, HTTP Basic auth, key as user)
 CV-Library: https://www.cv-library.co.uk/developers/job-search-api  (key on request, partner access)
+Adzuna:     https://developer.adzuna.com/docs/search       (app ID and app key)
 """
 
 from __future__ import annotations
 
+import math
 from typing import Any
+
+import httpx
 
 from src.core.config import Settings, get_settings
 from src.jobs.models import JobPosting, SearchQuery
 from src.jobs.sources.base import (
     HttpFetcher,
     SourceError,
+    country_code,
     html_to_text,
     infer_arrangement,
     parse_date,
@@ -21,6 +26,19 @@ from src.jobs.sources.base import (
 REED_SEARCH = "https://www.reed.co.uk/api/1.0/search"
 REED_DETAILS = "https://www.reed.co.uk/api/1.0/jobs/{id}"
 CVL_SEARCH = "https://www.cv-library.co.uk/search-jobs-json"
+ADZUNA_SEARCH = "https://api.adzuna.com/v1/api/jobs/{country}/search/{page}"
+# Countries Adzuna's search API covers (https://developer.adzuna.com/overview).
+ADZUNA_COUNTRIES = {
+    "gb", "us", "ca", "au", "nz", "de", "fr", "nl", "be", "ch", "at", "es", "it", "pl", "sg",
+    "in", "za", "br", "mx",
+}  # fmt: skip
+
+
+def uk_only(source: str, query: SearchQuery) -> bool:
+    """True when the search is in the UK (or unset). UK-only boards refuse other countries."""
+    if query.country and country_code(query.country) != "gb":
+        raise SourceError(f"{source} lists UK jobs only; not searched for {query.country}")
+    return query.country is not None
 
 
 class ReedSource:
@@ -42,15 +60,17 @@ class ReedSource:
         self._auth = (self.settings.reed_api_key.get_secret_value(), "")
 
     def fetch(self, query: SearchQuery) -> list[JobPosting]:
+        in_country = uk_only("Reed", query)
         jobs: dict[str, JobPosting] = {}
+        per_search, cap = query.search_budget()
         locations: list[str | None] = [*query.locations] or [None]
         for term in query.search_terms():
             for location in locations:
                 skip = 0
-                while len(jobs) < query.limit:
+                while skip < per_search:
                     params: dict[str, Any] = {
                         "keywords": term,
-                        "resultsToTake": min(100, query.limit - len(jobs)),
+                        "resultsToTake": min(100, per_search - skip),
                         "resultsToSkip": skip,
                     }
                     if location:
@@ -65,7 +85,7 @@ class ReedSource:
                     results = data.get("results", [])
                     for r in results:
                         job = self._to_posting(r)
-                        if location:
+                        if location or in_country:
                             job.within_search_area = True
                         jobs.setdefault(job.id, job)
                     skip += len(results)
@@ -74,7 +94,7 @@ class ReedSource:
         out = list(jobs.values())
         if query.remote_only:
             out = [j for j in out if j.work_arrangement == "remote"]
-        return out[: query.limit]
+        return out[:cap]
 
     def enrich(self, job: JobPosting) -> JobPosting:
         """Replace the search snippet with the full description from the details endpoint."""
@@ -106,6 +126,7 @@ class ReedSource:
             salary_max=float(hi) if hi else None,
             url=r.get("jobUrl"),
             posted_at=parse_date(r.get("date")),
+            closes_at=parse_date(r.get("expirationDate")),
             source=self.name,
         )
 
@@ -127,6 +148,7 @@ class CVLibrarySource:
         self._key = self.settings.cv_library_api_key.get_secret_value()
 
     def fetch(self, query: SearchQuery) -> list[JobPosting]:
+        in_country = uk_only("CV-Library", query)
         jobs: list[JobPosting] = []
         locations: list[str | None] = [*query.locations] or [None]
         for term in query.search_terms():
@@ -144,11 +166,11 @@ class CVLibrarySource:
                 data = self.http.get(CVL_SEARCH, params=params).json()
                 for r in data.get("jobs", []):
                     job = self._to_posting(r)
-                    job.within_search_area = bool(location)
+                    job.within_search_area = bool(location) or in_country
                     jobs.append(job)
         if query.remote_only:
             jobs = [j for j in jobs if j.work_arrangement == "remote"]
-        return jobs[: query.limit]
+        return jobs[: query.search_budget()[1]]
 
     def _to_posting(self, r: dict[str, Any]) -> JobPosting:
         text = html_to_text(str(r.get("description", "")))
@@ -167,5 +189,116 @@ class CVLibrarySource:
             salary_range=r.get("salary"),
             url=url,
             posted_at=parse_date(r.get("posted")),
+            source=self.name,
+        )
+
+
+def _adzuna_error(exc: Exception) -> str:
+    """Why an Adzuna call failed, without echoing the request URL (it carries the app key)."""
+    cause = exc.__cause__
+    if not isinstance(cause, httpx.HTTPStatusError):
+        return "Adzuna API request failed (network error or unreadable response)"
+    status = cause.response.status_code
+    if status in (401, 403):
+        return (
+            f"Adzuna rejected the credentials (HTTP {status}); check "
+            "JOBSEARCH_ADZUNA_APP_ID and JOBSEARCH_ADZUNA_APP_KEY"
+        )
+    if status == 429:
+        return "Adzuna rate limit reached (HTTP 429); try again later"
+    return f"Adzuna API request failed (HTTP {status})"
+
+
+class AdzunaSource:
+    """Adzuna's official UK search API; descriptions are snippets only.
+
+    Set `JOBSEARCH_ADZUNA_APP_ID` and `JOBSEARCH_ADZUNA_APP_KEY`.
+    """
+
+    name = "adzuna"
+
+    def __init__(self, http: HttpFetcher | None = None, settings: Settings | None = None) -> None:
+        self.settings = settings or get_settings()
+        self.http = http or HttpFetcher(self.settings)
+        if self.settings.adzuna_app_id is None or self.settings.adzuna_app_key is None:
+            raise SourceError(
+                "Adzuna requires JOBSEARCH_ADZUNA_APP_ID and JOBSEARCH_ADZUNA_APP_KEY"
+            )
+        self._id = self.settings.adzuna_app_id.get_secret_value()
+        self._key = self.settings.adzuna_app_key.get_secret_value()
+
+    def fetch(self, query: SearchQuery) -> list[JobPosting]:
+        country = country_code(query.country) or "gb"
+        if country not in ADZUNA_COUNTRIES:
+            raise SourceError(f"Adzuna does not cover {query.country}")
+        jobs: dict[str, JobPosting] = {}
+        per_search, cap = query.search_budget()
+        page_size = min(50, per_search)
+        locations: list[str | None] = [*query.locations] or [None]
+        for term in query.search_terms():
+            for location in locations:
+                page = 1
+                while (page - 1) * page_size < per_search:
+                    params: dict[str, Any] = {
+                        "app_id": self._id,
+                        "app_key": self._key,
+                        "results_per_page": page_size,
+                        "what": term,
+                        "content-type": "application/json",
+                    }
+                    if location:
+                        params["where"] = location
+                        if query.distance_miles is not None:
+                            params["distance"] = math.ceil(query.distance_miles * 1.609344)
+                    if query.salary_min is not None:
+                        params["salary_min"] = query.salary_min
+                    if query.salary_max is not None:
+                        params["salary_max"] = query.salary_max
+                    if query.posted_within_days is not None:
+                        params["max_days_old"] = query.posted_within_days
+                    try:
+                        url = ADZUNA_SEARCH.format(country=country, page=page)
+                        data = self.http.get(url, params=params).json()
+                    except (SourceError, ValueError) as exc:
+                        # HttpFetcher errors may contain query parameters, including the app key.
+                        raise SourceError(_adzuna_error(exc)) from None
+                    results = data.get("results", [])
+                    for item in results:
+                        job = self._to_posting(item)
+                        job.within_search_area = bool(location) or query.country is not None
+                        jobs.setdefault(job.id, job)
+                    if not results or page * page_size >= data.get("count", 0):
+                        break
+                    page += 1
+        out = list(jobs.values())
+        if query.remote_only:
+            out = [job for job in out if job.work_arrangement == "remote"]
+        return out[:cap]
+
+    def _to_posting(self, item: dict[str, Any]) -> JobPosting:
+        text = html_to_text(str(item.get("description") or ""))
+        location = item.get("location") or {}
+        company = item.get("company") or {}
+        low, high = item.get("salary_min"), item.get("salary_max")
+        has_salary = not item.get("salary_is_predicted") and (low is not None or high is not None)
+        salary_range = None
+        if has_salary:
+            salary_from = low if low is not None else high
+            salary_to = high if high is not None else low
+            salary_range = f"£{salary_from:g}–£{salary_to:g}"
+        return JobPosting(
+            id=f"adzuna:{item['id']}",
+            title=str(item.get("title") or ""),
+            company=str(company.get("display_name") or "unknown"),
+            location=location.get("display_name"),
+            work_arrangement=infer_arrangement(
+                item.get("title"), location.get("display_name"), text
+            ),
+            description=text,
+            salary_range=salary_range,
+            salary_min=float(low) if has_salary and low is not None else None,
+            salary_max=float(high) if has_salary and high is not None else None,
+            url=item.get("redirect_url"),
+            posted_at=parse_date(item.get("created")),
             source=self.name,
         )
