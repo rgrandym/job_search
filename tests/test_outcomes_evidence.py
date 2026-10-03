@@ -62,7 +62,15 @@ def ws(settings: Settings, master_cv: MasterCV, monkeypatch: pytest.MonkeyPatch)
             EvidenceProposals: _proposals,
             JDAnalysis: JDAnalysis(job_title="ML Engineer", company="Orbit"),
             CoverLetterDraft: CoverLetterDraft(
-                paragraphs=[LetterParagraph(text="I built recommenders.", source_ids=["nimbus"])]
+                paragraphs=[
+                    LetterParagraph(
+                        text="I am interested in the ML Engineer role.", source_ids=["nimbus"]
+                    ),
+                    LetterParagraph(text="I built recommenders.", source_ids=["nimbus"]),
+                    LetterParagraph(
+                        text="I would welcome a conversation about the role.", source_ids=["nimbus"]
+                    ),
+                ]
             ),
         }
     )
@@ -209,7 +217,7 @@ def test_api_intent_outcomes_evidence_and_cover_letter(ws: Workspace, monkeypatc
     )
     letter = client.post("/api/jobs/j1/cover-letter", json={}).json()
     assert letter["download_url"].endswith("_Orbit_ML_Engineer_cover_letter.docx")
-    assert letter["paragraphs"] == 1
+    assert letter["paragraphs"] == 3
     assert client.post("/api/jobs/nope/cover-letter", json={}).status_code == 404
     tracked = client.put("/api/jobs/j1/tracking", json={"status": "applied", "stage": "screening"})
     assert tracked.json()["stage"] == "screening"

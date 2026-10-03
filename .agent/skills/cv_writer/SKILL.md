@@ -142,14 +142,18 @@ Path("output/tailored_acme.json").write_text(tailor.dump_tailored(tailored))
 
 `cover_letter.write_letter(master, jd, jd_text, llm, motivation) -> CoverLetter`
 (`cv_service.write_cover_letter`, `POST /api/jobs/{job_id}/cover-letter`, agent tool
-`write_cover_letter`). The LLM drafts 3–4 paragraphs, each citing in `source_ids` the Master
+`write_cover_letter`). The LLM drafts 3–4 short paragraphs: a role-specific introduction
+explaining interest and fit, 1–2 evidence paragraphs, and a brief close. Each cites in
+`source_ids` the Master
 CV bullet, role or project ids its claims come from. `apply_letter` keeps a paragraph only if
 every cited id exists, every number is in its cited sources or in the job description (facts
 about the employer may be quoted), and every skill it names is evidenced by its cited sources.
 Motivation comes **only** from the user's career intent (direction, energising work, target
-areas); without one, it stays to one brief sentence about the role. Every paragraph is
-recorded in `CoverLetter.changes`; rejected ones are reported. Exported as
-`<First>_<Last>_<Company>_cover_letter.docx`.
+areas); without one, interest stays grounded in the work described in the posting. The
+guarded result must retain the introduction, evidence and close and stay under 330 body words.
+Every paragraph is recorded in `CoverLetter.changes`; rejected ones are reported. The Word
+file starts with the greeting, without the CV contact header or date. Exported with a role
+specific, versioned filename so drafts are preserved.
 
 ---
 

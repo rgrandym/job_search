@@ -111,7 +111,13 @@ def test_cv_and_cover_letter_share_one_jd_analysis(
     ws = Workspace(settings)
     ws.master_cv, ws.active_cv_id = master_cv, "master"
     draft = CoverLetterDraft(
-        paragraphs=[LetterParagraph(text="I built ML.", source_ids=["nimbus"])]
+        paragraphs=[
+            LetterParagraph(text="I am interested in the ML Engineer role.", source_ids=["nimbus"]),
+            LetterParagraph(text="I built ML.", source_ids=["nimbus"]),
+            LetterParagraph(
+                text="I would welcome a conversation about the role.", source_ids=["nimbus"]
+            ),
+        ]
     )
     llm = FakeLLM(
         {

@@ -12,7 +12,7 @@ import pytest
 from docx import Document
 
 from src.cv.ats import check_docx
-from src.cv.cover_letter import apply_letter, draft_letter
+from src.cv.cover_letter import apply_letter, draft_letter, write_letter
 from src.cv.docx_exporter import export_cover_letter, export_docx
 from src.cv.models import (
     BulletIssue,
@@ -168,8 +168,31 @@ def test_cover_letter_keeps_only_backed_paragraphs(master_cv: MasterCV, tmp_path
     reasons = [c.reason or "" for c in letter.changes if not c.accepted]
     assert "50%" in reasons[0] and "spark" in reasons[1] and "ghost" in reasons[2]
     path = export_cover_letter(letter, master_cv, tmp_path / "letter.docx")
-    text = "\n".join(p.text for p in Document(str(path)).paragraphs)
+    paragraphs = [p.text for p in Document(str(path)).paragraphs]
+    text = "\n".join(paragraphs)
+    assert paragraphs[0] == "Dear Hiring Manager,"
+    assert master_cv.basics.email not in text
+    assert master_cv.basics.headline not in text
     assert "4M users" in text and "Alex Example" in text and "50%" not in text
+
+
+def test_letter_requires_role_introduction_and_one_page_length(master_cv: MasterCV) -> None:
+    def generate(paragraphs: list[LetterParagraph]) -> None:
+        llm = FakeLLM({CoverLetterDraft: CoverLetterDraft(paragraphs=paragraphs)})
+        write_letter(master_cv, JD, "Senior ML Engineer role", llm)
+
+    evidence = LetterParagraph(text="I built recommenders at Nimbus.", source_ids=["nimbus"])
+    close = LetterParagraph(
+        text="I would welcome a conversation about the role.", source_ids=["nimbus"]
+    )
+    with pytest.raises(ValueError, match="open with the role"):
+        generate([evidence, evidence, close])
+    intro = LetterParagraph(
+        text="I am interested in the Senior ML Engineer role because it matches my ML work.",
+        source_ids=["nimbus"],
+    )
+    with pytest.raises(ValueError, match="too long"):
+        generate([intro, LetterParagraph(text="I built ML. " * 170, source_ids=["nimbus"]), close])
 
 
 def test_cover_letter_rejects_unsourced_personal_claims_and_job_numbers(
@@ -197,7 +220,16 @@ def test_letter_motivation_comes_only_from_the_career_intent(
     ws.master_cv, ws.active_cv_id = master_cv, "master"
     intent.save_intent(ws, SearchIntent(direction="Lead applied ML in health"))
     draft = CoverLetterDraft(
-        paragraphs=[LetterParagraph(text="I built recommenders at Nimbus.", source_ids=["nimbus"])]
+        paragraphs=[
+            LetterParagraph(
+                text="I am interested in the Senior ML Engineer role, where my ML work fits.",
+                source_ids=["nimbus"],
+            ),
+            LetterParagraph(text="I built recommenders at Nimbus.", source_ids=["nimbus"]),
+            LetterParagraph(
+                text="I would welcome a conversation about the role.", source_ids=["nimbus"]
+            ),
+        ]
     )
     llm = FakeLLM({JDAnalysis: JD, CoverLetterDraft: draft})
     monkeypatch.setattr(ws, "structured", lambda *a, **k: llm)

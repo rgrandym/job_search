@@ -31,10 +31,22 @@ itself. Never invent personal history or feelings.
 4. Avoid hyperbole and generic praise. Show a specific connection between evidenced work \
 and the role; make no promise of outcomes that have not happened.
 
-Shape: 3-4 short paragraphs, under 350 words in total. Open with the role and the strongest \
-match, then 1-2 paragraphs of evidence mapped to the job's main requirements, then a short, \
-forward-looking close: what the candidate would do in the role, not a repeat of the job \
-description. Plain, confident, specific; no clichés."""
+Write exactly 3 or 4 short paragraphs in this order, under 300 words total:
+1. Introduction (2-3 sentences): name the exact role, say why the work or organisation \
+interests the candidate, and give one concrete reason they fit. Use <motivation> for personal \
+reasons; if it is empty, express interest in the work described in the job posting without \
+inventing a personal story. Cite the CV evidence for the fit claim. Do not begin with a list \
+of past employers or repeat the CV headline.
+2. One or two evidence paragraphs: select the strongest, most relevant examples and explain \
+their connection to the role. Do not recite the career history or list every technique.
+3. Closing paragraph (1-2 sentences): briefly connect the evidence to the contribution the \
+candidate could make and invite a conversation. No promised outcomes or generic praise.
+
+Use a natural greeting and sign-off. Plain, warm, confident and specific; no clichés. The \
+Word document already carries the candidate's name at the end, so do not put contact details, \
+a CV-style header, a date or a signature inside any paragraph."""
+
+MAX_LETTER_WORDS = 330
 
 
 def draft_letter(
@@ -126,5 +138,12 @@ def apply_letter(
 def write_letter(
     master: MasterCV, jd: JDAnalysis, jd_text: str, llm: LLMProvider, motivation: str = ""
 ) -> CoverLetter:
-    """End-to-end: draft, then guard."""
-    return apply_letter(master, draft_letter(master, jd, jd_text, llm, motivation), jd, jd_text)
+    """Draft and guard a short letter with an introduction, evidence and closing."""
+    letter = apply_letter(master, draft_letter(master, jd, jd_text, llm, motivation), jd, jd_text)
+    if len(letter.paragraphs) < 3 or len(letter.paragraphs) > 4:
+        raise ValueError("The letter needs an introduction, evidence and closing; please retry")
+    if not mentions(letter.paragraphs[0], jd.job_title):
+        raise ValueError("The letter did not open with the role; please retry")
+    if sum(len(paragraph.split()) for paragraph in letter.paragraphs) > MAX_LETTER_WORDS:
+        raise ValueError("The letter is too long for one page; please retry")
+    return letter

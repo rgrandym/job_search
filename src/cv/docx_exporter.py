@@ -6,7 +6,6 @@ no headers/footers holding content, native bullet lists, standard section names.
 
 from __future__ import annotations
 
-from datetime import date
 from pathlib import Path
 from typing import Literal
 
@@ -218,12 +217,13 @@ def export_cover_letter(
     doc = Document()
     dt.set_margins(doc, max(tpl.margins_in, 0.9))
     dt.set_base_font(doc, tpl.font, tpl.body_pt + 0.5)
-    _header(doc, cv, tpl)
-    dt.add_text(doc, date.today().strftime("%d %B %Y"), space_after_pt=12)
-    doc.add_paragraph(letter.greeting)
+    greeting = doc.add_paragraph(letter.greeting)
+    greeting.paragraph_format.space_after = Pt(12)
     for para in letter.paragraphs:
-        doc.add_paragraph(para)
-    doc.add_paragraph(letter.closing)
+        paragraph = doc.add_paragraph(para)
+        paragraph.paragraph_format.space_after = Pt(9)
+    closing = doc.add_paragraph(letter.closing)
+    closing.paragraph_format.space_before = Pt(3)
     doc.add_paragraph(cv.basics.name)
     path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(path))
