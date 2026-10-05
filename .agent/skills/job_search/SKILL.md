@@ -37,7 +37,8 @@ senior recruiter against an evidence-based **profile summary** of the candidate.
 ## 1. Capture (search filters)
 
 `SearchQuery` = the UI form: `titles`, `keywords`, `locations`, `distance_miles`, `salary_min`,
-`salary_max`, `work_arrangements`, `posted_within_days`, `sources`, `exclude_boards`.
+`salary_max`, optional `seniority_min` / `seniority_max`, `work_arrangements`,
+`posted_within_days`, `sources`, `exclude_boards`.
 
 **Source picker.** `fetcher.SOURCE_CATALOG` gives every selectable source a label and a
 category (`job_boards`, `company`, `alerts`); `GET /api/state` returns it. The sidebar shows the
@@ -171,7 +172,7 @@ removes roles the user **applied** for (within `APPLIED_LOOKBACK_DAYS` = 365) an
 | Work arrangement | Not in the filter's / CV's accepted arrangements |
 | Location | Non-remote, in a **known different country**, not radius-verified, and no relocation. A town we cannot place is kept (distance unverified) for the job_matcher to judge |
 | Salary | The job's known maximum is below the salary floor (never an estimated salary: `salary_maybe_estimated`) |
-| Seniority | 3+ levels below the candidate, or 4+ above (CV searches only); a 3-step move up is scored, not excluded. Not applied to titles of an area the user asked to move into (`CandidateProfile.pivot_titles`, from requested role families): a pivot often starts lower, so the job_matcher judges the level |
+| Seniority | Only when the user sets a minimum or maximum job level in the sidebar. With both unset, no role is excluded for its level, whatever title the CV currently holds. The job_matcher still judges scope and fit. |
 | Language | The posting states a language as essential (fluent German, native Japanese speaker, ...; not "desirable" or "a plus") that the candidate has **not declared** at all. Only when languages are declared (career intent, else the CV's list); a CV read in English counts as professional English |
 
 **Eligibility flags** (`scorer.eligibility_flags`, `MatchResult.flags`; never exclusions):
@@ -265,8 +266,8 @@ types, and a narrative. Fields added later default to empty in stored profiles u
   `evidence` ids, the main `gap` and a `rationale`. Every career-intent target area becomes a
   `requested` adjacent family. **LLM proposes, code decides** (`check_families`): evidence ids
   must exist in the CV (adjacent ≥ 2, progression ≥ 1), non-core families must state a gap,
-  titles beyond 3 ladder levels up or 2 down are dropped (requested areas may sit lower), at
-  most 4 core / 2 progression / 3 adjacent model-suggested families, and without a CV only
+  titles are never removed solely for their distance from the CV's current title, at most
+  4 core / 2 progression / 3 adjacent model-suggested families, and without a CV only
   core families. **Code never rejects a family on title words** (e.g. `not_a_fit` naming
   "Clinical Scientist" must not drop every "Scientist" family): whether a role fits is the
   job_matcher's verdict on each posting's requirements, where `not_a_fit` informs it. A

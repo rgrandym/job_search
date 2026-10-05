@@ -35,6 +35,8 @@ class SearchQuery(BaseModel):
     distance_miles: int | None = Field(25, ge=0, le=500)
     salary_min: int | None = Field(None, ge=0, description="Annual, in posting currency")
     salary_max: int | None = Field(None, ge=0)
+    seniority_min: int | None = Field(None, ge=0, le=8, description="Optional minimum job level")
+    seniority_max: int | None = Field(None, ge=0, le=8, description="Optional maximum job level")
     work_arrangements: list[WorkArrangement] = Field(
         default_factory=list, description="Empty = any"
     )
@@ -46,6 +48,17 @@ class SearchQuery(BaseModel):
         default_factory=list, description="Company job boards (`CompanyBoard.key`) not to read"
     )
     limit: int = Field(200, ge=1, description="Max postings per source")
+
+    @model_validator(mode="after")
+    def valid_seniority_range(self) -> SearchQuery:
+        """An explicit level range must have its lower bound first."""
+        if (
+            self.seniority_min is not None
+            and self.seniority_max is not None
+            and self.seniority_min > self.seniority_max
+        ):
+            raise ValueError("Minimum seniority cannot exceed maximum seniority")
+        return self
 
     @property
     def remote_only(self) -> bool:
@@ -181,6 +194,8 @@ class CandidateProfile(_Strict):
     willing_to_relocate: bool = False
     certifications: list[str] = Field(default_factory=list)
     salary_min: float | None = Field(None, description="Excludes jobs paying less (if known)")
+    seniority_min: int | None = Field(None, ge=0, le=8)
+    seniority_max: int | None = Field(None, ge=0, le=8)
     cv_based: bool = Field(True, description="False = built from search filters only, no CV")
     text: str = Field("", description="Flattened CV text used for embeddings")
     languages: list[LanguageSkill] = Field(

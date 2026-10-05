@@ -10,6 +10,8 @@ export const EMPTY_QUERY: SearchQuery = {
   distance_miles: 25,
   salary_min: null,
   salary_max: null,
+  seniority_min: null,
+  seniority_max: null,
   work_arrangements: [],
   posted_within_days: null,
   sources: [],

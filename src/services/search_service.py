@@ -442,7 +442,7 @@ def _attribute(report: MatchReport, widen: bool) -> dict[str, str]:
     return {f.name: f.tier for f in families}
 
 
-_RULES = "location, arrangement, salary, seniority, certifications, languages"
+_RULES = "location, arrangement, salary, certifications, languages, optional job-level range"
 
 
 class _Matched(NamedTuple):

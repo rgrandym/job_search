@@ -126,6 +126,8 @@ def apply_query(profile: CandidateProfile, query: SearchQuery) -> CandidateProfi
         update["work_arrangements"] = query.work_arrangements
     if query.salary_min:
         update["salary_min"] = float(query.salary_min)
+    update["seniority_min"] = query.seniority_min
+    update["seniority_max"] = query.seniority_max
     if query.keywords or query.titles:
         update["text"] = "\n".join([profile.text, *query.titles, *query.keywords])
     return profile.model_copy(update=update)
@@ -143,6 +145,8 @@ def profile_from_query(query: SearchQuery) -> CandidateProfile:
         locations=query.place_names(),
         work_arrangements=query.work_arrangements,
         salary_min=float(query.salary_min) if query.salary_min else None,
+        seniority_min=query.seniority_min,
+        seniority_max=query.seniority_max,
         cv_based=False,
         text="\n".join([*query.titles, *query.keywords]),
     )

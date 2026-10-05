@@ -7,7 +7,7 @@
   "input": [
     "ProfileSummary (role families code rejected are removed), with the preferences the user accepted from their labels (services.learning)",
     "career intent (optional)",
-    "candidate base + search constraints",
+    "candidate base + search constraints (job-level exclusions only when the user sets a minimum or maximum)",
     "posting digests (batch of 3, or 1 for a second opinion); long descriptions keep their requirements section (3000 chars)"
   ],
   "output": "JobAssessment {job_id, fit_summary, reasons, transferable, gaps, essential_unmet, unknowns, dealbreakers, alignment (against|neutral|aligned), alignment_note, ratings {function, domain, seniority, leadership, sector, practicality: level 0-4}} -> screener.finalize -> JobVerdict {+ dimensions (points: level/4 of weights 30/20/20/10/10/10), fit_score, band, priority, match, borderline, cap_reason, reviewed, from_memory}",

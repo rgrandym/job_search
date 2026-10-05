@@ -165,7 +165,8 @@ def test_smart_search_uses_job_matcher_verdicts(ws: Workspace) -> None:
     assert rep.matches[0].verdict and rep.matches[0].verdict.fit_score == 91
     partial = next(r for r in rep.below_threshold if r.job.id == "job-partial")
     assert partial.verdict and not partial.verdict.match
-    assert {r.job.id for r in rep.excluded} == {"job-cert", "job-onsite", "job-junior"}
+    assert {r.job.id for r in rep.excluded} == {"job-cert", "job-onsite"}
+    assert any(r.job.id == "job-junior" for r in rep.below_threshold)
     out2 = asyncio.run(run_search(ws, req))
     assert out2.summary_from_memory is True
 

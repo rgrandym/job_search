@@ -29,15 +29,11 @@ from src.tools.search_tools import (
     parse_language,
     seniority_level,
     seniority_name,
-    shares_role_words,
     title_core,
 )
 
-# Seniority gap (in ladder steps) at which a job is excluded outright. A step up is allowed
-# further than a step down: science ladders (principal -> associate director -> director)
-# compress, so a 3-step move up is scored by the job_matcher rather than dropped.
+# Seniority distance affects pre-filter ordering, never hard exclusion by default.
 MAX_SENIORITY_GAP = 3
-MAX_SENIORITY_GAP_UP = 4
 # Raw cosine similarities are mapped linearly from [FLOOR, CEIL] onto [0, 1].
 SEMANTIC_FLOOR = 0.05
 SEMANTIC_CEIL = 0.50
@@ -179,19 +175,16 @@ def hard_exclusions(
 
     reasons += _language_exclusions(profile, job)
 
-    gap = _job_level(job) - profile.seniority_level
-    # A move the user chose (career intent) often starts a level or two lower: the job_matcher
-    # judges the level there instead of a fixed ladder rule.
-    pivot = bool(profile.pivot_titles) and shares_role_words(job.title, profile.pivot_titles)
-    if (
-        profile.cv_based
-        and not pivot
-        and (gap >= MAX_SENIORITY_GAP_UP or -gap >= MAX_SENIORITY_GAP)
-    ):
-        direction = "above" if gap > 0 else "below"
+    level = _job_level(job)
+    if profile.seniority_min is not None and level < profile.seniority_min:
         reasons.append(
-            f"seniority {seniority_name(_job_level(job))} is {abs(gap)} levels {direction} "
-            f"candidate ({seniority_name(profile.seniority_level)})"
+            f"seniority {seniority_name(level)} is below requested minimum "
+            f"{seniority_name(profile.seniority_min)}"
+        )
+    if profile.seniority_max is not None and level > profile.seniority_max:
+        reasons.append(
+            f"seniority {seniority_name(level)} is above requested maximum "
+            f"{seniority_name(profile.seniority_max)}"
         )
     return reasons
 

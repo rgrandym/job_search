@@ -85,7 +85,6 @@ def test_partial_match_scores_lower(master_cv: MasterCV, jobs: list[JobPosting])
     [
         ("job-cert", "certification"),
         ("job-onsite", "work arrangement"),
-        ("job-junior", "seniority"),
     ],
 )
 def test_hard_exclusions(
@@ -140,18 +139,19 @@ def test_country_filter_scopes_sources_and_location_matching(
     assert scorer.location_match(whole_uk.locations, abroad) == 0.0
 
 
-def test_seniority_gate_allows_a_bigger_step_up_than_down(master_cv: MasterCV) -> None:
-    profile = build_profile(master_cv).model_copy(
-        update={"seniority_level": 4, "locations": [], "work_arrangements": []}
-    )  # staff / lead
-
-    def gated(title: str) -> bool:
-        job = JobPosting(id=title, title=title, company="A", work_arrangement="remote")
-        return any("seniority" in r for r in scorer.hard_exclusions(profile, job))
-
-    assert not gated("Director, Cell Therapy")  # 3 up: scored by the job_matcher
-    assert gated("Chief Scientific Officer")  # 4 up
-    assert gated("Graduate Lab Technician")  # 3 down
+def test_seniority_is_only_a_hard_filter_when_requested(master_cv: MasterCV) -> None:
+    executive = build_profile(master_cv).model_copy(
+        update={"seniority_level": 8, "locations": [], "work_arrangements": []}
+    )
+    junior = JobPosting(id="junior", title="Graduate Lab Technician", company="A")
+    chief = JobPosting(id="chief", title="Chief Scientific Officer", company="A")
+    assert scorer.hard_exclusions(executive, junior) == []
+    minimum = build_profile(master_cv, query=SearchQuery(seniority_min=3))
+    assert any("below requested minimum" in r for r in scorer.hard_exclusions(minimum, junior))
+    maximum = build_profile(master_cv, query=SearchQuery(seniority_max=7))
+    assert any("above requested maximum" in r for r in scorer.hard_exclusions(maximum, chief))
+    with pytest.raises(ValidationError, match="Minimum seniority"):
+        SearchQuery(seniority_min=7, seniority_max=3)
 
 
 def test_county_matches_town_and_unplaced_towns_are_kept(master_cv: MasterCV) -> None:
@@ -175,8 +175,8 @@ def test_matcher_pipeline_buckets_every_job(
 ) -> None:
     report = JobMatcher(HashingEmbedder(256), settings).match(master_cv, jobs, threshold=70)
     assert [m.job.id for m in report.matches] == ["job-strong"]
-    assert {r.job.id for r in report.excluded} == {"job-cert", "job-onsite", "job-junior"}
-    assert [r.job.id for r in report.below_threshold] == ["job-partial"]
+    assert {r.job.id for r in report.excluded} == {"job-cert", "job-onsite"}
+    assert {r.job.id for r in report.below_threshold} == {"job-partial", "job-junior"}
     total = (
         len(report.matches)
         + len(report.below_threshold)
@@ -193,7 +193,7 @@ def test_retrieval_has_no_cap_unless_configured(
     assert report.not_retrieved == []  # scoring is local: every eligible posting is scored
     capped = settings.model_copy(update={"retrieval_top_k": 1})
     report = JobMatcher(HashingEmbedder(256), capped).match(master_cv, jobs, threshold=0)
-    assert len(report.matches) == 1 and len(report.not_retrieved) == 1
+    assert len(report.matches) == 1 and len(report.not_retrieved) == 2
 
 
 def test_hashing_embedder_is_deterministic_and_normalised() -> None:

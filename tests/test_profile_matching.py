@@ -190,10 +190,11 @@ def test_requested_needs_an_intent_and_cvless_profiles_search_core_only(
     )
 
 
-def test_family_titles_far_from_the_candidate_level_are_dropped(master_cv: MasterCV) -> None:
+def test_family_titles_are_not_silently_filtered_by_candidate_level(master_cv: MasterCV) -> None:
     far = SALES.model_copy(update={"titles": ["Chief Revenue Officer", "Solutions Consultant"]})
     fam = check_families(_summary(far), master_cv).role_families[0]
-    assert fam.titles == ["Solutions Consultant"] and fam.rejected is None
+    assert fam.titles == ["Chief Revenue Officer", "Solutions Consultant"]
+    assert fam.rejected is None
 
 
 # ---------------------------------------------------------------- search planning
@@ -254,12 +255,12 @@ def test_search_plans_by_family_attributes_results_and_logs_yield(
     assert yields["Business development"].landing is False  # 3 searches, no match
 
 
-def test_requested_pivot_skips_the_seniority_ladder(master_cv: MasterCV) -> None:
+def test_requested_pivot_does_not_imply_a_seniority_filter(master_cv: MasterCV) -> None:
     junior = JobPosting(
         id="vc", title="Investment Analyst Intern", company="Fund", work_arrangement="remote"
     )
     profile = build_profile(master_cv)
-    assert any("seniority" in r for r in scorer.hard_exclusions(profile, junior))
+    assert scorer.hard_exclusions(profile, junior) == []
     pivot = profile.model_copy(update={"pivot_titles": ["Investment Analyst"]})
     assert scorer.hard_exclusions(pivot, junior) == []
     assert pivot_titles(_summary(BD, SALES)) == ["Business Development Manager"]

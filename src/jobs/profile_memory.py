@@ -19,7 +19,7 @@ from pydantic import BaseModel, TypeAdapter
 from src.core.llm_provider import LLMProvider
 from src.cv.models import MasterCV, TailoredCV
 from src.jobs.models import ProfileSummary, RoleFamily, SearchIntent, SearchQuery
-from src.tools.search_tools import board_terms, seniority_level, shares_role_words, title_core
+from src.tools.search_tools import board_terms, shares_role_words, title_core
 
 SUMMARY_SYSTEM = """You are the profile analyst of a job-search system. Read the entire CV and \
 write an accurate, evidence-based candidate profile that a screening agent will use to \
@@ -66,9 +66,6 @@ avoid belong in not_a_fit."""
 # Evidence a family needs to be searched, by tier (ids that exist in the CV).
 MIN_EVIDENCE = {"core": 0, "progression": 1, "adjacent": 2}
 MAX_FAMILIES = {"core": 4, "progression": 2, "adjacent": 3}  # model-suggested, per tier
-# Titles further from the candidate's level are dropped from a family: up to three ladder
-# steps up (the pre-filter's own limit) and two down (an area the user asked for may sit lower).
-MAX_LEVEL_UP, MAX_LEVEL_DOWN = 3, 2
 
 
 def profile_cv_text(cv: MasterCV) -> str:
@@ -124,7 +121,7 @@ def _family_problem(fam: RoleFamily) -> str | None:
     scientist) is never decided from title words here: the job_matcher judges each posting's
     requirements against the profile, where `not_a_fit` informs its verdict."""
     if not fam.titles:
-        return "no advertised titles left near the candidate's level"
+        return "no advertised titles"
     if len(fam.evidence) < MIN_EVIDENCE[fam.tier]:
         need = MIN_EVIDENCE[fam.tier]
         return f"needs {need} piece(s) of CV evidence, found {len(fam.evidence)}"
@@ -137,28 +134,18 @@ def check_families(
     summary: ProfileSummary, cv: MasterCV | None, intent: SearchIntent | None = None
 ) -> ProfileSummary:
     """Code checks what it can verify before a family is searched: evidence ids must exist in
-    the CV (two for adjacent, one for progression), non-core families state a gap, and titles
-    stay within MAX_LEVEL_UP / MAX_LEVEL_DOWN ladder steps (an area the user asked for may sit
-    lower). Fit itself is the job_matcher's call, per posting. Failures are kept with
+    the CV (two for adjacent, one for progression), and non-core families state a gap. Fit itself
+    is the job_matcher's call, per posting. Failures are kept with
     `rejected` so the user sees why. Without a CV only core families can be searched.
     Idempotent: re-running it on a stored summary with the same CV and intent changes nothing."""
     ids = _cv_ids(cv) if cv is not None else set()
-    titles = sorted(cv.experience, key=lambda e: e.start, reverse=True) if cv else []
-    level = seniority_level(titles[0].title) if titles else None
     asked = bool(intent and intent.target_areas)
     counts = dict.fromkeys(MAX_FAMILIES, 0)
     out: list[RoleFamily] = []
     for fam in summary.role_families:
         requested = fam.requested and asked
         evidence = [i.strip("[] ") for i in fam.evidence if i.strip("[] ") in ids]
-        keep = [
-            t
-            for t in fam.titles
-            if level is None
-            or seniority_level(t) - level <= MAX_LEVEL_UP
-            and (requested or level - seniority_level(t) <= MAX_LEVEL_DOWN)
-        ]
-        fam = fam.model_copy(update={"evidence": evidence, "titles": keep, "requested": requested})
+        fam = fam.model_copy(update={"evidence": evidence, "requested": requested})
         problem = _family_problem(fam)
         if cv is None and fam.tier != "core":
             problem = "no CV to show the experience transfers"

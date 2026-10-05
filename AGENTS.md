@@ -86,8 +86,8 @@ UI filters ─▶ SearchQuery          career intent (services/intent, per CV)
               · LinkedIn/Indeed alert emails & saved postings · demo           → JobPosting[]
 1b set aside  services/tracker: roles already applied for (12-month look-back) or marked N/A
               leave here, before any scoring or model call → report.applied / .dismissed
-2 pre-filter  scorer.hard_exclusions (closed, arrangement, location, salary floor, certs, seniority
-              except areas the user chose to move into, undeclared essential languages)
+2 pre-filter  scorer.hard_exclusions (closed, arrangement, location, salary floor, certs,
+              undeclared essential languages; seniority only when the user sets a level range)
               + eligibility flags (language level, right to work, clearance, licence)
               + pre-filter score (skills from lists or extracted from text)    → shortlist:
               every role-relevant posting + 10 others (ceiling 250), one per employer+title
@@ -95,7 +95,7 @@ UI filters ─▶ SearchQuery          career intent (services/intent, per CV)
               jobs.ac.uk, NHS Jobs, Totaljobs)
 4 summary     ProfileSummary (quality model)  ◀── ProfileMemory (data/profile_summaries.json)
               from the dated CV + career intent; role families (core / progression /
-              adjacent) checked by code (CV evidence ids, gap, level window; fit is the matcher's);
+              adjacent) checked by code (CV evidence ids and gap; fit is the matcher's);
               with empty titles the boards search the families (budget 60/20/20, adjacent
               only when requested or `widen`); results are tagged with their family and
               per-family yield logged (data/family_yield.json, "not landing" after 3 searches)

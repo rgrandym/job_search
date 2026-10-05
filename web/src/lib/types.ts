@@ -69,6 +69,9 @@ export interface SearchQuery {
   distance_miles: number | null;
   salary_min: number | null;
   salary_max: number | null;
+  /** Optional hard limits on the advertised job level; null means no level filter. */
+  seniority_min?: number | null;
+  seniority_max?: number | null;
   work_arrangements: WorkArrangement[];
   /** Only postings from the last N days (1 = 24 h); null = any time. Undated postings are kept. */
   posted_within_days?: number | null;

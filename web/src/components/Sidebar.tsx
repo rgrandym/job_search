@@ -21,6 +21,7 @@ const POSTED_WINDOWS: { days: number | null; label: string }[] = [
   { days: 14, label: "Last 2 weeks" },
   { days: 30, label: "Last month" },
 ];
+const SENIORITY_LEVELS = ["Intern", "Junior", "Mid", "Senior", "Staff / Lead", "Principal", "Manager", "Director", "Executive"];
 // Countries the job boards can search (Adzuna's list; Reed and CV-Library are UK-only).
 const COUNTRIES = [
   "United Kingdom", "United States", "Canada", "Australia", "New Zealand", "Germany", "France",
@@ -429,6 +430,36 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
             ))}
           </select>
         </Field>
+        <div className="grid grid-cols-2 gap-2">
+          <Field label="Minimum job level">
+            <select
+              className="input"
+              value={q.seniority_min ?? ""}
+              onChange={(e) => {
+                const minimum = e.target.value ? Number(e.target.value) : null;
+                s.setQuery({ seniority_min: minimum, seniority_max: minimum !== null && q.seniority_max !== null && q.seniority_max !== undefined && q.seniority_max < minimum ? null : q.seniority_max ?? null });
+              }}
+              title="Optional. Jobs below this level are excluded before matching."
+            >
+              <option value="">Any level</option>
+              {SENIORITY_LEVELS.map((label, level) => <option key={label} value={level}>{label}</option>)}
+            </select>
+          </Field>
+          <Field label="Maximum job level">
+            <select
+              className="input"
+              value={q.seniority_max ?? ""}
+              onChange={(e) => {
+                const maximum = e.target.value ? Number(e.target.value) : null;
+                s.setQuery({ seniority_max: maximum, seniority_min: maximum !== null && q.seniority_min !== null && q.seniority_min !== undefined && q.seniority_min > maximum ? null : q.seniority_min ?? null });
+              }}
+              title="Optional. Jobs above this level are excluded before matching."
+            >
+              <option value="">Any level</option>
+              {SENIORITY_LEVELS.map((label, level) => <option key={label} value={level}>{label}</option>)}
+            </select>
+          </Field>
+        </div>
         <div className="pt-1">
           {s.loading ? (
             <button className="btn-ghost w-full min-w-0 justify-center px-2 text-bad" disabled={!s.runId} onClick={runner.stop} title="Stop the search; results so far are kept">
