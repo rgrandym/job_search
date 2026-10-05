@@ -1,5 +1,12 @@
 # AI Job Search Engine & Automated CV Tailor
 
+This local app helps individuals find relevant job postings, compare them with their CV and
+career goals, save and track applications, and create evidence-based tailored CVs and cover
+letters. It is free to use for personal job searching. Model providers and some job sources may
+charge separately or apply usage limits.
+
+**New user?** Follow the [step-by-step user guide](USER_GUIDE.md) for model providers, Gmail alerts, CVs, searches, company sites, and documents.
+
 1. **Master CV management**: import a raw text/Markdown CV into a validated, structured JSON Master CV.
 2. **Tailored CV generator**: align the Master CV to a job description (ATS keywords, STAR
    bullets) with deterministic anti-fabrication guards, then export to Word (`.docx`).
@@ -9,7 +16,7 @@
 4. **Web app**: buttons for searching, screening, tailoring, cover letters, saving and tracking
    jobs, plus a small assistant for plain-language updates to your preferences and career intent.
    Runs on Claude (API key or Claude Code through a Pro/Max plan), Codex through a ChatGPT plan,
-   the OpenAI API, or OpenRouter models.
+   or the OpenAI API. The OpenRouter option is not yet ready for general use.
 
 ## Quick start (web app)
 
@@ -20,8 +27,8 @@ bash scripts/dev.sh          # creates/activates the conda env, installs deps, (
 It opens http://localhost:5173. Running it again restarts both servers cleanly; Ctrl-C (or
 `bash scripts/dev.sh --stop`) stops both. Logs are in `.run/logs/`.
 
-1. **Settings** (top right): pick Claude, Claude Code (Pro/Max), Codex (ChatGPT), OpenAI API, or
-   OpenRouter, then choose two models, each with its own effort: the **quality** model (profile
+1. **Settings** (top right): pick Claude, Claude Code (Pro/Max), Codex (ChatGPT), or OpenAI API,
+   then choose two models, each with its own effort: the **quality** model (profile
    summary, CV reading and tailoring, cover letters, second opinions on matches and near the threshold, the
    assistant) and the **screening** model (first-pass job matching, hundreds of calls per
    search). Claude Code and Codex drive your local, signed-in CLI (`claude -p` / `codex exec`)
@@ -29,9 +36,10 @@ It opens http://localhost:5173. Running it again restarts both servers cleanly; 
    provider (e.g. Sol + Luna, or Sonnet + Haiku); check a change on your own past verdicts with
    `python -m src.services.model_compare --screening-model <id> --sample 40` (it calls the
    model for every sampled posting).
-2. **Upload your CV** (PDF, DOCX, MD). It's parsed into a structured Master CV.
-3. Set **titles, location, radius, salary, arrangement**, then **Search**. The quality model
-   builds an evidence-based profile summary (remembered for the same type of search), and the
+2. **Upload your CV** (PDF, DOCX, MD, TXT). It is stored unchanged and parsed when a CV-powered action needs it.
+   Click **Build profile from selected CV** to review and edit the profile before searching.
+3. Choose **sources, country, cities, radius, and date posted**, then **Search**. The quality model
+   builds or reuses an evidence-based profile summary, and the
    **job_matcher** reads each shortlisted posting and keeps only true matches, with reasons
    and gaps. Leave titles empty to search the roles in your CV profile.
    The results panel shows live progress (each source, pre-filter, screening batch by batch),
@@ -53,7 +61,7 @@ python -m src.cv.master_cv_manager import my_cv.md --out data/master_cv.json
 # 2. Capture jobs
 #    Company career sites: the app finds the job boards of ~1,000 UK life-science companies on
 #    the first search that includes them (~10 min, once); "Update job boards" in the sidebar
-#    refreshes them. Add your own companies to data/companies.json (see data/examples).
+#    refreshes them. Add your own companies in Sources → Company career sites → Your companies.
 #    put LinkedIn/Indeed alert emails (.eml) in data/inbox/, saved postings in data/inbox/postings/
 python -m src.jobs.fetcher fetch --keywords "machine learning" --locations London --out data/jobs.json
 
@@ -78,23 +86,7 @@ python .agent/skills/job_search/scoring_engine.py --cv data/master_cv.json --job
 
 ### Connect a dedicated Gmail alert inbox
 
-1. In a Google Cloud project, enable the Gmail API. Set up an **External** OAuth consent screen,
-   add the dedicated Gmail account as a test user, and request only
-   `https://www.googleapis.com/auth/gmail.readonly`.
-2. Create an OAuth client of type **Web application**. Add
-   `http://localhost:8000/api/gmail/callback` as an authorised redirect URI.
-3. In the local, ignored `.env`, set `JOBSEARCH_GMAIL_ACCOUNT`, `JOBSEARCH_GMAIL_CLIENT_ID`,
-   and `JOBSEARCH_GMAIL_CLIENT_SECRET`. Restart the app, then click **Connect Gmail alerts**.
-   Sign in with the dedicated account; the app verifies its address before storing the token.
-4. Select a CV and click **Search new alerts for this CV**. This is the only action that fetches
-   Gmail messages. The first search considers all current inbox alerts; later searches analyse only
-   postings not yet considered with that CV. A different CV gets its own history.
-
-The app stores OAuth tokens, parsed alert postings, and per-CV history in ignored `data/` files
-with owner-only permissions. It never stores raw email bodies. Gmail's OAuth permission covers
-the whole dedicated mailbox, so keep that account limited to job alerts. If Google's consent
-screen remains in Testing mode, its refresh token expires after seven days; use **Reconnect**
-when access expires. Do not put the OAuth client secret or tokens in a commit or chat message.
+See [Connect a Gmail inbox for job alerts](USER_GUIDE.md#3-connect-a-gmail-inbox-for-job-alerts) for the full Google Cloud setup. After connecting, select a CV, enable **Match against my CV** and **Smart match**, leave **Gmail alerts** on under Sources, and click **Search**. The search reads the connected inbox on demand.
 
 ## How matching works
 
@@ -117,3 +109,15 @@ Details: [.agent/skills/job_search/SKILL.md](.agent/skills/job_search/SKILL.md).
 - Skills: [.agent/skills/](.agent/skills/) · Agent configs: [.agent/agent_configs/](.agent/agent_configs/)
 
 Personal data (`data/*` except `data/examples/`, and `output/`) is git-ignored.
+
+## License
+
+This project is available under the [PolyForm Noncommercial License 1.0.0](LICENSE.md).
+Personal job searching and other noncommercial use are free. Commercial use requires a separate
+paid commercial license from the copyright holder before use.
+This is a source-available license, not an open-source license.
+
+Before sharing a clone or committing new files, review `git status --short` and
+`git ls-files --others --exclude-standard`. Keep CVs, job records, API credentials, and
+generated documents in the ignored `data/` and `output/` folders. Ignore rules do not
+protect a file that was already tracked or one explicitly added with `git add -f`.
