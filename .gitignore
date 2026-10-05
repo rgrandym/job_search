@@ -1,5 +1,14 @@
 .DS_Store
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.eml
+client_secret*.json
+credentials*.json
 __pycache__/
 *.py[cod]
 .venv/

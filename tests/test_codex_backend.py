@@ -125,6 +125,63 @@ def test_codex_structured_validates_cli_output(monkeypatch: pytest.MonkeyPatch) 
     assert "Follow the rules" in seen["prompt"]
 
 
+def test_codex_structured_repairs_invalid_output_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Answer(BaseModel):
+        value: str
+
+    prompts: list[str] = []
+
+    def fake_run(cfg: LLMConfig, model: str, prompt: str, schema: dict[str, Any]) -> dict[str, str]:
+        prompts.append(prompt)
+        return {"wrong": "field"} if len(prompts) == 1 else {"value": "ready"}
+
+    monkeypatch.setattr(backend, "run_codex", fake_run)
+    result = backend.CodexStructured(_config()).generate(
+        system="Follow the rules", prompt="Return a result", output_model=Answer
+    )
+    assert result.value == "ready"
+    assert len(prompts) == 2
+    assert "did not match the schema" in prompts[1]
+
+
+def test_codex_structured_repairs_invalid_json_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Answer(BaseModel):
+        value: str
+
+    prompts: list[str] = []
+
+    def fake_run(cfg: LLMConfig, model: str, prompt: str, schema: dict[str, Any]) -> dict[str, str]:
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            raise backend.LLMError("Codex returned invalid JSON: malformed")
+        return {"value": "ready"}
+
+    monkeypatch.setattr(backend, "run_codex", fake_run)
+    assert backend.CodexStructured(_config()).generate(
+        system="Follow the rules", prompt="Return a result", output_model=Answer
+    ).value == "ready"
+    assert len(prompts) == 2
+
+
+def test_codex_structured_does_not_retry_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Answer(BaseModel):
+        value: str
+
+    calls = 0
+
+    def fake_run(cfg: LLMConfig, model: str, prompt: str, schema: dict[str, Any]) -> dict[str, str]:
+        nonlocal calls
+        calls += 1
+        raise backend.LLMError("codex exec timed out after 600s")
+
+    monkeypatch.setattr(backend, "run_codex", fake_run)
+    with pytest.raises(backend.LLMError, match="timed out"):
+        backend.CodexStructured(_config()).generate(
+            system="Follow the rules", prompt="Return a result", output_model=Answer
+        )
+    assert calls == 1
+
+
 def test_codex_chat_decodes_emulated_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_run(
         cfg: LLMConfig, model: str, prompt: str, schema: dict[str, Any]

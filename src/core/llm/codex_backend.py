@@ -393,21 +393,33 @@ class CodexStructured:
 
     def generate(self, *, system: str, prompt: str, output_model: type[T]) -> T:
         full = f"{NO_TOOLS_NOTE}\n\n{system}\n\n{prompt}"
-        data = run_codex(self.cfg, self.model, full, output_model.model_json_schema())
-        if self.usage_sink:
-            self.usage_sink(
-                ModelUsage(
-                    model=self.model,
-                    input_tokens=_estimate_tokens(full),
-                    output_tokens=_estimate_tokens(json.dumps(data)),
-                    estimated=True,
-                    purpose=self.purpose,
+        for attempt in range(2):
+            try:
+                data = run_codex(self.cfg, self.model, full, output_model.model_json_schema())
+            except LLMError as exc:
+                if attempt or not str(exc).startswith("Codex returned invalid JSON:"):
+                    raise
+                full += "\n\nYour previous response was invalid JSON. Return valid schema JSON."
+                continue
+            if self.usage_sink:
+                self.usage_sink(
+                    ModelUsage(
+                        model=self.model,
+                        input_tokens=_estimate_tokens(full),
+                        output_tokens=_estimate_tokens(json.dumps(data)),
+                        estimated=True,
+                        purpose=self.purpose,
+                    )
                 )
-            )
-        try:
-            return output_model.model_validate(_drop_nulls(data))
-        except ValidationError as exc:
-            raise LLMError(f"Codex output did not match {output_model.__name__}: {exc}") from exc
+            try:
+                return output_model.model_validate(_drop_nulls(data))
+            except ValidationError as exc:
+                if attempt:
+                    raise LLMError(
+                        f"Codex output did not match {output_model.__name__}: {exc}"
+                    ) from exc
+                full += f"\n\nYour previous response did not match the schema: {exc}. Fix it."
+        raise LLMError("Codex returned no structured output")
 
 
 class _Turn(BaseModel):
