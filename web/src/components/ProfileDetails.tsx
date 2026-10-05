@@ -15,8 +15,8 @@ const SECTIONS: { key: keyof Pick<ProfileSummary,
   { key: "search_keywords", label: "Search keywords" },
 ];
 
-/** Read the complete stored profile in the narrow sidebar. */
-export function ProfileDetails({ record, onEdit }: { record: ProfileRecord; onEdit: () => void }) {
+/** Read the complete stored profile in a resizable popup. */
+export function ProfileDetails({ record }: { record: ProfileRecord }) {
   const summary = record.summary;
   return (
     <div className="space-y-3 rounded-md border border-border bg-surface p-2 text-[11px]">
@@ -63,7 +63,6 @@ export function ProfileDetails({ record, onEdit }: { record: ProfileRecord; onEd
           </ul>
         </section>
       ))}
-      <button type="button" className="text-accent hover:underline" onClick={onEdit}>View or edit in Profiles</button>
     </div>
   );
 }

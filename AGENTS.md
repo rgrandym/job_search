@@ -127,7 +127,7 @@ job from results ─▶ tailor.analyze_jd ─▶ propose_plan (LLM, steered by t
 within the level and roles held, summary skills/numbers in the CV; dropped keyword bullets put
 back) ─▶ critique_cv (LLM, second reader) ─▶ revise_plan ─▶ apply_plan ─▶ TailoredCV
 ─▶ export_docx ─▶ output/<Name>_<Company>.docx ─▶ ats.check_docx (read-back)
-                                                  └─▶ tracker: the job is marked Applied (user's rule)
+                                                  └─▶ tracker: remember the CV; only the user marks Applied
 job ─▶ cover_letter.draft_letter (LLM; motivation only from the career intent) ─▶ apply_letter
 (each paragraph cites CV ids; numbers/skills from them) ─▶ <Name>_<Company>_cover_letter.docx
 document ─▶ enrichment.propose (LLM; quotes checked against the document) ─▶ review queue

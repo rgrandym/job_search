@@ -253,6 +253,10 @@ export interface TrackedJob {
   stages?: { stage: OutcomeStage; at: string }[];
   fit_score?: number | null;
   family?: string | null;
+  /** Posting snapshots retained for document regeneration. */
+  document_postings?: Record<string, JobPosting>;
+  /** Posting and match details retained when this application was recorded. */
+  application_result?: MatchResult | null;
 }
 
 /** Read-only outcome review (backend `calibration.OutcomeReview`). */
@@ -433,6 +437,30 @@ export interface ATSReport {
   warnings: string[];
 }
 
+export interface TailoredCVView {
+  id: string;
+  job_id: string;
+  job_title: string;
+  job_company: string;
+  created_at: string;
+  updated_at: string;
+  template: string;
+  download_url: string;
+  cv: {
+    basics: { name: string; headline: string | null; summary: string | null; email: string | null; phone: string | null; location: string | null };
+    experience: { id: string; title: string; company: string; start: string; end: string | null; bullets: { id: string; text: string }[] }[];
+    skills: { category: string; items: string[] }[];
+    education: { institution: string; degree: string; field: string | null }[];
+    certifications: { name: string; issuer: string | null }[];
+    projects: { id: string; name: string; description: string; skills: string[] }[];
+    languages: string[];
+  };
+  ats: ATSReport | null;
+  source_ats_keyword_coverage: number | null;
+  reviewed: boolean;
+  imported: boolean;
+}
+
 export interface ProfileSummary {
   headline: string;
   seniority: string;
@@ -574,6 +602,21 @@ export interface CVAsset {
   kind: "master" | "uploaded" | "generated";
   parsed: boolean;
   selected: boolean;
+}
+
+export interface CoverLetterView {
+  id: string;
+  title: string;
+  company: string;
+  candidate_name: string;
+  created_at: string;
+  updated_at: string;
+  filename: string;
+  greeting: string;
+  paragraphs: string[];
+  closing: string;
+  docx_url: string;
+  txt_url: string;
 }
 
 export interface AppState {

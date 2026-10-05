@@ -131,17 +131,32 @@ class Workspace:
     # ---------------------------------------------------------------- results
 
     def job(self, job_id: str) -> JobPosting | None:
-        """A job of the current search, or one the user saved earlier."""
+        """A job in current results, saved jobs, history, or generated documents."""
         result = self.result(job_id)
         return result.job if result is not None else None
 
     def result(self, job_id: str) -> MatchResult | None:
-        """The current search's result for a job, else the saved copy (`services.saved`)."""
+        """Find a job in current results, saved jobs, history, or generated documents."""
         if self.last_report is not None:
             hit = next((r for r in self.last_report.all_results() if r.job.id == job_id), None)
             if hit is not None:
                 return hit
-        return next((s.result for s in self.saved_jobs() if s.result.job.id == job_id), None)
+        saved = next((s.result for s in self.saved_jobs() if s.result.job.id == job_id), None)
+        if saved is not None:
+            return saved
+        from src.services import history, tracker
+
+        historical = history.find_result(self, job_id)
+        if historical is not None:
+            return historical
+        job = tracker.document_job(self, job_id)
+        if job is not None:
+            return MatchResult(job=job)
+        return next(
+            (entry.application_result for entry in tracker.load(self).values()
+             if entry.application_result is not None and entry.application_result.job.id == job_id),
+            None,
+        )
 
     @property
     def saved_path(self) -> Path:

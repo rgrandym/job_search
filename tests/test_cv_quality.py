@@ -10,24 +10,30 @@ from typing import Any
 
 import pytest
 from docx import Document
+from fastapi.testclient import TestClient
 
 from src.cv.ats import check_docx
 from src.cv.cover_letter import apply_letter, draft_letter, write_letter
 from src.cv.docx_exporter import export_cover_letter, export_docx
 from src.cv.models import (
+    Bullet,
     BulletIssue,
     CoverLetterDraft,
     CVCritique,
+    Experience,
     JDAnalysis,
+    LetterOpening,
     LetterParagraph,
+    LetterSections,
     MasterCV,
     MissedRequirement,
     RewrittenBullet,
+    TailoredCVEdits,
     TailoringPlan,
 )
 from src.cv.tailor import apply_plan, tailor
 from src.jobs.models import JobPosting, SearchIntent
-from src.services import cv_service, intent
+from src.services import cover_letters, cv_service, intent, tailored_documents
 from src.services.workspace import Workspace
 from tests.conftest import FakeLLM
 
@@ -129,6 +135,20 @@ def test_matcher_guidance_reaches_the_plan_and_review_drives_one_revision(
     assert out.cv.experience[0].bullets[0].id == "nimbus-2"
 
 
+def test_tailoring_emphasis_reaches_initial_and_revised_plans(master_cv: MasterCV) -> None:
+    plans = iter([TailoringPlan(), TailoringPlan()])
+    llm = FakeLLM({
+        JDAnalysis: JD,
+        TailoringPlan: lambda _: next(plans),
+        CVCritique: CVCritique(order_notes=["Retain evidenced leadership in the summary"]),
+    })
+    tailor(master_cv, "JD text", llm, emphasis="leadership", level="senior")
+    prompts = [prompt for prompt, model in llm.calls if model is TailoringPlan]
+    assert len(prompts) == 2
+    assert all("Foreground evidenced people" in prompt for prompt in prompts)
+    assert all("do not claim a higher title" in prompt for prompt in prompts)
+
+
 # ---------------------------------------------------------------- ATS read-back
 
 
@@ -177,22 +197,195 @@ def test_cover_letter_keeps_only_backed_paragraphs(master_cv: MasterCV, tmp_path
 
 
 def test_letter_requires_role_introduction_and_one_page_length(master_cv: MasterCV) -> None:
-    def generate(paragraphs: list[LetterParagraph]) -> None:
-        llm = FakeLLM({CoverLetterDraft: CoverLetterDraft(paragraphs=paragraphs)})
+    def generate(draft: LetterSections) -> None:
+        llm = FakeLLM({LetterSections: draft})
         write_letter(master_cv, JD, "Senior ML Engineer role", llm)
 
     evidence = LetterParagraph(text="I built recommenders at Nimbus.", source_ids=["nimbus"])
     close = LetterParagraph(
         text="I would welcome a conversation about the role.", source_ids=["nimbus"]
     )
-    with pytest.raises(ValueError, match="open with the role"):
-        generate([evidence, evidence, close])
-    intro = LetterParagraph(
-        text="I am interested in the Senior ML Engineer role because it matches my ML work.",
-        source_ids=["nimbus"],
+    with pytest.raises(ValueError, match="name the exact role"):
+        generate(
+            LetterSections(
+                opening=LetterOpening(interest="I am interested in this work.", fit=evidence),
+                evidence=[evidence, evidence],
+                conclusion=close,
+            )
+        )
+    opening = LetterOpening(
+        interest="I am interested in the Senior ML Engineer role because of its ML work.",
+        fit=LetterParagraph(text="My experience at Nimbus fits.", source_ids=["nimbus"]),
     )
-    with pytest.raises(ValueError, match="too long"):
-        generate([intro, LetterParagraph(text="I built ML. " * 170, source_ids=["nimbus"]), close])
+    with pytest.raises(ValueError, match="under 300 words"):
+        generate(
+            LetterSections(
+                opening=opening,
+                evidence=[
+                    evidence,
+                    LetterParagraph(text="I built ML. " * 170, source_ids=["nimbus"]),
+                ],
+                conclusion=close,
+            )
+        )
+    with pytest.raises(ValueError, match="cite CV source_ids"):
+        generate(
+            LetterSections(
+                opening=opening,
+                evidence=[evidence, LetterParagraph(text="I built recommenders.")],
+                conclusion=close,
+            )
+        )
+    with pytest.raises(ValueError, match="exactly two evidence paragraphs"):
+        generate(LetterSections(opening=opening, evidence=[evidence], conclusion=close))
+
+
+def test_letter_rejects_skill_not_evidenced_by_approved_cv(master_cv: MasterCV) -> None:
+    jd = JD.model_copy(
+        update={"job_title": "Principal Scientist, Functional Genomics"},
+    )
+    jd.hard_skills.append("Functional Genomics")
+    draft = LetterSections(
+        opening=LetterOpening(
+            interest="The Functional Genomics Principal Scientist role appeals to me.",
+            fit=LetterParagraph(
+                text="My screening work is functional genomics in practice.",
+                source_ids=["nimbus"],
+            ),
+        ),
+        evidence=[
+            LetterParagraph(text="I built recommenders at Nimbus.", source_ids=["nimbus-1"]),
+            LetterParagraph(text="I moved training to Kubernetes.", source_ids=["nimbus-2"]),
+        ],
+        conclusion=LetterParagraph(
+            text="I would welcome a conversation about your genomics work.", source_ids=["nimbus"]
+        ),
+    )
+    with pytest.raises(ValueError, match="names a skill its sources do not evidence"):
+        write_letter(master_cv, jd, "Functional genomics role", FakeLLM({LetterSections: draft}))
+
+
+def test_letter_retries_rejected_section_with_specific_feedback(master_cv: MasterCV) -> None:
+    opening = LetterOpening(
+        interest="I am interested in the Senior ML Engineer role because of its ML work.",
+        fit=LetterParagraph(text="My work at Nimbus fits.", source_ids=["nimbus"]),
+    )
+    good = LetterParagraph(text="I built recommenders at Nimbus.", source_ids=["nimbus"])
+    kube = LetterParagraph(text="I moved training to Kubernetes.", source_ids=["nimbus-2"])
+    unsupported = LetterParagraph(text="I led 40 engineers.", source_ids=["nimbus-1"])
+    close = LetterParagraph(
+        text="I would welcome a conversation about the role.", source_ids=["nimbus"]
+    )
+    drafts = [
+        LetterSections(opening=opening, evidence=[good, unsupported], conclusion=close),
+        LetterSections(opening=opening, evidence=[good, kube], conclusion=close),
+    ]
+    llm = FakeLLM({LetterSections: lambda prompt: drafts.pop(0)})
+
+    letter = write_letter(master_cv, JD, "Senior ML Engineer role", llm)
+
+    assert len(letter.paragraphs) == 4
+    assert [model for _, model in llm.calls].count(LetterSections) == 2
+    assert "evidence: introduces numbers" in llm.calls[1][0]
+    assert "40" in llm.calls[1][0]
+
+
+def test_letter_can_use_older_research_from_the_full_cv(
+    master_cv: MasterCV,
+) -> None:
+    cv = master_cv.model_copy(deep=True)
+    cv.experience.extend(
+        [
+            Experience(
+                id="northfield",
+                company="Northfield University",
+                title="Postdoctoral Researcher",
+                start="2016-06",
+                end="2020-06",
+                bullets=[
+                    Bullet(
+                        id="northfield-1",
+                        text=(
+                            "Imaged patient-derived organoids by confocal microscopy and measured "
+                            "their growth with custom scripts."
+                        ),
+                    )
+                ],
+            ),
+            Experience(
+                id="riverside",
+                company="Riverside Institute",
+                title="Postdoctoral Researcher",
+                start="2012-06",
+                end="2016-06",
+                bullets=[
+                    Bullet(
+                        id="riverside-1",
+                        text="Prepared proteomics samples for mass spectrometry runs.",
+                    )
+                ],
+            ),
+        ]
+    )
+    opening = LetterOpening(
+        interest="I am interested in the Senior Scientist role developing cell therapies.",
+        fit=LetterParagraph(text="My research background fits.", source_ids=["northfield"]),
+    )
+    close = LetterParagraph(
+        text="I would welcome a conversation about this work.", source_ids=["northfield"]
+    )
+    draft = LetterSections(
+        opening=opening,
+        evidence=[
+            LetterParagraph(
+                text=(
+                    "At Northfield I imaged patient-derived organoids "
+                    "by confocal microscopy and measured their growth with custom scripts."
+                ),
+                source_ids=["northfield-1"],
+            ),
+            LetterParagraph(
+                text=(
+                    "At Riverside I prepared proteomics samples for "
+                    "mass spectrometry runs on the core facility instruments."
+                ),
+                source_ids=["riverside-1"],
+            ),
+        ],
+        conclusion=close,
+    )
+    llm = FakeLLM({LetterSections: draft})
+    jd = JDAnalysis(job_title="Senior Scientist", company="Cell Therapies")
+
+    letter = write_letter(cv, jd, "Develop new cell therapies.", llm)
+
+    assert "organoids" in letter.paragraphs[1]
+    assert "proteomics" in letter.paragraphs[2]
+    draft_prompts = [prompt for prompt, model in llm.calls if model is LetterSections]
+    assert len(draft_prompts) == 1
+    assert "northfield-1" in draft_prompts[0] and "riverside-1" in draft_prompts[0]
+
+
+def test_letter_accepts_valid_draft_without_an_evidence_review(master_cv: MasterCV) -> None:
+    draft = LetterSections(
+        opening=LetterOpening(
+            interest="I am interested in the Senior ML Engineer role because of its ML work.",
+            fit=LetterParagraph(text="My work at Nimbus fits.", source_ids=["nimbus"]),
+        ),
+        evidence=[
+            LetterParagraph(text="I built recommenders at Nimbus.", source_ids=["nimbus-1"]),
+            LetterParagraph(text="I improved recommendations at Nimbus.", source_ids=["nimbus-1"]),
+        ],
+        conclusion=LetterParagraph(
+            text="I would welcome a conversation about the role.", source_ids=["nimbus"]
+        ),
+    )
+    llm = FakeLLM({LetterSections: draft})
+
+    letter = write_letter(master_cv, JD, "Senior ML Engineer role", llm)
+
+    assert len(letter.paragraphs) == 4
+    assert [model for _, model in llm.calls] == [LetterSections]
 
 
 def test_cover_letter_rejects_unsourced_personal_claims_and_job_numbers(
@@ -219,27 +412,165 @@ def test_letter_motivation_comes_only_from_the_career_intent(
     ws = Workspace(settings)
     ws.master_cv, ws.active_cv_id = master_cv, "master"
     intent.save_intent(ws, SearchIntent(direction="Lead applied ML in health"))
-    draft = CoverLetterDraft(
-        paragraphs=[
-            LetterParagraph(
-                text="I am interested in the Senior ML Engineer role, where my ML work fits.",
-                source_ids=["nimbus"],
+    draft = LetterSections(
+        opening=LetterOpening(
+            interest="I am interested in the Senior ML Engineer role because of its ML work.",
+            fit=LetterParagraph(
+                text="My experience building recommenders at Nimbus fits.", source_ids=["nimbus"]
             ),
+        ),
+        evidence=[
             LetterParagraph(text="I built recommenders at Nimbus.", source_ids=["nimbus"]),
-            LetterParagraph(
-                text="I would welcome a conversation about the role.", source_ids=["nimbus"]
-            ),
-        ]
+            LetterParagraph(text="I moved training to Kubernetes.", source_ids=["nimbus-2"]),
+        ],
+        conclusion=LetterParagraph(
+            text="I would welcome a conversation about the role.", source_ids=["nimbus"]
+        ),
     )
-    llm = FakeLLM({JDAnalysis: JD, CoverLetterDraft: draft})
+    llm = FakeLLM(
+        {JDAnalysis: JD, LetterSections: draft}
+    )
     monkeypatch.setattr(ws, "structured", lambda *a, **k: llm)
     job = JobPosting(id="j", title="Senior ML Engineer", company="Orbit AI", description="ML")
     letter, path = asyncio.run(cv_service.write_cover_letter(ws, job))
     assert path.name == "Alex_Example_Orbit_AI_Senior_ML_Engineer_cover_letter.docx"
     assert letter.paragraphs
-    prompt = next(p for p, m in llm.calls if m is CoverLetterDraft)
+    assert letter.paragraphs[0].startswith("I am interested in the Senior ML Engineer role")
+    assert "My experience building recommenders" in letter.paragraphs[0]
+    prompt = next(p for p, m in llm.calls if m is LetterSections)
     assert "<motivation>\nLead applied ML in health\n</motivation>" in prompt
     assert draft_letter  # the drafting step is the only LLM call besides the JD analysis
+
+
+def test_saved_tailored_cv_edits_feed_letter_after_restart(
+    master_cv: MasterCV, settings: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = Workspace(settings)
+    ws.master_cv, ws.active_cv_id = master_cv, "master"
+    job = JobPosting(id="saved-role", title="Senior ML Engineer", company="Orbit AI")
+    tailored = apply_plan(master_cv, TailoringPlan(), JD)
+    original_path = export_docx(tailored, settings.output_dir / "first.docx")
+    document = tailored_documents.create(
+        ws, job.id, master_cv, JD, tailored, "classic", original_path, posting=job
+    )
+    new_text = "Built a recommendation service in Python and PyTorch serving 4M users."
+    with pytest.raises(ValueError, match="40"):
+        tailored_documents.edit(
+            ws, document.id, TailoredCVEdits(bullets={"nimbus-1": "I led 40 engineers."})
+        )
+    edited = tailored_documents.edit(
+        ws, document.id, TailoredCVEdits(bullets={"nimbus-1": new_text})
+    )
+    assert edited.filename != document.filename
+    assert edited.tailored.cv.bullet_index()["nimbus-1"].text == new_text
+
+    restarted = Workspace(settings)
+    restarted.active_cv_id = None
+    assert tailored_documents.list_for_job(restarted, job.id)[0].id == document.id
+    with pytest.raises(ValueError, match="does not belong"):
+        tailored_documents.load(restarted, document.id, "another-role")
+    draft = LetterSections(
+        opening=LetterOpening(
+            interest="I am interested in the Senior ML Engineer role because of its ML work.",
+            fit=LetterParagraph(text="My recommendation work fits.", source_ids=["nimbus"]),
+        ),
+        evidence=[
+            LetterParagraph(text=new_text, source_ids=["nimbus-1"]),
+            LetterParagraph(text="I moved training to Kubernetes.", source_ids=["nimbus-2"]),
+        ],
+        conclusion=LetterParagraph(
+            text="I would welcome a conversation about the role.", source_ids=["nimbus-1"]
+        ),
+    )
+    llm = FakeLLM(
+        {JDAnalysis: JD, LetterSections: draft}
+    )
+    monkeypatch.setattr(restarted, "structured", lambda *a, **k: llm)
+    letter, path = asyncio.run(
+        cv_service.write_cover_letter(restarted, job, tailored_cv_id=document.id)
+    )
+    assert new_text in letter.paragraphs[1] and path.exists()
+    assert new_text in next(prompt for prompt, model in llm.calls if model is LetterSections)
+    from src.web import app as webapp
+
+    monkeypatch.setattr(webapp, "get_workspace", lambda: restarted)
+    client = TestClient(webapp.app)
+    assert any(item["id"] == document.id for item in client.get("/api/tailored-cvs").json())
+    response = client.post(
+        f"/api/jobs/{job.id}/cover-letter", json={"tailored_cv_id": document.id}
+    )
+    assert response.status_code == 200, response.json()
+
+
+def test_older_word_cv_requires_review_before_it_can_feed_letter(
+    master_cv: MasterCV, settings: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = Workspace(settings)
+    ws.master_cv, ws.active_cv_id = master_cv, "master"
+    job = JobPosting(id="older-role", title="Senior ML Engineer", company="Orbit AI")
+    changed = master_cv.model_copy(deep=True)
+    changed.bullet_index()[
+        "nimbus-1"
+    ].text = "Built a recommendation service in Python and PyTorch serving 4M users."
+    source = export_docx(changed, settings.output_dir / "older_tailored.docx")
+    draft = LetterSections(
+        opening=LetterOpening(
+            interest="I am interested in the Senior ML Engineer role because of its ML work.",
+            fit=LetterParagraph(text="My recommendation work fits.", source_ids=["nimbus"]),
+        ),
+        evidence=[
+            LetterParagraph(text=changed.bullet_index()["nimbus-1"].text, source_ids=["nimbus-1"]),
+            LetterParagraph(text="I moved training to Kubernetes.", source_ids=["nimbus-2"]),
+        ],
+        conclusion=LetterParagraph(
+            text="I would welcome a conversation about the role.", source_ids=["nimbus"]
+        ),
+    )
+    llm = FakeLLM(
+        {
+            MasterCV: changed,
+            JDAnalysis: JD,
+            LetterSections: draft,
+        }
+    )
+    monkeypatch.setattr(ws, "structured", lambda *a, **k: llm)
+
+    imported = asyncio.run(cv_service.attach_existing_cv(ws, job, f"generated:{source.name}"))
+    assert imported.imported and not imported.reviewed
+    assert changed.bullet_index()["nimbus-1"].text in llm.calls[0][0]
+    with pytest.raises(ValueError, match="Review and save"):
+        asyncio.run(cv_service.write_cover_letter(ws, job, tailored_cv_id=imported.id))
+    tailored_documents.edit(ws, imported.id, TailoredCVEdits())
+
+    restarted = Workspace(settings)
+    monkeypatch.setattr(restarted, "structured", lambda *a, **k: llm)
+    assert tailored_documents.list_for_job(restarted, job.id)[0].reviewed
+    letter, _ = asyncio.run(
+        cv_service.write_cover_letter(restarted, job, tailored_cv_id=imported.id)
+    )
+    assert changed.bullet_index()["nimbus-1"].text in letter.paragraphs[1]
+
+    from src.web import app as webapp
+
+    monkeypatch.setattr(webapp, "get_workspace", lambda: ws)
+    client = TestClient(webapp.app)
+    attached = client.post(
+        "/api/tailored-cvs/import",
+        json={
+            "asset_id": f"generated:{source.name}",
+            "title": job.title,
+            "company": job.company,
+            "description": "Build recommendation systems with Python and PyTorch.",
+        },
+    )
+    assert attached.status_code == 200, attached.json()
+    linked = attached.json()
+    assert linked["job_id"].startswith("linked:") and not linked["reviewed"]
+    assert client.put(f"/api/tailored-cvs/{linked['id']}", json={}).json()["reviewed"]
+    response = client.post(
+        f"/api/jobs/{linked['job_id']}/cover-letter", json={"tailored_cv_id": linked["id"]}
+    )
+    assert response.status_code == 200, response.json()
 
 
 def test_general_cv_exports_all_roles_and_keeps_prior_versions(
@@ -253,3 +584,110 @@ def test_general_cv_exports_all_roles_and_keeps_prior_versions(
     assert first != second and first.exists() and second.exists()
     body = "\n".join(p.text for p in Document(str(first)).paragraphs)
     assert all(role.title in body for role in master_cv.experience)
+
+
+def test_cover_letters_have_their_own_library_editor_and_exports(
+    master_cv: MasterCV, settings: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.web import app as webapp
+
+    ws = Workspace(settings)
+    ws.master_cv, ws.active_cv_id = master_cv, "master"
+    cv_path, _ = asyncio.run(cv_service.export_general_cv(ws))
+    assert cv_path.parent == settings.output_dir / "cvs"
+    job = JobPosting(id="letter-job", title="Senior ML Engineer", company="Orbit AI")
+    draft = CoverLetterDraft(
+        paragraphs=[
+            LetterParagraph(text="My work at Nimbus fits this role.", source_ids=["nimbus"]),
+            LetterParagraph(text="I built recommenders at Nimbus.", source_ids=["nimbus-1"]),
+            LetterParagraph(text="I moved training to Kubernetes.", source_ids=["nimbus-2"]),
+            LetterParagraph(text="I would welcome a conversation.", source_ids=["nimbus"]),
+        ]
+    )
+    letter = apply_letter(master_cv, draft, JD, "Senior ML Engineer role")
+    letter_path = export_cover_letter(
+        letter, master_cv, settings.output_dir / "cover_letters" / "example_cover_letter.docx"
+    )
+    saved = cover_letters.create(
+        ws, job, letter, master_cv, "Senior ML Engineer role", "classic", letter_path
+    )
+    legacy = export_cover_letter(
+        letter, master_cv, settings.output_dir / "older_cover_letter.docx"
+    )
+    older_cv = export_docx(master_cv, settings.output_dir / "older_cv.docx")
+    assert legacy.exists() and older_cv.exists()
+    assets = cv_service.list_cvs(ws)
+    assert all("cover_letter" not in asset.filename for asset in assets)
+    assert any(asset.id == "generated:older_cv.docx" for asset in assets)
+    assert list(settings.output_dir.glob("*.docx")) == []
+    assert (settings.output_dir / "cvs" / older_cv.name).exists()
+    assert (settings.output_dir / "cover_letters" / legacy.name).exists()
+    assert {item.filename for item in cover_letters.list_all(ws)} == {
+        letter_path.name,
+        legacy.name,
+    }
+
+    monkeypatch.setattr(webapp, "get_workspace", lambda: ws)
+    client = TestClient(webapp.app)
+    assert client.get(f"/api/files/cvs/{cv_path.name}").status_code == 200
+    assert client.get(f"/api/files/{legacy.name}").status_code == 200
+    listed = client.get("/api/cover-letters").json()
+    assert len(listed) == 2
+    assert next(item for item in listed if item["id"] == saved.id)["paragraphs"][1] == (
+        "I built recommenders at Nimbus."
+    )
+    edits = {
+        "greeting": letter.greeting,
+        "paragraphs": [*letter.paragraphs],
+        "closing": letter.closing,
+    }
+    edits["paragraphs"][1] = "I built recommenders at Nimbus and led 40 engineers."
+    assert client.put(f"/api/cover-letters/{saved.id}", json=edits).status_code == 422
+    edits["paragraphs"][1] = "At Nimbus I built recommenders."
+    updated = client.put(f"/api/cover-letters/{saved.id}", json=edits)
+    assert updated.status_code == 200, updated.json()
+    assert updated.json()["paragraphs"][1] == "At Nimbus I built recommenders."
+    assert client.get(updated.json()["docx_url"]).status_code == 200
+    text_export = client.get(updated.json()["txt_url"])
+    assert text_export.status_code == 200
+    assert b"At Nimbus I built recommenders." in text_export.content
+    text_path = (settings.output_dir / "cover_letters" / updated.json()["filename"]).with_suffix(
+        ".txt"
+    )
+    assert text_path.exists()
+    legacy_view = next(item for item in listed if item["filename"] == legacy.name)
+    legacy_edit = client.put(
+        f"/api/cover-letters/{legacy_view['id']}",
+        json={
+            "greeting": legacy_view["greeting"],
+            "paragraphs": legacy_view["paragraphs"],
+            "closing": "Kind regards,",
+        },
+    )
+    assert legacy_edit.status_code == 200, legacy_edit.json()
+    assert legacy_edit.json()["closing"] == "Kind regards,"
+    assert len(cover_letters.list_all(Workspace(settings))) == 2
+    assert all("cover_letter" not in asset.filename for asset in cv_service.list_cvs(ws))
+
+    deleted = client.delete(f"/api/cover-letters/{saved.id}")
+    assert deleted.status_code == 200 and deleted.json() == {"deleted": 1}
+    assert not letter_path.exists()
+    assert not text_path.exists()
+    assert not (settings.output_dir / "cover_letters" / updated.json()["filename"]).exists()
+    assert len(client.get("/api/cover-letters").json()) == 1
+    assert client.delete(f"/api/cover-letters/{saved.id}").status_code == 404
+
+    extra_path = export_cover_letter(
+        letter, master_cv, settings.output_dir / "cover_letters" / "another_cover_letter.docx"
+    )
+    cover_letters.create(
+        ws, job, letter, master_cv, "Senior ML Engineer role", "classic", extra_path
+    )
+    removed_all = client.delete("/api/cover-letters")
+    assert removed_all.status_code == 200 and removed_all.json() == {"deleted": 2}
+    assert client.get("/api/cover-letters").json() == []
+    assert client.delete("/api/cover-letters").json() == {"deleted": 0}
+    assert not extra_path.exists()
+    assert not (settings.output_dir / "cover_letters" / legacy.name).exists()
+    assert not (settings.output_dir / "cover_letters" / legacy_edit.json()["filename"]).exists()
+    assert older_cv.name in {path.name for path in (settings.output_dir / "cvs").glob("*.docx")}

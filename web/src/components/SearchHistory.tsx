@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { History, Loader2, Trash2 } from "lucide-react";
+import { ChevronRight, Loader2, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "../lib/api";
 import type { HistoryItem } from "../lib/types";
@@ -51,9 +51,10 @@ export function SearchHistory() {
   const error = (open.error ?? remove.error ?? clear.error) as Error | null;
 
   return (
-    <section className="card space-y-2 p-3">
-      <div className="flex items-center justify-between">
-        <span className="label flex items-center gap-1"><History size={12} /> Recent searches</span>
+    <details className="card group p-3" open>
+      <summary className="label flex cursor-pointer list-none items-center gap-1 [&::-webkit-details-marker]:hidden"><ChevronRight size={13} className="group-open:rotate-90" /> Recent searches</summary>
+      <div className="mt-2 space-y-2">
+      <div className="flex items-center justify-end">
         {items.length > 0 && (
           confirmClear ? (
             <span className="flex gap-2 text-[11px]">
@@ -107,6 +108,7 @@ export function SearchHistory() {
         </ul>
       )}
       {error && <p className="text-[11px] text-bad">{error.message}</p>}
-    </section>
+      </div>
+    </details>
   );
 }

@@ -260,6 +260,37 @@ class TailoredCV(_Strict):
         default_factory=list, description="Reviewer points the revision was asked to address"
     )
     ats: ATSReport | None = None
+    source_ats_keyword_coverage: float | None = Field(default=None, ge=0, le=1)
+    document_id: str | None = None
+
+
+class TailoredDocument(_Strict):
+    """A saved, editable tailored CV and the source used to guard later edits."""
+
+    id: str
+    cv_id: str
+    job_id: str
+    job_title: str = ""
+    job_company: str = ""
+    job_description: str = ""
+    job_location: str | None = None
+    created_at: str
+    updated_at: str
+    template: str
+    filename: str
+    source_cv: MasterCV
+    jd: JDAnalysis
+    tailored: TailoredCV
+    reviewed: bool = True
+    imported: bool = False
+
+
+class TailoredCVEdits(_Strict):
+    """Text fields a user can revise without changing the Master CV."""
+
+    headline: str | None = None
+    summary: str | None = None
+    bullets: dict[str, str] = Field(default_factory=dict)
 
 
 class LetterParagraph(_Strict):
@@ -271,10 +302,31 @@ class LetterParagraph(_Strict):
     )
 
 
+class LetterOpening(_Strict):
+    """A reason for interest followed by one CV-backed reason for fit."""
+
+    interest: str = Field(min_length=1)
+    fit: LetterParagraph
+
+
+class LetterSections(_Strict):
+    """Required sections the model fills before the letter is assembled."""
+
+    greeting: str = "Dear Hiring Manager,"
+    opening: LetterOpening
+    evidence: list[LetterParagraph] = Field(min_length=1, max_length=2)
+    conclusion: LetterParagraph
+    closing: str = "Yours sincerely,"
+
+
 class CoverLetterDraft(_Strict):
     """LLM output: untrusted until `cover_letter.apply_letter`."""
 
     greeting: str = "Dear Hiring Manager,"
+    opening: LetterOpening | None = None
+    evidence: list[LetterParagraph] = Field(default_factory=list)
+    conclusion: LetterParagraph | None = None
+    # Older callers can still pass paragraphs directly to apply_letter.
     paragraphs: list[LetterParagraph] = Field(default_factory=list)
     closing: str = "Yours sincerely,"
 

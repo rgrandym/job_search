@@ -1,9 +1,9 @@
 """Saved jobs: the ones the user ticked and kept from a search, across searches.
 
 Stored in `data/saved_jobs.json` (git-ignored, personal data), newest first, each with the
-result as it was judged (posting, verdict, role family, flags). Their status (applied, N/A,
-outcome stage, note) is not copied: it is read live from `services.tracker`, so applications
-are tracked in one place. Saved jobs stay until the user removes them; tailoring and cover
+result as it was judged (posting, verdict, role family, flags). Their status is read live from
+`services.tracker`; applied jobs are hidden here and shown in the application register. Saved
+jobs stay until the user removes them; tailoring and cover
 letters work on them like on current results (`Workspace.job` finds both).
 """
 
@@ -28,6 +28,8 @@ def list_saved(ws: Workspace) -> list[SavedJob]:
     out = []
     for item in ws.saved_jobs():
         tracking = tracker.tracking_for(ws, item.result.job)
+        if tracking is not None and tracking.status == "applied":
+            continue
         result = item.result.model_copy(update={"tracking": tracking})
         out.append(item.model_copy(update={"result": result}))
     return out

@@ -35,20 +35,35 @@ const TABS: { value: Tab; label: string }[] = [
 const day = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString() : "");
 
 /** Stored profile summaries for the selected CV: view, pin for searches, edit, rebuild, delete. */
-export function SummaryDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function SummaryDialog({ open, onClose, initialProfileKey, embedded = false }: {
+  open: boolean;
+  onClose: () => void;
+  initialProfileKey: string | null;
+  embedded?: boolean;
+}) {
   const qc = useQueryClient();
   const { query, useCv, profileKey, set } = useSearch();
-  const [selected, setSelected] = useState<string | null>(null);
-  const [editing, setEditing] = useState(false);
+  const [selected, setSelected] = useState<string | null>(initialProfileKey);
+  const [editing, setEditing] = useState(Boolean(initialProfileKey));
   const [tab, setTab] = useState<Tab>("profiles");
 
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles, enabled: open });
   const records = profiles.data?.profiles ?? [];
-  const current = records.find((r) => r.key === selected) ?? records.find((r) => r.key === profileKey) ?? records[0];
+  const current = selected
+    ? records.find((r) => r.key === selected)
+    : records.find((r) => r.key === profileKey) ?? records[0];
 
   useEffect(() => {
     if (!open) setEditing(false);
   }, [open]);
+  useEffect(() => {
+    if (!open) return;
+    setSelected(initialProfileKey);
+    setEditing(Boolean(initialProfileKey));
+    if (initialProfileKey) {
+      setTab("profiles");
+    }
+  }, [open, initialProfileKey]);
   useEffect(() => {
     // a pinned profile that no longer exists (deleted, or another CV selected) is unpinned
     const stored = profiles.data?.profiles;
@@ -80,8 +95,8 @@ export function SummaryDialog({ open, onClose }: { open: boolean; onClose: () =>
     },
   });
 
-  return (
-    <Modal open={open} onClose={onClose} title="Profiles" wide>
+  const content = (
+    <>
       <div className="mb-3 flex gap-1" role="tablist">
         {TABS.map((t) => (
           <button
@@ -182,8 +197,9 @@ export function SummaryDialog({ open, onClose }: { open: boolean; onClose: () =>
           )}
         </>
       )}
-    </Modal>
+    </>
   );
+  return embedded ? content : <Modal open={open} onClose={onClose} title="Profiles" resizable>{content}</Modal>;
 }
 
 function ProfileView({

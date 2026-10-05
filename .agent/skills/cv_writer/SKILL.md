@@ -14,12 +14,17 @@ Turns a factual **Master CV** into job-specific, ATS-optimised CVs and exports t
 | `src/cv/master_cv_manager.py` | load / save / validate / import / merge-patch the Master CV |
 | `src/cv/tailor.py` | JD analysis → tailoring plan (LLM) → guarded application (deterministic) → review → one revision |
 | `src/cv/cover_letter.py` | Cover-letter draft (LLM) → guarded paragraphs (deterministic) |
+| `src/services/tailored_documents.py` | Saved tailored drafts, guarded edits and Word versions |
+| `src/services/cover_letters.py` | Saved letter text, edits and Word/text exports |
 | `src/cv/ats.py` | Reads the exported .docx back the way an ATS does |
 | `src/cv/docx_exporter.py` | Word rendering (CV and cover letter) + template definitions (`TEMPLATES`) |
 | `src/services/enrichment.py` | Evidence review queue: document → proposed CV additions → user accepts |
 
 The Master CV lives at `data/master_cv.json` (git-ignored, personal data). Example:
 `data/examples/master_cv.example.json`.
+The Available CVs panel can delete a CV and its parsed copy, stored profile summaries and
+career intent. Deleting a generated Word CV also removes its saved tailored draft record;
+application history and cover letters remain. Each deletion requires confirmation in the UI.
 
 ---
 
@@ -115,7 +120,11 @@ Also produced, and guarded the same way (recorded in `changes` as `headline` / `
 - `headline`: rejected if it claims a seniority above any title held (or the CV headline), a
   role the CV does not show (role words of the title part, before a comma, "|" or dash), or
   skills or numbers the CV lacks. "Staff ML Engineer" for a Senior is rejected.
-- `summary` (2–3 sentences): numbers and skills must exist somewhere in the CV.
+- `summary` (3–4 substantive sentences): lead with evidence relevant to the job, then retain
+  distinctive relevant breadth from the Master CV, such as leadership, hands-on practice or
+  adjacent experience. Numbers and skills must exist somewhere in the CV. The tailoring request
+  may emphasise leadership or hands-on work and use a more senior or junior presentation;
+  these choices never change the candidate's evidenced level or permit new claims.
 - `bullet_order` (keep ≥ 2 per role) and `skills_priority` (re-orders existing skills only).
   If the order left out the only bullet carrying a JD keyword, the bullet is put back
   (`restored_keywords`); `missing_keywords` are then true gaps.
@@ -127,6 +136,20 @@ weak bullets (passive, generic, result buried), and up to 3 order notes. If it f
 `revise_plan` produces one revised plan, which passes `apply_plan` again; the points are kept
 in `TailoredCV.critique`. No issues: no revision call.
 
+Each tailored Word export also saves its structured draft under `data/tailored_cvs/`. The job
+card's **Cover letter / review CV** panel loads these drafts after a restart. Users can edit
+the headline, summary and visible bullet text; `tailor.revise_tailored` checks edits against
+the source CV's fabrication guards and saves a new Word version. A cover letter can explicitly
+cite a selected saved draft; batch document preparation links each letter to the draft it just
+created. The centre panel's **Documents** tab lists saved drafts even when their job cards are
+no longer in the current search; each draft retains the posting text needed to write a letter.
+Older Word CVs already in the CV library can be attached to a job from the same panel. The
+quality model extracts a structured CV from the Word file; the user must review and save the
+extracted text before it can be linked to a cover letter. The saved draft and its source remain
+available after a restart. If the original job card is gone, the Documents tab also accepts
+the Word CV together with the job title, company and description, then keeps that posting
+with the draft for later letters.
+
 Run end to end in code:
 ```python
 from pathlib import Path
@@ -136,24 +159,37 @@ from src.cv import master_cv_manager as mgr, tailor
 tailored = tailor.tailor(mgr.load(Path("data/master_cv.json")), jd_text, get_llm_provider())
 Path("output/tailored_acme.json").write_text(tailor.dump_tailored(tailored))
 ```
-`tailored.keyword_coverage` is the ATS hit-rate (0–1) over JD hard skills + must-haves.
+`tailored.keyword_coverage` is the structured CV's hit-rate (0–1) over JD hard skills +
+must-haves. The saved Word draft also carries the original Word CV's coverage for the same
+keywords, so the UI can compare like with like; neither value changes the job match score.
 
 ## 3b. Cover letters
 
 `cover_letter.write_letter(master, jd, jd_text, llm, motivation) -> CoverLetter`
 (`cv_service.write_cover_letter`, `POST /api/jobs/{job_id}/cover-letter`, agent tool
-`write_cover_letter`). The LLM drafts 3–4 short paragraphs: a role-specific introduction
-explaining interest and fit, 1–2 evidence paragraphs, and a brief close. Each cites in
-`source_ids` the Master
-CV bullet, role or project ids its claims come from. `apply_letter` keeps a paragraph only if
-every cited id exists, every number is in its cited sources or in the job description (facts
-about the employer may be quoted), and every skill it names is evidenced by its cited sources.
+`write_cover_letter`). The letter is written from the CV the user approved: the reviewed
+tailored CV chosen for the job (the newest by default), otherwise the CV selected in the CV
+library (not necessarily the Master CV). The LLM fills a fixed `LetterSections` template, so
+every letter has four paragraphs: an opening (interest naming the job title + overall fit),
+exactly two evidence paragraphs (one CV example each, tied to the role) and a short
+conclusion, under 300 body words. The model may use the job's terms when the cited CV entries
+support them. `apply_letter` blocks fabrication: each paragraph cites existing CV ids in
+`source_ids`, personal claims need a source, named skills must appear in cited CV evidence,
+and every number is in its cited sources or in the job description (facts about the employer
+may be quoted). Hyperbole is rejected. A rejected
+section or broken template triggers one revised draft with specific feedback.
+The user reviews and can edit the resulting letter in the app; omitted examples do not block
+creation.
 Motivation comes **only** from the user's career intent (direction, energising work, target
-areas); without one, interest stays grounded in the work described in the posting. The
-guarded result must retain the introduction, evidence and close and stay under 330 body words.
+areas); without one, interest stays grounded in the work described in the posting.
 Every paragraph is recorded in `CoverLetter.changes`; rejected ones are reported. The Word
-file starts with the greeting, without the CV contact header or date. Exported with a role
-specific, versioned filename so drafts are preserved.
+file starts with the greeting, without the CV contact header or date. New CV Word files live in
+`output/cvs/`; letters live in `output/cover_letters/`, with editable letter records in
+`data/cover_letters/`. The Cover letters tab lists current and earlier letters separately from
+the CV library, displays their text, permits edits, exports Word or plain text, and can delete
+one letter or all letters with their saved exports. Older generated Word files in the root of
+`output/` are moved into those folders when the
+document libraries load; older download links continue to work.
 
 ---
 
@@ -162,7 +198,7 @@ specific, versioned filename so drafts are preserved.
 ```bash
 python .agent/skills/cv_writer/docx_templates.py --list
 python .agent/skills/cv_writer/docx_templates.py \
-    --cv output/tailored_acme.json --template classic --out output/Alex_Example_Acme.docx
+    --cv output/tailored_acme.json --template classic --out output/cvs/Alex_Example_Acme.docx
 ```
 Accepts either a `MasterCV` or a `TailoredCV` JSON. In code: `docx_exporter.export_docx(cv, path, template)`.
 
@@ -175,7 +211,7 @@ images or content in headers/footers; native Word bullet lists ("List Bullet" st
 standard section names (Summary, Experience, Skills, Education, Certifications); dates as
 `Mon YYYY – Mon YYYY`.
 
-Name output files `<First>_<Last>_<Company>.docx` under `output/` (git-ignored).
+Name generated CV files `<First>_<Last>_<Company>.docx` under `output/cvs/` (git-ignored).
 
 **ATS read-back** (`ats.check_docx(path, cv, keywords) -> ATSReport`, run after every
 tailored export and returned as `TailoredCV.ats`): reads the file's text as a parser would,

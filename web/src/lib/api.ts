@@ -8,6 +8,7 @@ import type {
   ClaudeCodeUsage,
   HistoryItem,
   JobTracking,
+  MatchResult,
   LabelReview,
   LearningState,
   UserLabel,
@@ -24,6 +25,7 @@ import type {
   SearchStreamEvent,
   ClaudeCodeStatus,
   CVAsset,
+  CoverLetterView,
   Effort,
   LLMView,
   ModelInfo,
@@ -31,6 +33,7 @@ import type {
   Provider,
   SearchOutcome,
   SearchQuery,
+  TailoredCVView,
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -144,6 +147,8 @@ export const api = {
   },
   selectCV: (assetId: string) =>
     request<CVAsset>(`/api/cv/selection/${encodeURIComponent(assetId)}`, { method: "PUT" }),
+  deleteCV: (assetId: string) =>
+    request<{ deleted: boolean }>(`/api/cv/${encodeURIComponent(assetId)}`, { method: "DELETE" }),
   exportGeneralCV: () =>
     request<{ download_url: string; roles: number }>("/api/cv/general", { method: "POST" }),
   profileSummary: (query: SearchQuery, use_cv: boolean, refresh = false) =>
@@ -199,34 +204,55 @@ export const api = {
     request<{ deleted: boolean }>(`/api/profiles/${encodeURIComponent(key)}`, { method: "DELETE" }),
   claudeCodeUsage: () => request<ClaudeCodeUsage>("/api/claude-code/usage"),
   /** Mark a job of the current search applied / N/A / open, and/or set its note, reason or stage. */
-  trackJob: (jobId: string, status: "open" | "applied" | "na", note?: string, extra?: Omit<TrackingUpdate, "status" | "note">) =>
+  trackJob: (jobId: string, status?: "open" | "applied" | "na", note?: string, extra?: Omit<TrackingUpdate, "status" | "note">) =>
     request<JobTracking>(`/api/jobs/${encodeURIComponent(jobId)}/tracking`, json("PUT", { status, note, ...extra })),
   tracker: () => request<TrackedJob[]>("/api/tracker"),
   addApplication: (body: { title: string; company: string; url?: string; note?: string }) =>
     request<TrackedJob>("/api/tracker", json("POST", body)),
-  editTracked: (id: string, status: "open" | "applied" | "na", note?: string, extra?: Omit<TrackingUpdate, "status" | "note">) =>
+  editTracked: (id: string, status?: "open" | "applied" | "na", note?: string, extra?: Omit<TrackingUpdate, "status" | "note">) =>
     request<TrackedJob>(`/api/tracker/${encodeURIComponent(id)}`, json("PUT", { status, note, ...extra })),
   deleteTracked: (id: string) =>
     request<{ deleted: boolean }>(`/api/tracker/${encodeURIComponent(id)}`, { method: "DELETE" }),
   sourceYield: () => request<SourceYield[]>("/api/sources/yield"),
-  tailor: (jobId: string, template: string) =>
+  tailor: (jobId: string, template: string, result?: MatchResult,
+    emphasis: "auto" | "leadership" | "hands_on" = "auto",
+    level: "auto" | "senior" | "junior" = "auto") =>
     request<{
+      document_id: string;
       download_url: string;
       keyword_coverage: number;
       missing_keywords: string[];
       restored_keywords: string[];
       critique: string[];
       ats: ATSReport | null;
+      source_ats_keyword_coverage: number | null;
       rejected: number;
       rejections: Rejection[];
       tracking: JobTracking | null;
     }>(
       `/api/jobs/${encodeURIComponent(jobId)}/tailor`,
-      json("POST", { template }),
+      json("POST", { template, result, emphasis, level }),
     ),
-  coverLetter: (jobId: string, template: string) =>
+  tailoredCVs: (jobId: string) =>
+    request<TailoredCVView[]>(`/api/jobs/${encodeURIComponent(jobId)}/tailored-cvs`),
+  allTailoredCVs: () => request<TailoredCVView[]>("/api/tailored-cvs"),
+  importOlderCV: (asset_id: string, title: string, company: string, description: string) =>
+    request<TailoredCVView>("/api/tailored-cvs/import", json("POST", { asset_id, title, company, description })),
+  importTailoredCV: (jobId: string, assetId: string, result?: MatchResult) =>
+    request<TailoredCVView>(`/api/jobs/${encodeURIComponent(jobId)}/tailored-cvs/import`,
+      json("POST", { asset_id: assetId, result })),
+  editTailoredCV: (id: string, edits: { headline?: string; summary?: string; bullets?: Record<string, string> }) =>
+    request<TailoredCVView>(`/api/tailored-cvs/${encodeURIComponent(id)}`, json("PUT", edits)),
+  coverLetter: (jobId: string, template: string, result?: MatchResult, tailored_cv_id?: string) =>
     request<{ download_url: string; paragraphs: number; rejections: Rejection[] }>(
       `/api/jobs/${encodeURIComponent(jobId)}/cover-letter`,
-      json("POST", { template }),
+      json("POST", { template, result, tailored_cv_id }),
     ),
+  coverLetters: () => request<CoverLetterView[]>("/api/cover-letters"),
+  editCoverLetter: (id: string, edits: Pick<CoverLetterView, "greeting" | "paragraphs" | "closing">) =>
+    request<CoverLetterView>(`/api/cover-letters/${encodeURIComponent(id)}`, json("PUT", edits)),
+  deleteCoverLetter: (id: string) =>
+    request<{ deleted: number }>(`/api/cover-letters/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  deleteAllCoverLetters: () =>
+    request<{ deleted: number }>("/api/cover-letters", { method: "DELETE" }),
 };

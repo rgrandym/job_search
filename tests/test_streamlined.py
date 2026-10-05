@@ -17,12 +17,13 @@ from src.agents.runtime import AgentContext
 from src.core.config import Settings
 from src.core.llm import LLMConfig
 from src.cv.models import (
-    CoverLetterDraft,
     CVCritique,
     EvidenceProposal,
     EvidenceProposals,
     JDAnalysis,
+    LetterOpening,
     LetterParagraph,
+    LetterSections,
     MasterCV,
     TailoringPlan,
 )
@@ -110,21 +111,25 @@ def test_cv_and_cover_letter_share_one_jd_analysis(
 ) -> None:
     ws = Workspace(settings)
     ws.master_cv, ws.active_cv_id = master_cv, "master"
-    draft = CoverLetterDraft(
-        paragraphs=[
-            LetterParagraph(text="I am interested in the ML Engineer role.", source_ids=["nimbus"]),
+    draft = LetterSections(
+        opening=LetterOpening(
+            interest="I am interested in the ML Engineer role because of its ML work.",
+            fit=LetterParagraph(text="My work at Nimbus fits.", source_ids=["nimbus"]),
+        ),
+        evidence=[
             LetterParagraph(text="I built ML.", source_ids=["nimbus"]),
-            LetterParagraph(
-                text="I would welcome a conversation about the role.", source_ids=["nimbus"]
-            ),
-        ]
+            LetterParagraph(text="I moved training to Kubernetes.", source_ids=["nimbus-2"]),
+        ],
+        conclusion=LetterParagraph(
+            text="I would welcome a conversation about the role.", source_ids=["nimbus"]
+        ),
     )
     llm = FakeLLM(
         {
             JDAnalysis: JDAnalysis(job_title="ML Engineer"),
             TailoringPlan: TailoringPlan(),
             CVCritique: CVCritique(),
-            CoverLetterDraft: draft,
+            LetterSections: draft,
         }
     )
     monkeypatch.setattr(ws, "structured", lambda *a, **k: llm)

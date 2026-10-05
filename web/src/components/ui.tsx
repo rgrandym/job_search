@@ -1,5 +1,6 @@
 import { X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { cn } from "../lib/utils";
 
 /** Free-text list input: Enter or comma adds a chip, Backspace removes the last. */
@@ -163,12 +164,16 @@ export function Modal({
   title,
   children,
   wide,
+  resizable,
+  headerAction,
 }: {
   open: boolean;
   onClose: () => void;
   title: string;
   children: ReactNode;
   wide?: boolean;
+  resizable?: boolean;
+  headerAction?: ReactNode;
 }) {
   useEffect(() => {
     if (!open) return;
@@ -177,23 +182,32 @@ export function Modal({
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
   if (!open) return null;
-  return (
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onMouseDown={onClose}>
       <div
         role="dialog"
         aria-label={title}
-        className={cn("card max-h-[85vh] w-full overflow-y-auto p-5 shadow-2xl scroll-thin", wide ? "max-w-2xl" : "max-w-md")}
+        className={cn(
+          "card max-h-[85vh] overflow-y-auto p-5 shadow-2xl scroll-thin",
+          resizable
+            ? "h-[70vh] w-[92vw] min-h-64 min-w-72 max-w-[calc(100vw-2rem)] resize overflow-auto"
+            : wide ? "w-full max-w-2xl" : "w-full max-w-md",
+        )}
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <div className="mb-4 flex items-center justify-between">
+        <div className="sticky top-0 z-10 mb-4 flex items-center justify-between gap-3 bg-panel pb-2">
           <h2 className="text-[15px] font-semibold">{title}</h2>
-          <button aria-label="Close" className="text-faint hover:text-fg" onClick={onClose}>
-            <X size={16} />
-          </button>
+          <div className="flex items-center gap-3">
+            {headerAction}
+            <button aria-label="Close" className="text-faint hover:text-fg" onClick={onClose}>
+              <X size={16} />
+            </button>
+          </div>
         </div>
         {children}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

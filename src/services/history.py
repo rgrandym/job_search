@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field, TypeAdapter
 
-from src.jobs.models import MatchReport, SearchQuery
+from src.jobs.models import MatchReport, MatchResult, SearchQuery
 from src.services import tracker
 from src.services.workspace import Workspace
 
@@ -115,6 +115,19 @@ def list_history(ws: Workspace) -> list[HistoryItem]:
     return TypeAdapter(list[HistoryItem]).validate_python(
         [{k: v for k, v in e.items() if k in fields} for e in _entries(ws)]
     )
+
+
+def find_result(ws: Workspace, job_id: str) -> MatchResult | None:
+    """Find a posting in retained searches, newest first, without reopening a search."""
+    for entry in _entries(ws):
+        try:
+            report = MatchReport.model_validate(entry["outcome"]["report"])
+        except (KeyError, ValueError):
+            continue
+        hit = next((result for result in report.all_results() if result.job.id == job_id), None)
+        if hit is not None:
+            return hit
+    return None
 
 
 def open_entry(ws: Workspace, entry_id: str) -> tuple[SearchRequest, SearchOutcome]:

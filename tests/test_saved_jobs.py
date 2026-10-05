@@ -1,5 +1,4 @@
-"""Saved jobs: kept across searches, status read live from the tracker, usable for tailoring
-after a new search."""
+"""Saved jobs persist across searches and move out of the list when applied."""
 
 from __future__ import annotations
 
@@ -46,8 +45,11 @@ def test_saved_jobs_outlive_the_search_and_track_applications_live(ws: Workspace
     assert job is not None and job.title == "Scientist a"
     tracker.set_status(ws, job, "applied", stage="interview")
     status = {s.result.job.id: s.result.tracking for s in saved.list_saved(ws)}
-    assert status["a"] and status["a"].status == "applied" and status["a"].stage == "interview"
+    assert "a" not in status
     assert status["b"] is None
+    applied = next(e for e in tracker.register(ws) if e.title == "Scientist a")
+    assert applied.stage == "interview"
+    assert applied.application_result and applied.application_result.job.id == "a"
 
     assert saved.remove(ws, ["a", "nope"]) == 1
     assert [s.result.job.id for s in saved.list_saved(ws)] == ["b"]

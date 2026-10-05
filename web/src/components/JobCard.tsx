@@ -6,6 +6,7 @@ import type { Rejection } from "../lib/api";
 import type { FitDimensions, JobStatus, JobVerdict, MatchResult, OutcomeStage, UserLabel } from "../lib/types";
 import { cn, money, scoreColor } from "../lib/utils";
 import { useSearch } from "../stores/searchStore";
+import { TailoredCVPanel } from "./TailoredCVPanel";
 
 const METRICS = [
   ["title", "Title & level"],
@@ -151,7 +152,7 @@ function TrackingControls({ result }: { result: MatchResult }) {
   const [note, setNote] = useState(tracking?.note ?? "");
   const [reason, setReason] = useState(tracking?.reason ?? "");
   const save = useMutation({
-    mutationFn: (v: { status: "open" | "applied" | "na"; note?: string; reason?: string; stage?: OutcomeStage }) =>
+    mutationFn: (v: { status?: "open" | "applied" | "na"; note?: string; reason?: string; stage?: OutcomeStage }) =>
       api.trackJob(job.id, v.status, v.note, { reason: v.reason, stage: v.stage }),
     onSuccess: (t) => {
       setTracking(job.id, t);
@@ -161,11 +162,11 @@ function TrackingControls({ result }: { result: MatchResult }) {
   });
   const current = tracking?.status === "applied" || tracking?.status === "na" ? tracking.status : "open";
   const saveNote = () => {
-    if (note.trim() !== (tracking?.note ?? "")) save.mutate({ status: current, note: note.trim() });
+    if (note.trim() !== (tracking?.note ?? "")) save.mutate({ note: note.trim() });
   };
   const options: ["open" | "applied" | "na", string, string][] = [
     ["open", "Open", "Not acted on: keep showing it"],
-    ["applied", "Applied", "Later searches set it aside and list it once under Already applied"],
+    ["applied", "Applied", "Move this job to the Applied tab"],
     ["na", "N/A", "Not for me: later searches set it aside"],
   ];
   return (
@@ -206,7 +207,7 @@ function TrackingControls({ result }: { result: MatchResult }) {
               className="input w-auto py-0.5 text-[11px]"
               value={tracking?.stage ?? ""}
               disabled={save.isPending}
-              onChange={(e) => e.target.value && save.mutate({ status: current, stage: e.target.value as OutcomeStage })}
+              onChange={(e) => e.target.value && save.mutate({ stage: e.target.value as OutcomeStage })}
               title="How the application went (used by the outcome review)"
             >
               <option value="">Outcome: no news yet</option>
@@ -322,18 +323,26 @@ export function JobCard({
   const { job, verdict, score } = result;
   const [open, setOpen] = useState(false);
   const [template, setTemplate] = useState("classic");
+  const [emphasis, setEmphasis] = useState<"auto" | "leadership" | "hands_on">("auto");
+  const [level, setLevel] = useState<"auto" | "senior" | "junior">("auto");
+  const [documentsOpen, setDocumentsOpen] = useState(false);
   const qc = useQueryClient();
   const setTracking = useSearch((s) => s.setTracking);
   const tailor = useMutation({
-    mutationFn: () => api.tailor(job.id, template),
+    mutationFn: () => api.tailor(job.id, template, result, emphasis, level),
     onSuccess: (data) => {
+      setDocumentsOpen(true);
+      void qc.invalidateQueries({ queryKey: ["tailored-cvs"] });
       if (data.tracking) setTracking(job.id, data.tracking);
       void qc.invalidateQueries({ queryKey: ["state"] });
       void qc.invalidateQueries({ queryKey: ["tracker"] });
       void qc.invalidateQueries({ queryKey: ["saved"] });
     },
   });
-  const letter = useMutation({ mutationFn: () => api.coverLetter(job.id, template) });
+  const letter = useMutation({
+    mutationFn: (documentId?: string) => api.coverLetter(job.id, template, result, documentId),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["cover-letters"] }),
+  });
   const status = result.tracking?.status;
   const alignment = verdict?.alignment && verdict.alignment !== "neutral" ? ALIGNMENT_CHIP[verdict.alignment] : null;
   const closing = job.closes_at ? closes(job.closes_at) : null;
@@ -423,7 +432,7 @@ export function JobCard({
           <p className="mt-0.5 text-[12px] text-muted">
             {job.company}
             {job.location && ` · ${job.location}`}
-            {!job.location?.toLowerCase().includes(job.work_arrangement) && (
+            {job.source !== "manual" && !job.location?.toLowerCase().includes(job.work_arrangement) && (
               <span className="capitalize"> · {job.work_arrangement}</span>
             )}
             {salary && ` · ${salary}${salaryNote}`}
@@ -508,21 +517,29 @@ export function JobCard({
               <option value="modern">Modern</option>
               <option value="compact">Compact</option>
             </select>
+            <select aria-label="CV emphasis" title="Which evidenced work should lead the CV" className="input w-auto py-1 text-[12px]" value={emphasis} onChange={(e) => setEmphasis(e.target.value as typeof emphasis)}>
+              <option value="auto">Emphasis: automatic</option>
+              <option value="leadership">Leadership</option>
+              <option value="hands_on">Hands-on / wet lab</option>
+            </select>
+            <select aria-label="CV level emphasis" title="Adjust presentation while keeping your actual titles and experience" className="input w-auto py-1 text-[12px]" value={level} onChange={(e) => setLevel(e.target.value as typeof level)}>
+              <option value="auto">Level: automatic</option>
+              <option value="senior">More senior emphasis</option>
+              <option value="junior">More junior emphasis</option>
+            </select>
             <button className="btn-ghost py-1 text-[12px]" disabled={tailor.isPending} onClick={() => tailor.mutate()}>
               {tailor.isPending ? <Loader2 size={12} className="animate-spin" /> : <FileText size={12} />}
               Tailor CV
             </button>
-            <button
-              className="btn-ghost py-1 text-[12px]"
-              disabled={letter.isPending}
-              title="Every claim cites your Master CV; motivation comes only from your career intent"
-              onClick={() => letter.mutate()}
-            >
-              {letter.isPending ? <Loader2 size={12} className="animate-spin" /> : <Mail size={12} />}
-              Cover letter
-            </button>
           </>
         )}
+        <button
+          className="btn-ghost py-1 text-[12px]"
+          title="Choose a saved tailored CV or your Master CV for the cover letter"
+          onClick={() => setDocumentsOpen(!documentsOpen)}
+        >
+          <Mail size={12} /> Cover letter / review CV
+        </button>
         {onRemove && (
           <button className="btn-ghost py-1 text-[12px] text-bad" title="Remove from saved jobs (its application record is kept)" onClick={onRemove}>
             <Trash2 size={12} /> Remove
@@ -543,7 +560,7 @@ export function JobCard({
           <a className="btn-primary py-1 text-[12px]" href={tailor.data.download_url}>
             <Download size={12} /> Download .docx
           </a>
-          <span className="text-muted">Word file keyword coverage {Math.round((tailor.data.ats?.keyword_coverage ?? tailor.data.keyword_coverage) * 100)}% · manual review recommended</span>
+          <span className="text-muted">Word keyword coverage {tailor.data.source_ats_keyword_coverage == null ? "" : `${Math.round(tailor.data.source_ats_keyword_coverage * 100)}% original → `}{Math.round((tailor.data.ats?.keyword_coverage ?? tailor.data.keyword_coverage) * 100)}% tailored · review the wording and claims</span>
           {tailor.data.missing_keywords.length > 0 && (
             <span className="min-w-0 text-faint" title="Not in your Master CV: gaps to address truthfully, never to fill in">
               Gaps: {tailor.data.missing_keywords.join(", ")}
@@ -571,6 +588,7 @@ export function JobCard({
         </div>
       )}
       {tailor.error && <p className="mt-2 text-[12px] text-bad">{(tailor.error as Error).message}</p>}
+      {documentsOpen && <TailoredCVPanel jobId={job.id} result={result} hasCv={canTailor} letterPending={letter.isPending} onLetter={(id) => letter.mutate(id)} />}
       {letter.data && (
         <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md bg-surface p-2 text-[12px]">
           <a className="btn-primary py-1 text-[12px]" href={letter.data.download_url}>

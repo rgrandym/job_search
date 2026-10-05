@@ -37,9 +37,9 @@ def _load_all(ws: Workspace) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
-def get_intent(ws: Workspace) -> SearchIntent:
-    """The selected CV's intent (empty when none was stated)."""
-    stored = _load_all(ws).get(_owner(ws))
+def get_intent(ws: Workspace, cv_id: str | None = None) -> SearchIntent:
+    """A CV's intent (the selected CV by default; empty when none was stated)."""
+    stored = _load_all(ws).get(cv_id or _owner(ws))
     try:
         return SearchIntent.model_validate(stored) if stored else SearchIntent()
     except ValueError:
@@ -55,6 +55,15 @@ def save_intent(ws: Workspace, intent: SearchIntent) -> SearchIntent:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return intent
+
+
+def delete_intent(ws: Workspace, cv_id: str) -> None:
+    """Remove intent belonging to a CV removed from the library."""
+    data = _load_all(ws)
+    if cv_id not in data:
+        return
+    del data[cv_id]
+    _path(ws).write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 def patch_intent(ws: Workspace, patch: dict[str, Any]) -> tuple[SearchIntent, list[str]]:

@@ -50,6 +50,7 @@ export default function App() {
   const state = useQuery({ queryKey: ["state"], queryFn: api.state });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [summaryOpen, setSummaryOpen] = useState(false);
+  const [summaryProfileKey, setSummaryProfileKey] = useState<string | null>(null);
   const [theme, setTheme] = useState(() => localStorage.getItem(THEME_KEY) ?? "dark");
 
   useEffect(() => {
@@ -73,7 +74,7 @@ export default function App() {
     if (chatting) setView("agent");
   }, [chatting]);
 
-  const sidebar = <Sidebar state={state.data} onShowSummary={() => setSummaryOpen(true)} />;
+  const sidebar = <Sidebar state={state.data} onShowSummary={(key) => { setSummaryProfileKey(key ?? null); setSummaryOpen(true); }} />;
   const results = <ResultsPanel hasCv={!!state.data?.cv_files.selected && ready} />;
   const agent = <AgentPanel ready={ready} llm={llm} hasCv={!!state.data?.cv_files.selected} />;
 
@@ -146,7 +147,7 @@ export default function App() {
       )}
 
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} llm={llm} />
-      <SummaryDialog open={summaryOpen} onClose={() => setSummaryOpen(false)} />
+      <SummaryDialog open={summaryOpen} onClose={() => setSummaryOpen(false)} initialProfileKey={summaryProfileKey} />
     </div>
   );
 }

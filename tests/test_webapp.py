@@ -487,6 +487,59 @@ def test_api_cv_upload_accepts_multipart_file(
     assert state["cv_files"]["available"][0]["filename"] == "resume.txt"
 
 
+def test_delete_uploaded_cv_removes_its_parsed_copy_profiles_and_intent(
+    client: TestClient, ws: Workspace, master_cv: MasterCV
+) -> None:
+    from src.jobs.models import SearchIntent
+    from src.services import intent
+
+    asset = client.post(
+        "/api/cv/upload", files={"file": ("resume.txt", b"Candidate CV", "text/plain")}
+    ).json()
+    parsed = ws.settings.data_dir / "cvs" / ".parsed" / f"{asset['id']}.json"
+    parsed.parent.mkdir(parents=True, exist_ok=True)
+    parsed.write_text(master_cv.model_dump_json())
+    ws.memory.put(asset["id"], "any", SUMMARY, cv_fp="old-fingerprint")
+    intent.save_intent(ws, SearchIntent(direction="Research leadership"))
+
+    assert client.delete(f"/api/cv/{asset['id']}").json() == {"deleted": True}
+    assert not (ws.settings.data_dir / "cvs" / "resume.txt").exists()
+    assert not parsed.exists()
+    assert ws.memory.records(asset["id"]) == []
+    assert intent.get_intent(ws, asset["id"]).direction == ""
+    assert client.get("/api/state").json()["cv_files"]["selected"] is None
+    assert client.delete(f"/api/cv/{asset['id']}").status_code == 404
+
+
+def test_delete_master_and_generated_cv_entries(
+    client: TestClient, ws: Workspace, master_cv: MasterCV
+) -> None:
+    from src.cv import master_cv_manager as mgr
+    from src.cv.models import JDAnalysis, TailoringPlan
+    from src.cv.tailor import apply_plan
+    from src.services import tailored_documents
+
+    mgr.save(master_cv, ws.settings.master_cv_path)
+    mgr.save(master_cv, ws.settings.master_cv_path)
+    backup = ws.settings.master_cv_path.with_suffix(".json.bak")
+    assert backup.exists()
+    assert client.delete("/api/cv/master").json() == {"deleted": True}
+    assert not ws.settings.master_cv_path.exists() and not backup.exists()
+
+    generated = ws.output_dir / "cvs" / "generated.docx"
+    generated.parent.mkdir(parents=True)
+    generated.write_bytes(b"Word file")
+    jd = JDAnalysis(job_title="ML Engineer")
+    document = tailored_documents.create(
+        ws, "linked-job", master_cv, jd, apply_plan(master_cv, TailoringPlan(), jd),
+        "classic", generated,
+    )
+    assert client.delete("/api/cv/generated%3Agenerated.docx").json() == {"deleted": True}
+    assert not generated.exists()
+    assert not (ws.settings.data_dir / "tailored_cvs" / f"{document.id}.json").exists()
+    assert client.get("/api/state").json()["cv_files"]["available"] == []
+
+
 def test_api_codex_login_and_status(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     from src.web import app as webapp
 
@@ -891,12 +944,14 @@ def test_new_then_open_and_notes_survive_searches(ws: Workspace) -> None:
     assert other.tracking and other.tracking.status == "open"
 
 
-def test_tailoring_marks_the_job_applied(ws: Workspace, monkeypatch: Any) -> None:
-    from src.services import cv_service, tracker
+def test_tailoring_keeps_saved_job_open(ws: Workspace, monkeypatch: Any) -> None:
+    from src.services import cv_service, saved, tracker
 
     asyncio.run(run_search(ws, SearchRequest(query=SearchQuery(sources=["demo"]))))
     job = ws.job("job-strong")
     assert job is not None
+    saved.save(ws, [job.id])
+    tracker.set_status(ws, job, "open", note="Review before applying")
     from src.cv.models import ATSReport, JDAnalysis, TailoringPlan
     from src.cv.tailor import apply_plan
 
@@ -910,12 +965,22 @@ def test_tailoring_marks_the_job_applied(ws: Workspace, monkeypatch: Any) -> Non
     monkeypatch.setattr(cv_service, "tailor", fake_tailor)
     monkeypatch.setattr(cv_service, "analyze_jd", lambda text, llm: JDAnalysis(job_title="x"))
     monkeypatch.setattr(cv_service, "export_docx", lambda tailored, path, template: path)
-    monkeypatch.setattr(cv_service, "check_docx", lambda path, cv, keywords: report)
+    monkeypatch.setattr(
+        cv_service,
+        "check_docx",
+        lambda path, cv, keywords: report.model_copy(
+            update={"keyword_coverage": 0.5 if path.name == "source.docx" else 1.0}
+        ),
+    )
     tailored, _ = asyncio.run(cv_service.tailor_to_job(ws, job))
     assert tailored.ats == report
+    assert tailored.source_ats_keyword_coverage == 0.5
     assert seen[0].startswith("fit 91 (exceptional): Direct match")  # the matcher's verdict
-    entry = next(e for e in tracker.register(ws) if e.title == job.title)
-    assert entry.status == "applied" and entry.cv_file and entry.cv_file.endswith(".docx")
+    entry = next(e for e in tracker.load(ws).values() if e.title == job.title)
+    assert entry.status == "seen" and entry.applied_at is None
+    assert entry.note == "Review before applying"
+    assert entry.cv_file and entry.cv_file.endswith(".docx")
+    assert [item.result.job.id for item in saved.list_saved(ws)] == [job.id]
 
 
 def test_api_tracking_register_and_source_yield(client: TestClient) -> None:
@@ -934,6 +999,45 @@ def test_api_tracking_register_and_source_yield(client: TestClient) -> None:
     yields = {y["source"]: y for y in client.get("/api/sources/yield").json()}
     demo = yields["example"]  # the demo file's postings name their own origin
     assert demo["searches"] == 1 and demo["found"] == 5 and demo["matches"] >= 1
+
+
+def test_applied_job_moves_from_saved_to_application_register(client: TestClient) -> None:
+    client.post("/api/search", json={"query": {"sources": ["demo"]}, "smart": True})
+    assert client.post("/api/saved", json={"job_ids": ["job-strong"]}).status_code == 200
+    assert [item["result"]["job"]["id"] for item in client.get("/api/saved").json()] == [
+        "job-strong"
+    ]
+
+    marked = client.put("/api/jobs/job-strong/tracking", json={"status": "applied"})
+    assert marked.status_code == 200
+    assert client.get("/api/saved").json() == []
+    entry = next(item for item in client.get("/api/tracker").json() if item["status"] == "applied")
+    assert entry["application_result"]["job"]["id"] == "job-strong"
+    assert entry["application_result"]["verdict"]["fit_score"] == 91
+
+    client.put(f"/api/tracker/{entry['id']}", json={"status": "open"})
+    assert [item["result"]["job"]["id"] for item in client.get("/api/saved").json()] == [
+        "job-strong"
+    ]
+
+
+def test_note_edits_preserve_current_tracking_status(client: TestClient) -> None:
+    client.post("/api/search", json={"query": {"sources": ["demo"]}, "smart": True})
+    client.post("/api/saved", json={"job_ids": ["job-strong"]})
+    client.put("/api/jobs/job-strong/tracking", json={"status": "applied"})
+    entry = next(item for item in client.get("/api/tracker").json() if item["status"] == "applied")
+    assert client.put(
+        f"/api/tracker/{entry['id']}", json={"note": "First note"}
+    ).json()["status"] == "applied"
+
+    client.put("/api/jobs/job-strong/tracking", json={"status": "open"})
+    updated = client.put("/api/jobs/job-strong/tracking", json={"note": "Second note"})
+    assert updated.status_code == 200
+    assert updated.json()["status"] == "open"
+    assert updated.json()["note"] == "Second note"
+    assert [item["result"]["job"]["id"] for item in client.get("/api/saved").json()] == [
+        "job-strong"
+    ]
 
 
 def test_api_state_lists_the_source_catalog_and_company_boards(

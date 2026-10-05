@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, Download, Eraser, FileUp, Loader2, Search, Sparkles, Square, UserRound } from "lucide-react";
+import { ChevronRight, Download, Eraser, FileUp, Loader2, Search, Sparkles, Square, Trash2, UserRound } from "lucide-react";
 import { useEffect, useState, type DragEvent } from "react";
 import { api } from "../lib/api";
 import type { AppState, CVAsset } from "../lib/types";
@@ -7,9 +7,10 @@ import { useSearchRunner } from "../lib/useSearchRunner";
 import { EMPTY_QUERY, useSearch } from "../stores/searchStore";
 import { SourcePicker } from "./SourcePicker";
 import { ProfileDetails } from "./ProfileDetails";
+import { SummaryDialog } from "./SummaryDialog";
 import { SearchHistory } from "./SearchHistory";
 import { TrackerPanel } from "./TrackerPanel";
-import { ChipInput, Field, Toggle } from "./ui";
+import { ChipInput, Field, Modal, Toggle } from "./ui";
 
 const DISTANCES = [5, 10, 25, 50, 100];
 const POSTED_WINDOWS: { days: number | null; label: string }[] = [
@@ -38,7 +39,7 @@ function cvFileError(file: File): string | null {
   return null;
 }
 
-export function Sidebar({ state, onShowSummary }: { state: AppState | undefined; onShowSummary: () => void }) {
+export function Sidebar({ state, onShowSummary }: { state: AppState | undefined; onShowSummary: (key?: string) => void }) {
   const s = useSearch();
   const q = s.query;
   const qc = useQueryClient();
@@ -46,6 +47,7 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
   const [uploadedName, setUploadedName] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const [expandedProfileKey, setExpandedProfileKey] = useState<string | null>(null);
+  const [editingProfile, setEditingProfile] = useState(false);
   const [gmailWaiting, setGmailWaiting] = useState(false);
   const gmail = useQuery({
     queryKey: ["gmail-status"],
@@ -56,7 +58,7 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
   });
   const gmailConnected = !!gmail.data?.connected;
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles, enabled: !!state?.cv_files.selected });
-  useEffect(() => setExpandedProfileKey(null), [state?.cv_files.selected]);
+  useEffect(() => { setExpandedProfileKey(null); setEditingProfile(false); }, [state?.cv_files.selected]);
   useEffect(() => {
     if (!gmailWaiting || !gmailConnected) return;
     setGmailWaiting(false);
@@ -108,9 +110,37 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
     },
     onError: (e: Error) => setUploadError(e.message),
   });
+  const deleteCV = useMutation({
+    mutationFn: (item: CVAsset) => api.deleteCV(item.id),
+    onSuccess: (_, item) => {
+      if (item.id === state?.cv_files.selected) {
+        s.set({ profileKey: null, summary: null, outcome: null });
+        setExpandedProfileKey(null);
+      }
+      void qc.invalidateQueries({ queryKey: ["state"] });
+      void qc.invalidateQueries({ queryKey: ["profiles"] });
+    },
+  });
+  const deleteProfile = useMutation({
+    mutationFn: (key: string) => api.deleteProfile(key),
+    onSuccess: (_, key) => {
+      if (s.profileKey === key) s.set({ profileKey: null, summary: null });
+      if (expandedProfileKey === key) setExpandedProfileKey(null);
+      void qc.invalidateQueries({ queryKey: ["profiles"] });
+    },
+  });
   const generalCV = useMutation({
     mutationFn: api.exportGeneralCV,
     onSuccess: () => { void qc.invalidateQueries({ queryKey: ["state"] }); },
+  });
+  const buildProfile = useMutation({
+    mutationFn: () => api.profileSummary(EMPTY_QUERY, true),
+    onSuccess: (result) => {
+      s.set({ useCv: true, summary: { summary: result.summary, fromMemory: result.from_memory }, profileKey: result.key });
+      void qc.invalidateQueries({ queryKey: ["profiles"] });
+      void qc.invalidateQueries({ queryKey: ["state"] });
+      onShowSummary(result.key);
+    },
   });
 
   const submitCV = (file: File) => {
@@ -127,7 +157,7 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
   const dropCV = (event: DragEvent<HTMLLabelElement>) => {
     event.preventDefault();
     setDragging(false);
-    if (!upload.isPending && event.dataTransfer.files[0]) submitCV(event.dataTransfer.files[0]);
+    if (!upload.isPending && !buildProfile.isPending && event.dataTransfer.files[0]) submitCV(event.dataTransfer.files[0]);
   };
 
   const runner = useSearchRunner();
@@ -140,11 +170,14 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
   return (
     <aside className="flex h-full min-w-0 flex-col gap-3 overflow-x-hidden overflow-y-auto p-3 scroll-thin">
       {/* Profile */}
-      <section className="card space-y-3 p-3">
-        <div className="flex items-center justify-between">
-          <span className="label">Profile</span>
+      <details className="card group p-3" open>
+        <summary className="label flex cursor-pointer list-none items-center justify-between [&::-webkit-details-marker]:hidden">
+          <span className="flex items-center gap-1"><ChevronRight size={13} className="group-open:rotate-90" /> Profile</span>
+        </summary>
+        <div className="mt-3 space-y-3">
+        <div className="flex items-center justify-end">
           {hasCv && (
-            <button className="flex items-center gap-1 text-[11px] text-accent hover:underline" onClick={onShowSummary}>
+            <button className="flex items-center gap-1 text-[11px] text-accent hover:underline" onClick={() => onShowSummary()}>
               <Sparkles size={12} /> Profiles
             </button>
           )}
@@ -163,39 +196,97 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
         ) : (
           <p className="text-[12px] text-muted">No CV selected. Upload one or choose from the library.</p>
         )}
+        <label
+          className={`flex min-h-12 flex-col items-center justify-center rounded-md border border-dashed px-2 py-1.5 text-center transition-colors ${
+            dragging ? "border-accent bg-accent-bg" : "border-border bg-surface hover:border-accent"
+          } ${upload.isPending || buildProfile.isPending ? "cursor-wait opacity-70" : "cursor-pointer"}`}
+          onDragEnter={(event) => {
+            event.preventDefault();
+            if (!upload.isPending && !buildProfile.isPending) setDragging(true);
+          }}
+          onDragOver={(event) => event.preventDefault()}
+          onDragLeave={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false);
+          }}
+          onDrop={dropCV}
+        >
+          <input
+            type="file"
+            accept=".pdf,.docx,.md,.txt"
+            className="sr-only"
+            disabled={upload.isPending || buildProfile.isPending}
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) submitCV(file);
+              event.target.value = "";
+            }}
+          />
+          <span className="flex items-center gap-1.5 text-[11px] font-medium text-fg">
+            {upload.isPending ? <Loader2 size={14} className="animate-spin text-accent" /> : <FileUp size={14} className="text-accent" />}
+            {upload.isPending ? "Saving CV…" : "Drop a CV or browse files"}
+          </span>
+          <span className="text-[10px] text-faint">PDF, DOCX, MD, TXT · up to 10 MB</span>
+        </label>
+        {uploadedName && <p className="text-[11px] text-good">Saved {uploadedName}</p>}
+        {uploadError && <p className="text-[12px] text-bad">{uploadError}</p>}
         {cvFiles.length > 0 && (
           <div className="space-y-1">
             <span className="label">Available CVs · {cvFiles.length}</span>
             <ul className="max-h-40 space-y-1 overflow-y-auto pr-1 scroll-thin" aria-label="Available CVs">
               {cvFiles.map((item) => (
-                <li key={item.id}>
+                <li key={item.id} className="flex items-stretch gap-1">
                   <button
                     type="button"
                     aria-current={item.id === state?.cv_files.selected ? "true" : undefined}
                     title={item.filename}
-                    disabled={select.isPending}
+                    disabled={select.isPending || deleteCV.isPending || buildProfile.isPending}
                     onClick={() => { if (item.id !== state?.cv_files.selected) select.mutate(item.id); }}
-                    className={`block w-full rounded-md border px-2 py-1 text-left text-[11px] disabled:opacity-50 ${
+                    className={`block min-w-0 flex-1 rounded-md border px-2 py-1 text-left text-[11px] disabled:opacity-50 ${
                       item.id === state?.cv_files.selected ? "border-accent bg-accent-bg" : "border-border bg-surface hover:border-accent"
                     }`}
                   >
                     <span className="block truncate font-medium text-fg">{item.filename}</span>
                     <span className="text-faint">{item.kind} CV</span>
                   </button>
+                  <button
+                    type="button"
+                    className="btn-ghost shrink-0 px-2 text-bad disabled:opacity-50"
+                    aria-label={`Delete ${item.filename}`}
+                    title={`Delete ${item.filename} and its stored profiles`}
+                    disabled={deleteCV.isPending || select.isPending || buildProfile.isPending}
+                    onClick={() => {
+                      if (window.confirm(`Delete "${item.filename}" and its stored profiles? Saved applications and cover letters remain.`))
+                        deleteCV.mutate(item);
+                    }}
+                  >
+                    <Trash2 size={13} />
+                  </button>
                 </li>
               ))}
             </ul>
+            {deleteCV.error && <p className="text-[11px] text-bad">{deleteCV.error.message}</p>}
           </div>
         )}
         {hasCv && (
           <div className="space-y-1">
             <span className="label">Available profiles · {profiles.data?.profiles.length ?? 0}</span>
+            <button
+              type="button"
+              className="btn-ghost w-full justify-center py-1 text-[11px]"
+              disabled={buildProfile.isPending || select.isPending || deleteCV.isPending}
+              title="Build a general profile from this CV, or open its saved profile for editing"
+              onClick={() => buildProfile.mutate()}
+            >
+              {buildProfile.isPending ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+              {buildProfile.isPending ? "Building profile…" : profiles.data?.profiles.some((record) => record.role_family === "any") ? "Edit general profile" : "Build profile from selected CV"}
+            </button>
+            {buildProfile.error && <p className="text-[11px] text-bad">{buildProfile.error.message}</p>}
             {profiles.isPending ? (
               <p className="text-[11px] text-faint">Loading profiles…</p>
             ) : profiles.isError ? (
               <p className="text-[11px] text-bad">Could not load profiles.</p>
             ) : !profiles.data?.profiles.length ? (
-              <p className="text-[11px] text-muted">A profile is created when you search.</p>
+              <p className="text-[11px] text-muted">Build a profile to review and edit it before searching.</p>
             ) : (
               <ul className="max-h-40 space-y-1 overflow-y-auto pr-1 scroll-thin" aria-label="Available profiles">
                 {profiles.data.profiles.map((record) => (
@@ -204,12 +295,11 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
                   }`}>
                     <button
                       type="button"
-                      aria-expanded={expandedProfileKey === record.key}
                       title={record.summary.headline}
                       onClick={() => setExpandedProfileKey(expandedProfileKey === record.key ? null : record.key)}
                       className="flex min-w-0 flex-1 items-center gap-1 px-2 py-1 text-left text-[11px]"
                     >
-                      {expandedProfileKey === record.key ? <ChevronDown size={12} className="shrink-0" /> : <ChevronRight size={12} className="shrink-0" />}
+                      <ChevronRight size={12} className="shrink-0" />
                       <span className="min-w-0">
                         <span className="block truncate font-medium text-fg">{record.role_family === "any" ? "General profile" : record.role_family}</span>
                         <span className="block truncate text-faint">{record.summary.headline}</span>
@@ -225,63 +315,46 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
                     >
                       {s.profileKey === record.key ? "Pinned" : "Pin"}
                     </button>
+                    <button
+                      type="button"
+                      className="shrink-0 px-2 text-bad disabled:opacity-50"
+                      aria-label={`Delete ${record.role_family === "any" ? "General profile" : record.role_family} profile`}
+                      title="Delete profile"
+                      disabled={deleteProfile.isPending}
+                      onClick={() => {
+                        const name = record.role_family === "any" ? "General profile" : record.role_family;
+                        if (window.confirm(`Delete the "${name}" profile? It will be rebuilt on the next matching search.`))
+                          deleteProfile.mutate(record.key);
+                      }}
+                    >
+                      <Trash2 size={13} />
+                    </button>
                   </li>
                 ))}
               </ul>
             )}
-            {expandedProfile && <ProfileDetails record={expandedProfile} onEdit={onShowSummary} />}
+            {deleteProfile.error && <p className="text-[11px] text-bad">{deleteProfile.error.message}</p>}
           </div>
         )}
-        <label
-          className={`flex min-h-12 flex-col items-center justify-center rounded-md border border-dashed px-2 py-1.5 text-center transition-colors ${
-            dragging ? "border-accent bg-accent-bg" : "border-border bg-surface hover:border-accent"
-          } ${upload.isPending ? "cursor-wait opacity-70" : "cursor-pointer"}`}
-          onDragEnter={(event) => {
-            event.preventDefault();
-            if (!upload.isPending) setDragging(true);
-          }}
-          onDragOver={(event) => event.preventDefault()}
-          onDragLeave={(event) => {
-            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false);
-          }}
-          onDrop={dropCV}
-        >
-          <input
-            type="file"
-            accept=".pdf,.docx,.md,.txt"
-            className="sr-only"
-            disabled={upload.isPending}
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (file) submitCV(file);
-              event.target.value = "";
-            }}
-          />
-          <span className="flex items-center gap-1.5 text-[11px] font-medium text-fg">
-            {upload.isPending ? <Loader2 size={14} className="animate-spin text-accent" /> : <FileUp size={14} className="text-accent" />}
-            {upload.isPending ? "Saving CV…" : "Drop a CV or browse files"}
-          </span>
-          <span className="text-[10px] text-faint">PDF, DOCX, MD, TXT · up to 10 MB</span>
-        </label>
-        {uploadedName && <p className="text-[11px] text-good">Saved {uploadedName}</p>}
-        {uploadError && <p className="text-[12px] text-bad">{uploadError}</p>}
         {hasCv && (
           <div className="space-y-1">
             <button className="btn-ghost py-1 text-[11px]" disabled={generalCV.isPending} onClick={() => generalCV.mutate()}>
               {generalCV.isPending ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
-              Export general CV (.docx)
+              Export CV
             </button>
             <p className="text-[10px] text-faint">Includes every role in the selected CV. Review parsed facts and edit the Word file before applying.</p>
-            {generalCV.data && <a className="block text-[11px] text-accent hover:underline" href={generalCV.data.download_url}>Download general CV · {generalCV.data.roles} roles</a>}
+            {generalCV.data && <a className="block text-[11px] text-accent hover:underline" href={generalCV.data.download_url}>Download CV · {generalCV.data.roles} roles</a>}
             {generalCV.isError && <p className="text-[11px] text-bad">{(generalCV.error as Error).message}</p>}
           </div>
         )}
         <Toggle checked={s.useCv && hasCv} onChange={(v) => s.set({ useCv: v })} label="Match against my CV" />
-      </section>
+        </div>
+      </details>
 
       {/* Filters */}
-      <section className="card min-w-0 space-y-3 p-3">
-        <span className="label">Search</span>
+      <details className="card group min-w-0 p-3" open>
+        <summary className="label flex cursor-pointer list-none items-center gap-1 [&::-webkit-details-marker]:hidden"><ChevronRight size={13} className="group-open:rotate-90" /> Search</summary>
+        <div className="mt-3 space-y-3">
         <Field label="Sources" hint="Switch a category on or off; click its name to choose its sources.">
           <SourcePicker state={state} hasCv={hasCv} />
         </Field>
@@ -380,15 +453,16 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
         >
           <Eraser size={12} /> Clear filters and results
         </button>
-      </section>
+        </div>
+      </details>
       <SearchHistory />
       <TrackerPanel />
-      <section className="card space-y-2 p-3">
-        <span className="label">Job alerts</span>
+      <details className="card group p-3" open>
+        <summary className="label flex cursor-pointer list-none items-center gap-1 [&::-webkit-details-marker]:hidden"><ChevronRight size={13} className="group-open:rotate-90" /> Job alerts</summary>
+        <div className="mt-2 space-y-2">
         <p className="text-[11px] text-muted">
-          The Gmail inbox is read only when you search. <b>Search</b> includes every alert job in the date
-          window (jobs judged before keep their verdict, at no cost); the button below searches only alerts
-          this CV has not had judged yet.
+          The Search button above includes Gmail alert jobs in the selected date window. Jobs judged before
+          keep their verdict at no extra model cost.
         </p>
         {gmail.isPending && <p className="text-[11px] text-faint">Checking Gmail connection…</p>}
         {gmail.isError && <p className="text-[11px] text-bad">Could not check Gmail connection.</p>}
@@ -416,16 +490,24 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
             </button>
           </div>
         )}
-        <button
-          className="btn-ghost w-full justify-center text-[12px]"
-          disabled={s.loading || !hasCv || !state?.llm.ready || !gmail.data?.connected}
-          onClick={() => void runner.run(true)}
-        >
-          {s.loading ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
-          Search new alerts for this CV
-        </button>
-        {!hasCv && <p className="text-[11px] text-faint">Select a CV to track analysed alerts.</p>}
-      </section>
+        </div>
+      </details>
+      <Modal
+        open={!!expandedProfile}
+        onClose={() => { setExpandedProfileKey(null); setEditingProfile(false); }}
+        title={expandedProfile?.role_family === "any" ? "General profile" : expandedProfile?.role_family ?? "Profile"}
+        resizable
+        headerAction={!editingProfile && <button type="button" className="text-[12px] text-accent hover:underline" onClick={() => setEditingProfile(true)}>Edit profile</button>}
+      >
+        {editingProfile && expandedProfileKey ? (
+          <SummaryDialog open onClose={() => setEditingProfile(false)} initialProfileKey={expandedProfileKey} embedded />
+        ) : (
+          <>
+            <p className="mb-2 text-[11px] text-faint">Drag the lower-right corner to resize this panel.</p>
+            {expandedProfile && <ProfileDetails record={expandedProfile} />}
+          </>
+        )}
+      </Modal>
     </aside>
   );
 }

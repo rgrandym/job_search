@@ -28,17 +28,19 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, SecretStr
+from pydantic import BaseModel, Field, SecretStr
 
 from src.agents import chat
 from src.core.config import PROJECT_ROOT, LLMProviderName
 from src.core.llm import LLMConfig, LLMError, ModelUsage, available_models, claude_code_backend
 from src.core.llm.catalog import ModelInfo
 from src.core.llm.codex_backend import codex_status, codex_usage, start_login
-from src.cv.models import MasterCV
+from src.cv.models import MasterCV, TailoredCVEdits, TailoredDocument
 from src.jobs.fetcher import SELECTABLE_SOURCES, SOURCE_CATALOG, build_sources
 from src.jobs.models import (
+    JobPosting,
     JobTracking,
+    MatchResult,
     OutcomeStage,
     ProfileSummary,
     SavedJob,
@@ -52,6 +54,7 @@ from src.jobs.sources.gmail_alerts import GmailAuth
 from src.services import (
     calibration,
     company_discovery,
+    cover_letters,
     cv_service,
     enrichment,
     history,
@@ -60,10 +63,11 @@ from src.services import (
     learning,
     saved,
     search_service,
+    tailored_documents,
     tracker,
 )
 from src.services.search_service import SearchOutcome, SearchRequest, get_summary, run_search
-from src.services.workspace import get_workspace
+from src.services.workspace import Workspace, get_workspace
 
 app = FastAPI(title="AI Job Search", version="0.1.0")
 log = logging.getLogger(__name__)
@@ -382,6 +386,16 @@ def select_cv(asset_id: str) -> cv_service.CVAsset:
         raise HTTPException(404, str(exc)) from exc
 
 
+@app.delete("/api/cv/{asset_id:path}")
+def delete_cv(asset_id: str) -> dict[str, bool]:
+    """Delete a CV from the library and its associated profile summaries."""
+    try:
+        cv_service.delete_cv(get_workspace(), asset_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"deleted": True}
+
+
 @app.post("/api/cv/general")
 async def export_general_cv() -> dict[str, Any]:
     """Export the selected CV with its full work history to an editable Word file."""
@@ -389,7 +403,7 @@ async def export_general_cv() -> dict[str, Any]:
         path, roles = await cv_service.export_general_cv(get_workspace())
     except (ValueError, LLMError) as exc:
         raise HTTPException(422, str(exc)) from exc
-    return {"download_url": f"/api/files/{path.name}", "roles": roles}
+    return {"download_url": _file_url(path), "roles": roles}
 
 
 class SummaryRequest(BaseModel):
@@ -582,53 +596,166 @@ def stop_search(run_id: str) -> dict[str, bool]:
 
 class TailorRequest(BaseModel):
     template: Literal["classic", "modern", "compact"] = "classic"
+    result: MatchResult | None = None
+    tailored_cv_id: str | None = None
+    emphasis: Literal["auto", "leadership", "hands_on"] = "auto"
+    level: Literal["auto", "senior", "junior"] = "auto"
+
+
+def _tailored_view(document: TailoredDocument) -> dict[str, Any]:
+    """Return the editable CV and download link without duplicating its source snapshot."""
+    return {
+        "id": document.id,
+        "job_id": document.job_id,
+        "job_title": document.job_title or document.jd.job_title,
+        "job_company": document.job_company or document.jd.company or "",
+        "created_at": document.created_at,
+        "updated_at": document.updated_at,
+        "template": document.template,
+        "download_url": _file_url(
+            get_workspace().output_dir / "cvs" / document.filename
+            if (get_workspace().output_dir / "cvs" / document.filename).exists()
+            else get_workspace().output_dir / document.filename
+        ),
+        "cv": document.tailored.cv,
+        "ats": document.tailored.ats,
+        "source_ats_keyword_coverage": document.tailored.source_ats_keyword_coverage,
+        "reviewed": document.reviewed,
+        "imported": document.imported,
+    }
+
+
+@app.get("/api/jobs/{job_id}/tailored-cvs")
+def tailored_cvs(job_id: str) -> list[dict[str, Any]]:
+    return [_tailored_view(d) for d in tailored_documents.list_for_job(get_workspace(), job_id)]
+
+
+@app.get("/api/tailored-cvs")
+def all_tailored_cvs() -> list[dict[str, Any]]:
+    """Saved tailored drafts remain reachable when their job card is no longer displayed."""
+    return [_tailored_view(d) for d in tailored_documents.list_all(get_workspace())]
+
+
+class ImportOlderCVRequest(BaseModel):
+    asset_id: str
+    title: str = Field(min_length=1)
+    company: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+
+
+@app.post("/api/tailored-cvs/import")
+async def import_older_cv(body: ImportOlderCVRequest) -> dict[str, Any]:
+    """Attach a Word CV when the original posting is no longer in search history."""
+    job = JobPosting(
+        id=f"linked:{secrets.token_hex(8)}",
+        title=body.title,
+        company=body.company,
+        description=body.description,
+    )
+    try:
+        document = await cv_service.attach_existing_cv(get_workspace(), job, body.asset_id)
+    except (ValueError, LLMError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return _tailored_view(document)
+
+
+class ImportTailoredRequest(BaseModel):
+    asset_id: str
+    result: MatchResult | None = None
+
+
+@app.post("/api/jobs/{job_id}/tailored-cvs/import")
+async def import_tailored_cv(job_id: str, body: ImportTailoredRequest) -> dict[str, Any]:
+    """Attach an older Word CV for this job, pending the user's review."""
+    ws = get_workspace()
+    result = _document_result(ws, job_id, TailorRequest(result=body.result))
+    if result is None:
+        raise HTTPException(404, "Job not found in results, saved jobs or search history")
+    try:
+        document = await cv_service.attach_existing_cv(ws, result.job, body.asset_id)
+    except (ValueError, LLMError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return _tailored_view(document)
+
+
+@app.put("/api/tailored-cvs/{document_id}")
+def edit_tailored_cv(document_id: str, edits: TailoredCVEdits) -> dict[str, Any]:
+    try:
+        return _tailored_view(tailored_documents.edit(get_workspace(), document_id, edits))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+def _document_result(ws: Workspace, job_id: str, body: TailorRequest) -> MatchResult | None:
+    """Use the displayed posting, or find it in saved jobs and retained searches."""
+    if body.result is not None:
+        if body.result.job.id != job_id:
+            raise HTTPException(422, "The job ID does not match the posting")
+        return body.result
+    result = ws.result(job_id)
+    if result is not None or body.tailored_cv_id is None:
+        return result
+    try:
+        document = tailored_documents.load(ws, body.tailored_cv_id, job_id)
+    except ValueError:
+        return None
+    return MatchResult(
+        job=JobPosting(
+            id=job_id,
+            title=document.job_title or document.jd.job_title,
+            company=document.job_company or document.jd.company or "",
+            location=document.job_location,
+            description=document.job_description,
+        )
+    )
 
 
 @app.post("/api/jobs/{job_id}/tailor")
 async def tailor_job(job_id: str, body: TailorRequest) -> dict[str, Any]:
     ws = get_workspace()
-    job = ws.job(job_id)
-    if job is None:
-        raise HTTPException(404, "Job not in the last search")
+    result = _document_result(ws, job_id, body)
+    if result is None:
+        raise HTTPException(404, "Job not found in results, saved jobs or search history")
     try:
-        tailored, path = await cv_service.tailor_to_job(ws, job, body.template)
+        tailored, path = await cv_service.tailor_to_job(
+            ws, result.job, body.template, result=result, emphasis=body.emphasis, level=body.level
+        )
     except (ValueError, LLMError) as exc:
         raise HTTPException(422, str(exc)) from exc
     return {
-        "download_url": f"/api/files/{path.name}",
+        "document_id": tailored.document_id,
+        "download_url": _file_url(path),
         "keyword_coverage": tailored.keyword_coverage,
         "missing_keywords": tailored.missing_keywords,
         "restored_keywords": tailored.restored_keywords,
         "critique": tailored.critique,
         "ats": tailored.ats,
+        "source_ats_keyword_coverage": tailored.source_ats_keyword_coverage,
         "rejected": sum(not c.accepted for c in tailored.changes),
         "rejections": [
             {"source_id": c.source_id, "reason": c.reason}
             for c in tailored.changes
             if not c.accepted
         ],
-        # A tailored CV marks the job applied (the user can set it back to open).
-        "tracking": next(
-            (r.tracking for r in ws.last_report.all_results() if r.job.id == job_id), None
-        )
-        if ws.last_report
-        else None,
+        "tracking": tracker.tracking_for(ws, result.job),
     }
 
 
 @app.post("/api/jobs/{job_id}/cover-letter")
 async def cover_letter(job_id: str, body: TailorRequest) -> dict[str, Any]:
-    """A guarded cover letter for a job of the last search, as .docx."""
+    """A guarded cover letter for a displayed or retained job, as .docx."""
     ws = get_workspace()
-    job = ws.job(job_id)
-    if job is None:
-        raise HTTPException(404, "Job not in the last search")
+    result = _document_result(ws, job_id, body)
+    if result is None:
+        raise HTTPException(404, "Job not found in results, saved jobs or search history")
     try:
-        letter, path = await cv_service.write_cover_letter(ws, job, body.template)
+        letter, path = await cv_service.write_cover_letter(
+            ws, result.job, body.template, tailored_cv_id=body.tailored_cv_id
+        )
     except (ValueError, LLMError) as exc:
         raise HTTPException(422, str(exc)) from exc
     return {
-        "download_url": f"/api/files/{path.name}",
+        "download_url": _file_url(path),
         "paragraphs": len(letter.paragraphs),
         "rejections": [
             {"source_id": c.source_id, "reason": c.reason} for c in letter.changes if not c.accepted
@@ -636,8 +763,64 @@ async def cover_letter(job_id: str, body: TailorRequest) -> dict[str, Any]:
     }
 
 
+def _letter_view(document: cover_letters.SavedLetter) -> dict[str, Any]:
+    """Return saved letter text and its export links."""
+    return {
+        "id": document.id,
+        "title": document.title,
+        "company": document.company,
+        "candidate_name": document.candidate_name,
+        "created_at": document.created_at,
+        "updated_at": document.updated_at,
+        "filename": document.filename,
+        "greeting": document.letter.greeting,
+        "paragraphs": document.letter.paragraphs,
+        "closing": document.letter.closing,
+        "docx_url": f"/api/cover-letters/{document.id}/export/docx",
+        "txt_url": f"/api/cover-letters/{document.id}/export/txt",
+    }
+
+
+@app.get("/api/cover-letters")
+def saved_cover_letters() -> list[dict[str, Any]]:
+    return [_letter_view(item) for item in cover_letters.list_all(get_workspace())]
+
+
+@app.delete("/api/cover-letters")
+def delete_all_cover_letters() -> dict[str, int]:
+    """Remove all saved and legacy cover letters."""
+    return {"deleted": cover_letters.delete_all(get_workspace())}
+
+
+@app.delete("/api/cover-letters/{document_id}")
+def delete_cover_letter(document_id: str) -> dict[str, int]:
+    """Remove one cover letter and its saved Word versions."""
+    try:
+        cover_letters.delete(get_workspace(), document_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"deleted": 1}
+
+
+@app.put("/api/cover-letters/{document_id}")
+def edit_cover_letter(document_id: str, edits: cover_letters.LetterEdits) -> dict[str, Any]:
+    try:
+        return _letter_view(cover_letters.edit(get_workspace(), document_id, edits))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/cover-letters/{document_id}/export/{format}")
+def export_cover_letter_file(document_id: str, format: Literal["docx", "txt"]) -> FileResponse:
+    try:
+        path = cover_letters.export(get_workspace(), document_id, format)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return FileResponse(path, filename=path.name)
+
+
 class TrackingRequest(BaseModel):
-    status: Literal["open", "applied", "na"]
+    status: Literal["open", "applied", "na"] | None = None
     note: str | None = None  # None keeps the current note
     reason: str | None = None  # None keeps the current reason
     stage: OutcomeStage | None = None
@@ -650,9 +833,9 @@ def track_job(job_id: str, body: TrackingRequest) -> JobTracking:
     job = ws.job(job_id)
     if job is None:
         raise HTTPException(404, "Job not in the current search")
-    tracking = tracker.set_status(
-        ws, job, body.status, body.note, reason=body.reason, stage=body.stage
-    )
+    current = tracker.tracking_for(ws, job)
+    status = body.status or (current.status if current and current.status != "new" else "open")
+    tracking = tracker.set_status(ws, job, status, body.note, reason=body.reason, stage=body.stage)
     tracker.update_result(ws, job_id, tracking)
     return tracking
 
@@ -672,8 +855,12 @@ def add_application(body: tracker.ManualApplication) -> tracker.TrackedJob:
 @app.put("/api/tracker/{entry_id}")
 def edit_tracker(entry_id: str, body: TrackingRequest) -> tracker.TrackedJob:
     try:
+        entry = tracker.load(get_workspace()).get(entry_id)
+        if entry is None:
+            raise ValueError("That job is not in the tracker")
+        status = body.status or ("open" if entry.status == "seen" else entry.status)
         return tracker.edit_entry(
-            get_workspace(), entry_id, body.status, body.note, body.reason, body.stage
+            get_workspace(), entry_id, status, body.note, body.reason, body.stage
         )
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
@@ -837,12 +1024,34 @@ def source_yield() -> list[history.SourceYield]:
     return history.source_yield(get_workspace())
 
 
+def _file_url(path: Path) -> str:
+    """Public download URL for a document under the output directory."""
+    relative = path.resolve().relative_to(get_workspace().output_dir.resolve())
+    return "/api/files/" + relative.as_posix()
+
+
+@app.get("/api/files/{folder}/{name}")
+def download_grouped(folder: str, name: str) -> FileResponse:
+    if folder not in ("cvs", "cover_letters"):
+        raise HTTPException(404, "File not found")
+    out = (get_workspace().output_dir / folder).resolve()
+    path = (out / name).resolve()
+    if path.parent != out or not path.is_file():
+        raise HTTPException(404, "File not found")
+    return FileResponse(path, filename=path.name)
+
+
 @app.get("/api/files/{name}")
 def download(name: str) -> FileResponse:
     out = get_workspace().output_dir.resolve()
     path = (out / name).resolve()
-    if path.parent != out or not path.is_file():
+    if path.parent != out:
         raise HTTPException(404, "File not found")
+    if not path.is_file():
+        folder = "cover_letters" if "cover_letter" in path.stem.lower() else "cvs"
+        path = (out / folder / name).resolve()
+        if path.parent != out / folder or not path.is_file():
+            raise HTTPException(404, "File not found")
     return FileResponse(path, filename=path.name)
 
 

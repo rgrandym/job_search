@@ -5,6 +5,7 @@ evidence."""
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import date
 from typing import Any
 
@@ -16,12 +17,15 @@ from src.agents.runtime import AgentContext, run_agent
 from src.core.config import Settings
 from src.core.llm import ChatMessage
 from src.cv.models import (
-    CoverLetterDraft,
+    ATSReport,
     EvidenceProposal,
     EvidenceProposals,
     JDAnalysis,
+    LetterOpening,
     LetterParagraph,
+    LetterSections,
     MasterCV,
+    TailoringPlan,
 )
 from src.jobs.matcher import build_profile
 from src.jobs.models import JobPosting, MatchReport, MatchResult
@@ -61,16 +65,20 @@ def ws(settings: Settings, master_cv: MasterCV, monkeypatch: pytest.MonkeyPatch)
         {
             EvidenceProposals: _proposals,
             JDAnalysis: JDAnalysis(job_title="ML Engineer", company="Orbit"),
-            CoverLetterDraft: CoverLetterDraft(
-                paragraphs=[
-                    LetterParagraph(
-                        text="I am interested in the ML Engineer role.", source_ids=["nimbus"]
-                    ),
+            LetterSections: LetterSections(
+                opening=LetterOpening(
+                    interest="I am interested in the ML Engineer role because of its ML work.",
+                    fit=LetterParagraph(text="My work at Nimbus fits.", source_ids=["nimbus"]),
+                ),
+                evidence=[
                     LetterParagraph(text="I built recommenders.", source_ids=["nimbus"]),
                     LetterParagraph(
-                        text="I would welcome a conversation about the role.", source_ids=["nimbus"]
+                        text="I moved training to Kubernetes.", source_ids=["nimbus-2"]
                     ),
-                ]
+                ],
+                conclusion=LetterParagraph(
+                    text="I would welcome a conversation about the role.", source_ids=["nimbus"]
+                ),
             ),
         }
     )
@@ -217,7 +225,75 @@ def test_api_intent_outcomes_evidence_and_cover_letter(ws: Workspace, monkeypatc
     )
     letter = client.post("/api/jobs/j1/cover-letter", json={}).json()
     assert letter["download_url"].endswith("_Orbit_ML_Engineer_cover_letter.docx")
-    assert letter["paragraphs"] == 3
+    assert letter["paragraphs"] == 4
     assert client.post("/api/jobs/nope/cover-letter", json={}).status_code == 404
     tracked = client.put("/api/jobs/j1/tracking", json={"status": "applied", "stage": "screening"})
     assert tracked.json()["stage"] == "screening"
+
+
+def test_documents_can_be_regenerated_from_a_visible_job_after_report_is_cleared(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.cv.tailor import apply_plan
+    from src.services import cv_service
+    from src.web import app as webapp
+
+    monkeypatch.setattr(webapp, "get_workspace", lambda: ws)
+    client = TestClient(webapp.app)
+    job = JobPosting(id="repeat", title="ML Engineer", company="Orbit", description="Build ML.")
+    result = MatchResult(job=job)
+    ws.last_report = None  # selecting a CV or restarting the backend clears this
+
+    def fake_tailor(cv: MasterCV, text: str, llm: Any, guidance: str, *_: Any) -> Any:
+        return apply_plan(cv, TailoringPlan(), JDAnalysis(job_title=job.title))
+
+    def fake_export(tailored: Any, path: Any, template: str) -> Any:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"test")
+        return path
+
+    monkeypatch.setattr(cv_service, "tailor", fake_tailor)
+    monkeypatch.setattr(cv_service, "export_docx", fake_export)
+    monkeypatch.setattr(
+        cv_service,
+        "check_docx",
+        lambda path, cv, keywords: ATSReport(words=10, est_pages=1, keyword_coverage=1),
+    )
+    urls = []
+    body = {"result": result.model_dump(mode="json")}
+    for attempt in range(2):
+        request = body if attempt == 0 else {}
+        cv = client.post("/api/jobs/repeat/tailor", json=request)
+        letter = client.post("/api/jobs/repeat/cover-letter", json=request)
+        assert cv.status_code == 200, cv.json()
+        assert letter.status_code == 200, letter.json()
+        urls.append((cv.json()["download_url"], letter.json()["download_url"]))
+    assert urls[0][0] != urls[1][0]
+    assert urls[0][1] != urls[1][1]
+    assert ws.job("repeat") == job
+    assert Workspace(ws.settings).job("repeat") == job
+    letter_only = JobPosting(id="letter-only", title="ML Engineer", company="Orbit 2")
+    first = client.post(
+        "/api/jobs/letter-only/cover-letter",
+        json={"result": MatchResult(job=letter_only).model_dump(mode="json")},
+    )
+    second = client.post("/api/jobs/letter-only/cover-letter", json={})
+    assert first.status_code == second.status_code == 200
+    assert first.json()["download_url"] != second.json()["download_url"]
+    role = tracker.role_id(letter_only.title, letter_only.company)
+    assert tracker.load(ws)[role].status == "seen"
+    assert client.post("/api/jobs/other/tailor", json=body).status_code == 422
+
+
+def test_retained_search_result_is_available_without_reopening_it(ws: Workspace) -> None:
+    job = JobPosting(id="old", title="ML Engineer", company="Orbit", description="Build ML.")
+    report = MatchReport(
+        profile=build_profile(ws.master_cv),  # type: ignore[arg-type]
+        threshold=60,
+        matches=[MatchResult(job=job)],
+    )
+    path = ws.settings.data_dir / "search_history.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps([{"outcome": {"report": report.model_dump(mode="json")}}]))
+    assert ws.job("old") == job
+    assert ws.last_report is None

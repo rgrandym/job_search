@@ -1,27 +1,29 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Bookmark, BookmarkX, BrainCircuit, Download, FileText, History, ListChecks, Loader2, Play, Square, X } from "lucide-react";
+import type { UseQueryResult } from "@tanstack/react-query";
+import { AlertTriangle, Bookmark, BookmarkX, BrainCircuit, ClipboardList, Download, FileText, History, ListChecks, Loader2, Play, Square, X } from "lucide-react";
 import { api } from "../lib/api";
 import { useSearchRunner } from "../lib/useSearchRunner";
 import { useState } from "react";
-import type { MatchResult, SavedJob, SourceReport } from "../lib/types";
+import type { MatchResult, SavedJob, SourceReport, TailoredCVView, TrackedJob } from "../lib/types";
 import { cn } from "../lib/utils";
 import { useSearch } from "../stores/searchStore";
 import { JobCard } from "./JobCard";
+import { CoverLettersPanel } from "./CoverLettersPanel";
 import { ProgressLog } from "./ProgressLog";
 import { SavedJobs } from "./SavedJobs";
+import { AppliedJobs } from "./AppliedJobs";
+import { TailoredCVPanel } from "./TailoredCVPanel";
 import { Empty } from "./ui";
 
-type Tab = "matches" | "below_threshold" | "excluded" | "applied" | "dismissed";
+type Tab = "matches" | "below_threshold" | "excluded" | "dismissed";
 
 const TAB_LABEL: Record<Tab, string> = {
   matches: "Matches",
   below_threshold: "Not selected",
   excluded: "Excluded",
-  applied: "Already applied",
   dismissed: "N/A",
 };
 const TAB_HINT: Partial<Record<Tab, string>> = {
-  applied: "Roles you applied for that surfaced again: set aside before screening, never ranked",
   dismissed: "Jobs you marked N/A: set aside before screening",
 };
 
@@ -79,13 +81,19 @@ function SourcesUsed({ sources }: { sources: SourceReport[] }) {
 
 /** The centre panel: the current search's results, or the jobs the user saved. */
 export function ResultsPanel({ hasCv }: { hasCv: boolean }) {
-  const [view, setView] = useState<"results" | "saved">("results");
+  const [view, setView] = useState<"results" | "saved" | "applied" | "documents" | "cover_letters">("results");
   const saved = useQuery({ queryKey: ["saved"], queryFn: api.saved });
+  const tracker = useQuery({ queryKey: ["tracker"], queryFn: api.tracker });
+  const documents = useQuery({ queryKey: ["tailored-cvs", "all"], queryFn: api.allTailoredCVs });
+  const letters = useQuery({ queryKey: ["cover-letters"], queryFn: api.coverLetters });
   const savedAt = new Map((saved.data ?? []).map((s) => [s.result.job.id, s.saved_at]));
-  const applied = (saved.data ?? []).filter((s) => s.result.tracking?.status === "applied").length;
+  const applied = (tracker.data ?? []).filter((entry) => entry.status === "applied").length;
   const views = [
     { value: "results" as const, label: "Search results", icon: <ListChecks size={13} />, count: null },
     { value: "saved" as const, label: "Saved", icon: <Bookmark size={13} />, count: saved.data?.length ?? 0 },
+    { value: "applied" as const, label: "Applied", icon: <ClipboardList size={13} />, count: applied },
+    { value: "documents" as const, label: "Documents", icon: <FileText size={13} />, count: documents.data?.length ?? 0 },
+    { value: "cover_letters" as const, label: "Cover letters", icon: <FileText size={13} />, count: letters.data?.length ?? 0 },
   ];
   return (
     <div className="flex h-full min-w-0 flex-col">
@@ -103,14 +111,87 @@ export function ResultsPanel({ hasCv }: { hasCv: boolean }) {
           >
             {v.icon} {v.label}
             {v.count != null && <span className="text-faint">{v.count}</span>}
-            {v.value === "saved" && applied > 0 && <span className="text-good">· {applied} applied</span>}
           </button>
         ))}
       </nav>
-      <SelectionBar savedIds={savedAt} saved={saved.data ?? []} hasCv={hasCv} />
+      {view === "results" || view === "saved" ? <SelectionBar savedIds={savedAt} saved={saved.data ?? []} hasCv={hasCv} /> : null}
       <div className="min-h-0 flex-1">
-        {view === "results" ? <SearchResults hasCv={hasCv} savedAt={savedAt} /> : <SavedJobs hasCv={hasCv} query={saved} />}
+        {view === "results" ? <SearchResults hasCv={hasCv} savedAt={savedAt} tracked={tracker.data ?? []} /> :
+          view === "saved" ? <SavedJobs hasCv={hasCv} query={saved} /> :
+          view === "applied" ? <AppliedJobs query={tracker} /> :
+            view === "documents" ? <DocumentsView query={documents} /> : <CoverLettersPanel />}
       </div>
+    </div>
+  );
+}
+
+function DocumentsView({ query }: { query: UseQueryResult<TailoredCVView[]> }) {
+  const jobs = [...new Map((query.data ?? []).map((item) => [item.job_id, item])).values()];
+  return (
+    <div className="h-full space-y-3 overflow-y-auto scroll-thin p-4">
+      <ImportOlderCV />
+      {query.isPending ? <Empty title="Loading saved documents…" /> :
+        query.error ? <Empty title="Could not load documents">{(query.error as Error).message}</Empty> :
+        jobs.length === 0 ? <Empty title="No saved tailored CVs">Tailor a CV from a job card or attach an older Word CV above.</Empty> :
+          jobs.map((item) => <DocumentJob key={item.job_id} jobId={item.job_id} title={`${item.job_title} · ${item.job_company}`} />)}
+    </div>
+  );
+}
+
+function ImportOlderCV() {
+  const qc = useQueryClient();
+  const state = useQuery({ queryKey: ["state"], queryFn: api.state });
+  const [assetId, setAssetId] = useState("");
+  const [title, setTitle] = useState("");
+  const [company, setCompany] = useState("");
+  const [description, setDescription] = useState("");
+  const wordCVs = (state.data?.cv_files.available ?? []).filter((asset) =>
+    asset.filename.toLowerCase().endsWith(".docx") && !asset.filename.toLowerCase().includes("cover_letter"),
+  );
+  const attach = useMutation({
+    mutationFn: () => api.importOlderCV(assetId, title.trim(), company.trim(), description.trim()),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["tailored-cvs"] }),
+  });
+  return (
+    <details className="rounded-md border border-border bg-panel p-3 text-[12px]">
+      <summary className="cursor-pointer font-medium">Attach a tailored Word CV from an older search</summary>
+      <div className="mt-3 space-y-2">
+        <p className="text-muted">Choose the Word CV and enter the job details. The quality model extracts its text; review and save it before writing a letter.</p>
+        <select className="input w-full" value={assetId} onChange={(e) => setAssetId(e.target.value)}>
+          <option value="">Choose a Word CV from your library</option>
+          {wordCVs.map((asset) => <option key={asset.id} value={asset.id}>{asset.filename}</option>)}
+        </select>
+        {wordCVs.length === 0 && <p className="text-muted">Upload the Word CV in the CV library first.</p>}
+        <div className="grid grid-cols-2 gap-2">
+          <input className="input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Job title" aria-label="Job title" />
+          <input className="input" value={company} onChange={(e) => setCompany(e.target.value)} placeholder="Company" aria-label="Company" />
+        </div>
+        <textarea className="input w-full" rows={5} value={description} onChange={(e) => setDescription(e.target.value)}
+          placeholder="Paste the job description" aria-label="Job description" />
+        <button className="btn-primary py-1 text-[12px]" disabled={!assetId || !title.trim() || !company.trim() || !description.trim() || attach.isPending}
+          onClick={() => attach.mutate()}>
+          {attach.isPending && <Loader2 size={12} className="animate-spin" />} Attach for review
+        </button>
+        {attach.error && <p className="text-bad">{(attach.error as Error).message}</p>}
+        {attach.data && <p className="text-good">Attached. Open its document below, review the text, and save it to enable cover letters.</p>}
+      </div>
+    </details>
+  );
+}
+
+function DocumentJob({ jobId, title }: { jobId: string; title: string }) {
+  const [open, setOpen] = useState(false);
+  const qc = useQueryClient();
+  const letter = useMutation({
+    mutationFn: (documentId?: string) => api.coverLetter(jobId, "classic", undefined, documentId),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["cover-letters"] }),
+  });
+  return (
+    <div className="rounded-md border border-border bg-panel p-3 text-[12px]">
+      <button className="font-medium text-fg hover:text-accent" onClick={() => setOpen(!open)}>{title}</button>
+      {open && <TailoredCVPanel jobId={jobId} hasCv={false} letterPending={letter.isPending} onLetter={(id) => letter.mutate(id)} />}
+      {letter.data && <a className="mt-2 block text-accent hover:underline" href={letter.data.download_url}><Download size={11} /> Download cover letter</a>}
+      {letter.error && <p className="mt-2 text-bad">{(letter.error as Error).message}</p>}
     </div>
   );
 }
@@ -132,12 +213,17 @@ function SelectionBar({ savedIds, saved, hasCv }: { savedIds: Map<string, string
   const [working, setWorking] = useState<string | null>(null);
   const report = outcome?.report;
   const results: MatchResult[] = report
-    ? [...report.matches, ...report.below_threshold, ...report.excluded, ...(report.applied ?? []), ...(report.dismissed ?? [])]
+    ? [...report.matches, ...report.below_threshold, ...report.excluded, ...(report.dismissed ?? [])]
     : [];
   const inResults = new Set(results.map((r) => r.job.id));
   const titles = new Map([...saved.map((s) => s.result), ...results].map((r) => [r.job.id, `${r.job.title} · ${r.job.company}`]));
-  const toSave = selected.filter((id) => inResults.has(id) && !savedIds.has(id));
-  const toRemove = selected.filter((id) => savedIds.has(id));
+  const selectedResults = new Map([...saved.map((s) => s.result), ...results].map((r) => [r.job.id, r]));
+  const appliedIds = new Set((qc.getQueryData<TrackedJob[]>(["tracker"]) ?? [])
+    .filter((entry) => entry.status === "applied")
+    .map((entry) => entry.job_id));
+  const activeSelected = selected.filter((id) => !appliedIds.has(id));
+  const toSave = activeSelected.filter((id) => inResults.has(id) && !savedIds.has(id));
+  const toRemove = activeSelected.filter((id) => savedIds.has(id));
   const done = () => void qc.invalidateQueries({ queryKey: ["saved"] });
   const save = useMutation({ mutationFn: () => api.saveJobs(toSave), onSuccess: done });
   const remove = useMutation({
@@ -151,12 +237,13 @@ function SelectionBar({ savedIds, saved, hasCv }: { savedIds: Map<string, string
   // job-description analysis), and a failure on one job does not stop the others.
   const prepare = async () => {
     const out: Prepared[] = [];
-    for (const jobId of selected) {
+    for (const jobId of activeSelected) {
       const item: Prepared = { jobId, title: titles.get(jobId) ?? jobId };
       setWorking(item.title);
       try {
-        item.cv = (await api.tailor(jobId, template)).download_url;
-        item.letter = (await api.coverLetter(jobId, template)).download_url;
+        const tailored = await api.tailor(jobId, template, selectedResults.get(jobId));
+        item.cv = tailored.download_url;
+        item.letter = (await api.coverLetter(jobId, template, selectedResults.get(jobId), tailored.document_id)).download_url;
       } catch (e) {
         item.error = (e as Error).message;
       }
@@ -164,15 +251,16 @@ function SelectionBar({ savedIds, saved, hasCv }: { savedIds: Map<string, string
       setPrepared([...out]);
     }
     setWorking(null);
-    for (const key of ["saved", "tracker", "state"]) void qc.invalidateQueries({ queryKey: [key] });
+    set({ selected: [] });
+    for (const key of ["saved", "tracker", "state", "tailored-cvs", "cover-letters"]) void qc.invalidateQueries({ queryKey: [key] });
   };
-  if (!selected.length && !prepared.length) return null;
+  if (!activeSelected.length && !prepared.length) return null;
   const error = (save.error ?? remove.error) as Error | null;
   return (
     <div className="shrink-0 space-y-1.5 border-b border-border bg-accent-bg px-4 py-1.5 text-[12px]">
-      {selected.length > 0 && (
+      {activeSelected.length > 0 && (
         <div className="flex flex-wrap items-center gap-2">
-          <span className="font-medium">{selected.length} selected</span>
+          <span className="font-medium">{activeSelected.length} selected</span>
           {toSave.length > 0 && (
             <button className="btn-primary py-0.5 text-[12px]" disabled={save.isPending} onClick={() => save.mutate()}>
               {save.isPending ? <Loader2 size={12} className="animate-spin" /> : <Bookmark size={12} />} Save {toSave.length}
@@ -193,10 +281,10 @@ function SelectionBar({ savedIds, saved, hasCv }: { savedIds: Map<string, string
               <button
                 className="btn-ghost py-0.5 text-[12px]"
                 disabled={!!working}
-                title="For each selected job: a tailored CV (reviewed, guarded) and a cover letter. Marks the jobs Applied."
+                title="For each selected job: a tailored CV (reviewed, guarded) and a cover letter."
                 onClick={() => void prepare()}
               >
-                {working ? <Loader2 size={12} className="animate-spin" /> : <FileText size={12} />} Tailor CV + cover letter ({selected.length})
+                {working ? <Loader2 size={12} className="animate-spin" /> : <FileText size={12} />} Tailor CV + cover letter ({activeSelected.length})
               </button>
             </>
           )}
@@ -236,7 +324,7 @@ function SelectionBar({ savedIds, saved, hasCv }: { savedIds: Map<string, string
   );
 }
 
-function SearchResults({ hasCv, savedAt }: { hasCv: boolean; savedAt: Map<string, string> }) {
+function SearchResults({ hasCv, savedAt, tracked }: { hasCv: boolean; savedAt: Map<string, string>; tracked: TrackedJob[] }) {
   const { outcome, loading, progress, error, log, openedFrom, set, runId, selected, toggleSelected } = useSearch();
   const runner = useSearchRunner();
   const stopButton = loading && (
@@ -288,15 +376,22 @@ function SearchResults({ hasCv, savedAt }: { hasCv: boolean; savedAt: Map<string
     matches: rep.matches.length,
     below_threshold: rep.below_threshold.length,
     excluded: rep.excluded.length,
-    applied: rep.applied?.length ?? 0,
     dismissed: rep.dismissed?.length ?? 0,
   };
-  const items = rep[tab] ?? [];
+  const applied = tracked.filter((entry) => entry.status === "applied");
+  const isApplied = (r: MatchResult) => r.tracking?.status === "applied" || applied.some((entry) =>
+    entry.job_id === r.job.id || (entry.company.toLowerCase() === r.job.company.toLowerCase() && entry.title.toLowerCase() === r.job.title.toLowerCase()),
+  );
+  const items = (rep[tab] ?? []).filter((r) => !isApplied(r));
+  counts.matches = rep.matches.filter((r) => !isApplied(r)).length;
+  counts.below_threshold = rep.below_threshold.filter((r) => !isApplied(r)).length;
+  counts.excluded = rep.excluded.filter((r) => !isApplied(r)).length;
+  counts.dismissed = (rep.dismissed ?? []).filter((r) => !isApplied(r)).length;
   const tabs = (Object.keys(TAB_LABEL) as Tab[]).filter(
     (t) => counts[t] > 0 || t === "matches" || t === "below_threshold" || t === "excluded" || t === tab,
   );
-  const fresh = [...rep.matches, ...rep.below_threshold].filter((r) => r.tracking?.status === "new").length;
-  const borderline = [...rep.matches, ...rep.below_threshold].filter((r) => r.verdict?.borderline).length;
+  const fresh = [...rep.matches, ...rep.below_threshold].filter((r) => !isApplied(r) && r.tracking?.status === "new").length;
+  const borderline = [...rep.matches, ...rep.below_threshold].filter((r) => !isApplied(r) && r.verdict?.borderline).length;
   const problems = { ...outcome.skipped_sources, ...outcome.errors };
   const alertProblem = outcome.alert_only && !!problems.gmail_alerts;
   const emptyTitle = alertProblem
@@ -362,11 +457,6 @@ function SearchResults({ hasCv, savedAt }: { hasCv: boolean; savedAt: Map<string
             <span className="text-accent" title="Jobs appearing in a search for the first time (matches and not selected)">
               {fresh} new
             </span>
-          )}
-          {counts.applied > 0 && (
-            <button className="text-good hover:underline" title={TAB_HINT.applied} onClick={() => setTab("applied")}>
-              {counts.applied} already applied
-            </button>
           )}
           {borderline > 0 && (
             <span className="text-warn" title="Within 5 points of the threshold, in either tab">

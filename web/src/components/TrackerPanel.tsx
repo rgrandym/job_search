@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { BarChart3, ClipboardList, ExternalLink, Lightbulb, Loader2, Plus, Tags, Trash2 } from "lucide-react";
+import { BarChart3, ChevronRight, ClipboardList, ExternalLink, Lightbulb, Loader2, Plus, Tags, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "../lib/api";
 import type { HeadToHead, OutcomeStage, SetupAgreement, TrackedJob } from "../lib/types";
@@ -26,14 +26,15 @@ const ORIGIN_LABELS: Record<string, string> = {
 };
 
 type Editable = "open" | "applied" | "na";
-type Edit = { status: Editable; note?: string; reason?: string; stage?: OutcomeStage };
+type Edit = { status?: Editable; note?: string; reason?: string; stage?: OutcomeStage };
 
 /** Sidebar card: the applications register (what searches skip) and source yield. */
 export function TrackerPanel() {
   const [open, setOpen] = useState<"register" | "yield" | "review" | "labels" | null>(null);
   return (
-    <section className="card space-y-2 p-3">
-      <span className="label">Applications &amp; sources</span>
+    <details className="card group p-3" open>
+      <summary className="label flex cursor-pointer list-none items-center gap-1 [&::-webkit-details-marker]:hidden"><ChevronRight size={13} className="group-open:rotate-90" /> Applications &amp; sources</summary>
+      <div className="mt-2 space-y-2">
       <div className="flex flex-col gap-1.5">
         <button className="btn-ghost w-full justify-start text-[12px]" onClick={() => setOpen("register")}>
           <ClipboardList size={13} className="shrink-0" /> <span className="truncate">Applications</span>
@@ -49,8 +50,9 @@ export function TrackerPanel() {
         </button>
       </div>
       <p className="text-[11px] text-faint">
-        Jobs you applied for (or marked N/A) are set aside in later searches. A tailored CV counts as applied.
+        Jobs you mark Applied (or N/A) are set aside in later searches.
       </p>
+      </div>
       <Modal open={open === "register"} onClose={() => setOpen(null)} title="Applications" wide>
         <Register />
       </Modal>
@@ -63,7 +65,7 @@ export function TrackerPanel() {
       <Modal open={open === "labels"} onClose={() => setOpen(null)} title="Your labels vs the models" wide>
         <Labels />
       </Modal>
-    </section>
+    </details>
   );
 }
 
@@ -90,7 +92,7 @@ function Register() {
         </p>
       ) : items.length === 0 ? (
         <Empty title="No applications yet">
-          Mark a job <b>Applied</b> or <b>N/A</b> in the results, tailor a CV for it, or add one above.
+          Mark a job <b>Applied</b> or <b>N/A</b> in the results, or add one above.
         </Empty>
       ) : (
         <ul className="divide-y divide-border">
@@ -150,7 +152,7 @@ function RegisterRow({
             className="input w-auto py-0.5 text-[11px]"
             value={entry.stage ?? ""}
             disabled={busy}
-            onChange={(e) => e.target.value && onEdit({ status, stage: e.target.value as OutcomeStage })}
+            onChange={(e) => e.target.value && onEdit({ stage: e.target.value as OutcomeStage })}
             title="How the application went"
           >
             <option value="">No news yet</option>
@@ -178,7 +180,7 @@ function RegisterRow({
         value={note}
         maxLength={200}
         onChange={(e) => setNote(e.target.value)}
-        onBlur={() => note.trim() !== entry.note && onEdit({ status, note: note.trim() })}
+        onBlur={() => note.trim() !== entry.note && onEdit({ note: note.trim() })}
         onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
       />
       <input
@@ -187,7 +189,7 @@ function RegisterRow({
         value={reason}
         maxLength={200}
         onChange={(e) => setReason(e.target.value)}
-        onBlur={() => reason.trim() !== (entry.reason ?? "") && onEdit({ status, reason: reason.trim() })}
+        onBlur={() => reason.trim() !== (entry.reason ?? "") && onEdit({ reason: reason.trim() })}
         onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
       />
     </li>

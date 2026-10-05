@@ -2,7 +2,7 @@
 
 Stored in `data/job_tracker.json` (git-ignored, personal data), one entry per role:
 
-- **Applied** (by hand, or automatically when a CV is tailored for the job) and **N/A** (ruled
+- **Applied** (set by the user) and **N/A** (ruled
   out) jobs are set aside *before* screening, so they cost no model calls and never take a
   place in the ranked matches. They are listed once, in the report's `applied` / `dismissed`.
 - Every other job that reaches the matches or "not selected" is **New** the first search it
@@ -73,6 +73,8 @@ class TrackedJob(BaseModel):
     stages: list[StageEvent] = Field(default_factory=list)
     fit_score: int | None = None  # job_matcher fit when the user decided
     family: str | None = None  # role family the search attributed it to
+    document_postings: dict[str, JobPosting] = Field(default_factory=dict)
+    application_result: MatchResult | None = None
 
 
 class ManualApplication(BaseModel):
@@ -101,7 +103,10 @@ def load(ws: Workspace) -> dict[str, TrackedJob]:
 
 def _save(ws: Workspace, entries: dict[str, TrackedJob], today: date) -> None:
     cutoff = (today - timedelta(days=FORGET_SEEN_DAYS)).isoformat()
-    kept = [e for e in entries.values() if e.status != "seen" or e.last_seen >= cutoff]
+    kept = [
+        e for e in entries.values()
+        if e.status != "seen" or e.last_seen >= cutoff or e.document_postings
+    ]
     path = _path(ws)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"version": 1, "jobs": [e.model_dump(mode="json") for e in kept]}
@@ -273,7 +278,7 @@ def set_status(
     reason: str | None = None,
     stage: OutcomeStage | None = None,
 ) -> JobTracking:
-    """The user's decision on a job (or a tailored CV: applied). `note=None` / `reason=None`
+    """The user's decision on a job. `note=None` / `reason=None`
     keep what is there; `stage` records an application's outcome (dated)."""
     today = today or date.today()
     entries = load(ws)
@@ -290,23 +295,61 @@ def set_status(
     )
     entries[entry.id] = entry
     stored: StoredStatus = "seen" if status == "open" else status
+    newly_applied = stored == "applied" and entry.status != "applied"
     if stored == "applied" and (entry.status != "applied" or entry.applied_at is None):
         entry.applied_at = today.isoformat()
     elif stored != "applied":
         entry.applied_at = None
     entry.status = stored
+    if stored == "applied" and (newly_applied or entry.application_result is None):
+        result = ws.result(job.id)
+        entry.application_result = (
+            result.model_copy(update={"tracking": None}) if result else MatchResult(job=job)
+        )
     if note is not None:
         entry.note = note.strip()
     if reason is not None:
         entry.reason = reason.strip()
     if cv_file is not None:
         entry.cv_file = cv_file
+        entry.document_postings[job.id] = job
     if stage is not None and stage != entry.stage:
         entry.stage = stage
         entry.stages.append(StageEvent(stage=stage, at=today.isoformat()))
     _snapshot(ws, entry, job.id)
     _save(ws, entries, today)
     return _tracking(entry, status, entries, job)
+
+
+def remember_document_job(ws: Workspace, job: JobPosting, cv_file: str | None = None) -> None:
+    """Retain a posting used for a document without changing its application status."""
+    today = date.today()
+    entries = load(ws)
+    entry = find(entries, job) or TrackedJob(
+        id=role_id(job.title, job.company),
+        title=job.title,
+        company=job.company,
+        location=job.location,
+        url=job.url,
+        job_id=job.id,
+        source=job.source,
+        first_seen=today.isoformat(),
+        last_seen=today.isoformat(),
+    )
+    entry.document_postings[job.id] = job
+    if cv_file is not None:
+        entry.cv_file = cv_file
+    entries[entry.id] = entry
+    _save(ws, entries, today)
+
+
+def document_job(ws: Workspace, job_id: str) -> JobPosting | None:
+    """Find the original posting of a previously generated document."""
+    return next(
+        (entry.document_postings[job_id] for entry in load(ws).values()
+         if job_id in entry.document_postings),
+        None,
+    )
 
 
 def _snapshot(ws: Workspace, entry: TrackedJob, job_id: str) -> None:
@@ -331,6 +374,11 @@ def update_result(ws: Workspace, job_id: str, tracking: JobTracking) -> None:
 def register(ws: Workspace) -> list[TrackedJob]:
     """Applications and ruled-out jobs, most recent first."""
     acted = [e for e in load(ws).values() if e.status != "seen"]
+    for entry in acted:
+        if entry.status == "applied" and entry.application_result is None and entry.job_id:
+            result = ws.result(entry.job_id)
+            if result is not None:
+                entry.application_result = result.model_copy(update={"tracking": None})
     return sorted(acted, key=lambda e: e.applied_at or e.last_seen, reverse=True)
 
 
@@ -354,6 +402,11 @@ def add_application(ws: Workspace, app: ManualApplication, today: date | None = 
     )
     entry.status = "applied"
     entry.applied_at = (app.applied_at or today).isoformat()
+    if entry.application_result is None:
+        result = ws.result(job.id)
+        entry.application_result = (
+            result.model_copy(update={"tracking": None}) if result else MatchResult(job=job)
+        )
     entry.note = app.note.strip() or entry.note
     entries[entry.id] = entry
     _save(ws, entries, today)

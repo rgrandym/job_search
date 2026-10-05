@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Literal
 
 from src.core.llm_provider import LLMProvider
 from src.cv.claims import overclaim
@@ -28,6 +29,7 @@ from src.cv.models import (
     MasterCV,
     SkillGroup,
     TailoredCV,
+    TailoredCVEdits,
     TailoringPlan,
 )
 from src.tools.search_tools import (
@@ -62,8 +64,12 @@ do not imply leadership, ownership, scale, seniority or impact beyond the source
 5. Use the job's terms only for the same evidenced skill or work. Avoid keyword stuffing, \
 superlatives and generic claims such as 'expert' or 'proven leader'.
 
-Also return: a headline matching the target role, a 2-3 sentence summary built only from \
-facts in the CV, `bullet_order` (per experience id, most relevant first; omit irrelevant \
+Also return: a headline matching the target role, a 3-4 sentence summary built only from \
+facts in the CV. Open with the strongest evidence for this job, then draw relevant general \
+context from the original CV summary and retain distinctive breadth from the full CV: \
+leadership, hands-on practice, or adjacent experience when evidenced. Do not reduce the \
+candidate to the job description or repeat a keyword list. \
+Return `bullet_order` (per experience id, most relevant first; omit irrelevant \
 bullets but keep at least two per role), and `skills_priority` (CV skills ordered by JD \
 relevance).
 
@@ -80,7 +86,9 @@ evidences but the tailored CV leaves out or buries; cite that bullet's id. Never
 requirement the Master CV does not evidence.
 - weak_bullets: tailored bullets that are passive, generic, off-target or hide their \
 result or overstate their scope (by id), and what to fix using only that bullet's own facts.
-- order_notes: at most 3 notes on the order of bullets or sections for this job.
+- order_notes: at most 3 notes on the order of bullets or sections for this job. Flag a \
+summary that is too terse, only restates the job description, or omits distinctive, relevant \
+breadth evidenced in the Master CV.
 Return empty lists when the CV is already strong. Never suggest adding a fact."""
 
 
@@ -97,13 +105,40 @@ def _context(master: MasterCV, jd: JDAnalysis, jd_text: str) -> str:
     )
 
 
+TailoringEmphasis = Literal["auto", "leadership", "hands_on"]
+LevelEmphasis = Literal["auto", "senior", "junior"]
+
+
+def _preferences(emphasis: TailoringEmphasis, level: LevelEmphasis) -> str:
+    """Steer which true facts to foreground without changing the candidate's level."""
+    focus = {
+        "auto": "Choose the strongest evidenced emphasis for this job.",
+        "leadership": "Foreground evidenced people, matrix, or project leadership and scope.",
+        "hands_on": (
+            "Foreground evidenced hands-on delivery, methods, and wet-lab work where relevant."
+        ),
+    }[emphasis]
+    tone = {
+        "auto": "Use the candidate's evidenced level and the role's context.",
+        "senior": (
+            "Emphasise evidenced strategic scope and senior achievements; "
+            "do not claim a higher title."
+        ),
+        "junior": (
+            "Emphasise evidenced practical contribution and learning; do not imply less experience."
+        ),
+    }[level]
+    return f"\n\n<tailoring_preferences>\n{focus} {tone}\n</tailoring_preferences>"
+
+
 def propose_plan(
-    master: MasterCV, jd: JDAnalysis, jd_text: str, llm: LLMProvider, guidance: str = ""
+    master: MasterCV, jd: JDAnalysis, jd_text: str, llm: LLMProvider, guidance: str = "",
+    emphasis: TailoringEmphasis = "auto", level: LevelEmphasis = "auto",
 ) -> TailoringPlan:
     """Ask the LLM for a tailoring plan. The output is untrusted until `apply_plan`.
     `guidance` is the job_matcher's assessment of this job (what fits, what transfers)."""
     steer = f"\n\n<match_assessment>\n{guidance}\n</match_assessment>" if guidance else ""
-    prompt = _context(master, jd, jd_text) + steer
+    prompt = _context(master, jd, jd_text) + steer + _preferences(emphasis, level)
     return llm.generate(system=PLAN_SYSTEM, prompt=prompt, output_model=TailoringPlan)
 
 
@@ -135,12 +170,15 @@ def revise_plan(
     critique: CVCritique,
     llm: LLMProvider,
     guidance: str = "",
+    emphasis: TailoringEmphasis = "auto",
+    level: LevelEmphasis = "auto",
 ) -> TailoringPlan:
     """A revised plan that addresses the review (still untrusted until `apply_plan`)."""
     steer = f"\n\n<match_assessment>\n{guidance}\n</match_assessment>" if guidance else ""
     prompt = (
         _context(master, jd, jd_text)
         + steer
+        + _preferences(emphasis, level)
         + f"\n\n<previous_plan>\n{plan.model_dump_json(indent=2)}\n</previous_plan>"
         + "\n\n<review>\n"
         + "\n".join(f"- {n}" for n in critique.notes())
@@ -174,6 +212,47 @@ def apply_plan(master: MasterCV, plan: TailoringPlan, jd: JDAnalysis) -> Tailore
     )
 
 
+def revise_tailored(
+    source: MasterCV, tailored: TailoredCV, edits: TailoredCVEdits, jd: JDAnalysis
+) -> TailoredCV:
+    """Apply user text edits only when the original CV supports every changed claim."""
+    cv = tailored.cv.model_copy(deep=True)
+    visible = cv.bullet_index()
+    original = source.bullet_index()
+    cv_skills = normalize_skills(source.all_skills())
+    for bullet_id, text in edits.bullets.items():
+        if bullet_id not in visible or bullet_id not in original:
+            raise ValueError(f"Unknown visible bullet: {bullet_id}")
+        if reason := _fabrication_reason(original[bullet_id], text, jd, cv_skills, source):
+            raise ValueError(f"Bullet {bullet_id}: {reason}")
+        visible[bullet_id].text = text
+    if edits.headline is not None:
+        if not edits.headline.strip():
+            raise ValueError("Headline cannot be empty")
+        changes = _apply_headline(cv, source, edits.headline, jd)
+        if changes and not changes[0].accepted:
+            raise ValueError(f"Headline: {changes[0].reason}")
+        cv.basics.headline = edits.headline
+    if edits.summary is not None:
+        if not edits.summary.strip():
+            raise ValueError("Summary cannot be empty")
+        changes = _apply_summary(cv, source, edits.summary, jd)
+        if changes and not changes[0].accepted:
+            raise ValueError(f"Summary: {changes[0].reason}")
+        cv.basics.summary = edits.summary
+    matched, missing = keyword_coverage(cv, jd)
+    total = len(matched) + len(missing)
+    return tailored.model_copy(
+        update={
+            "cv": cv,
+            "matched_keywords": matched,
+            "missing_keywords": missing,
+            "keyword_coverage": len(matched) / total if total else 1.0,
+            "ats": None,
+        }
+    )
+
+
 def tailor(
     master: MasterCV,
     jd_text: str,
@@ -181,19 +260,21 @@ def tailor(
     guidance: str = "",
     review: bool = True,
     jd: JDAnalysis | None = None,
+    emphasis: TailoringEmphasis = "auto",
+    level: LevelEmphasis = "auto",
 ) -> TailoredCV:
     """End-to-end: JD text + Master CV -> guarded TailoredCV. With `review`, a second reader
     critiques the result and, if it finds issues, one revised plan replaces the first (both
     pass the same guards). `jd`: an analysis already made of this JD text (saves a call)."""
     jd = jd or analyze_jd(jd_text, llm)
-    plan = propose_plan(master, jd, jd_text, llm, guidance)
+    plan = propose_plan(master, jd, jd_text, llm, guidance, emphasis, level)
     out = apply_plan(master, plan, jd)
     if not review:
         return out
     critique = critique_cv(master, out, jd, jd_text, llm)
     if not critique.has_issues():
         return out
-    revised = revise_plan(master, jd, jd_text, plan, critique, llm, guidance)
+    revised = revise_plan(master, jd, jd_text, plan, critique, llm, guidance, emphasis, level)
     return apply_plan(master, revised, jd).model_copy(update={"critique": critique.notes()})
 
 
