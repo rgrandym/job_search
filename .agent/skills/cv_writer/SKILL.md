@@ -25,6 +25,9 @@ The Master CV lives at `data/master_cv.json` (git-ignored, personal data). Examp
 The Available CVs panel can delete a CV and its parsed copy, stored profile summaries and
 career intent. Deleting a generated Word CV also removes its saved tailored draft record;
 application history and cover letters remain. Each deletion requires confirmation in the UI.
+Clicking a CV selects it and opens its structured contents in a resizable editor. An uploaded
+source is parsed on first open, then reviewed edits are saved to its parsed copy; the original
+PDF, Word or text file stays unchanged.
 
 ---
 

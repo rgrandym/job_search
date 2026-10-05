@@ -363,6 +363,15 @@ def get_cv() -> MasterCV | None:
     return get_workspace().master_cv
 
 
+@app.get("/api/cv/editable")
+async def get_editable_cv() -> MasterCV:
+    """Load the selected CV for editing, parsing an uploaded source on first use."""
+    try:
+        return await cv_service.ensure_selected_cv(get_workspace())
+    except (ValueError, LLMError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @app.put("/api/cv")
 def put_cv(cv: MasterCV) -> MasterCV:
     cv_service.save_selected_cv(get_workspace(), cv)

@@ -25,6 +25,7 @@ import type {
   SearchStreamEvent,
   ClaudeCodeStatus,
   CVAsset,
+  MasterCV,
   CoverLetterView,
   Effort,
   LLMView,
@@ -147,6 +148,8 @@ export const api = {
   },
   selectCV: (assetId: string) =>
     request<CVAsset>(`/api/cv/selection/${encodeURIComponent(assetId)}`, { method: "PUT" }),
+  editableCV: () => request<MasterCV>("/api/cv/editable"),
+  saveCV: (cv: MasterCV) => request<MasterCV>("/api/cv", json("PUT", cv)),
   deleteCV: (assetId: string) =>
     request<{ deleted: boolean }>(`/api/cv/${encodeURIComponent(assetId)}`, { method: "DELETE" }),
   exportGeneralCV: () =>

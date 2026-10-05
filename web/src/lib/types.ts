@@ -607,6 +607,47 @@ export interface CVAsset {
   selected: boolean;
 }
 
+export interface MasterCV {
+  schema_version: string;
+  basics: {
+    name: string;
+    headline: string | null;
+    email: string | null;
+    phone: string | null;
+    location: string | null;
+    links: { label: string; url: string }[];
+    summary: string | null;
+  };
+  experience: {
+    id: string;
+    company: string;
+    title: string;
+    location: string | null;
+    start: string;
+    end: string | null;
+    bullets: { id: string; text: string; skills: string[]; metrics: string[] }[];
+  }[];
+  education: {
+    institution: string;
+    degree: string;
+    field: string | null;
+    start: string | null;
+    end: string | null;
+    details: string[];
+  }[];
+  skills: { category: string; items: string[] }[];
+  certifications: { name: string; issuer: string | null; year: number | null }[];
+  projects: { id: string; name: string; description: string; skills: string[]; url: string | null }[];
+  languages: string[];
+  preferences: {
+    target_titles: string[];
+    locations: string[];
+    work_arrangements: WorkArrangement[];
+    willing_to_relocate: boolean;
+    min_salary: number | null;
+  };
+}
+
 export interface CoverLetterView {
   id: string;
   title: string;

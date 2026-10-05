@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight, Download, Eraser, FileUp, Loader2, Search, Sparkles, Square, Trash2, UserRound } from "lucide-react";
 import { useEffect, useState, type DragEvent } from "react";
 import { api } from "../lib/api";
-import type { AppState, CVAsset } from "../lib/types";
+import type { AppState, CVAsset, MasterCV } from "../lib/types";
 import { useSearchRunner } from "../lib/useSearchRunner";
 import { EMPTY_QUERY, useSearch } from "../stores/searchStore";
 import { SourcePicker } from "./SourcePicker";
@@ -10,6 +10,7 @@ import { ProfileDetails } from "./ProfileDetails";
 import { SummaryDialog } from "./SummaryDialog";
 import { SearchHistory } from "./SearchHistory";
 import { TrackerPanel } from "./TrackerPanel";
+import { CVEditor } from "./CVEditor";
 import { ChipInput, Field, Modal, Toggle } from "./ui";
 
 const DISTANCES = [5, 10, 25, 50, 100];
@@ -49,6 +50,8 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
   const [dragging, setDragging] = useState(false);
   const [expandedProfileKey, setExpandedProfileKey] = useState<string | null>(null);
   const [editingProfile, setEditingProfile] = useState(false);
+  const [editingCV, setEditingCV] = useState<CVAsset | null>(null);
+  const [editableCV, setEditableCV] = useState<MasterCV | null>(null);
   const [gmailWaiting, setGmailWaiting] = useState(false);
   const gmail = useQuery({
     queryKey: ["gmail-status"],
@@ -100,16 +103,27 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
     onError: (e: Error) => setUploadError(e.message),
   });
 
-  const select = useMutation({
-    mutationFn: api.selectCV,
-    onSuccess: (asset) => {
-      setUploadError(null);
-      s.set({ useCv: true, summary: null, outcome: null, profileKey: null });
+  const openCV = useMutation({
+    mutationFn: async (item: CVAsset) => {
+      const asset = item.id === state?.cv_files.selected ? item : await api.selectCV(item.id);
+      return { asset, cv: await api.editableCV() };
+    },
+    onSuccess: ({ asset, cv }) => {
       cacheSelection(asset);
+      setEditableCV(cv);
+      s.set({ useCv: true, summary: null, outcome: null, profileKey: null });
+      void qc.invalidateQueries({ queryKey: ["profiles"] });
+    },
+    onError: () => { void qc.invalidateQueries({ queryKey: ["state"] }); },
+  });
+  const saveCV = useMutation({
+    mutationFn: api.saveCV,
+    onSuccess: (cv) => {
+      setEditableCV(cv);
+      s.set({ summary: null, outcome: null });
       void qc.invalidateQueries({ queryKey: ["state"] });
       void qc.invalidateQueries({ queryKey: ["profiles"] });
     },
-    onError: (e: Error) => setUploadError(e.message),
   });
   const deleteCV = useMutation({
     mutationFn: (item: CVAsset) => api.deleteCV(item.id),
@@ -240,8 +254,8 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
                     type="button"
                     aria-current={item.id === state?.cv_files.selected ? "true" : undefined}
                     title={item.filename}
-                    disabled={select.isPending || deleteCV.isPending || buildProfile.isPending}
-                    onClick={() => { if (item.id !== state?.cv_files.selected) select.mutate(item.id); }}
+                    disabled={openCV.isPending || deleteCV.isPending || buildProfile.isPending}
+                    onClick={() => { setEditingCV(item); setEditableCV(null); openCV.mutate(item); }}
                     className={`block min-w-0 flex-1 rounded-md border px-2 py-1 text-left text-[11px] disabled:opacity-50 ${
                       item.id === state?.cv_files.selected ? "border-accent bg-accent-bg" : "border-border bg-surface hover:border-accent"
                     }`}
@@ -254,7 +268,7 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
                     className="btn-ghost shrink-0 px-2 text-bad disabled:opacity-50"
                     aria-label={`Delete ${item.filename}`}
                     title={`Delete ${item.filename} and its stored profiles`}
-                    disabled={deleteCV.isPending || select.isPending || buildProfile.isPending}
+                    disabled={deleteCV.isPending || openCV.isPending || buildProfile.isPending}
                     onClick={() => {
                       if (window.confirm(`Delete "${item.filename}" and its stored profiles? Saved applications and cover letters remain.`))
                         deleteCV.mutate(item);
@@ -274,7 +288,7 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
             <button
               type="button"
               className="btn-ghost w-full justify-center py-1 text-[11px]"
-              disabled={buildProfile.isPending || select.isPending || deleteCV.isPending}
+              disabled={buildProfile.isPending || openCV.isPending || deleteCV.isPending}
               title="Build a general profile from this CV, or open its saved profile for editing"
               onClick={() => buildProfile.mutate()}
             >
@@ -523,6 +537,20 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
         )}
         </div>
       </details>
+      <Modal
+        open={!!editingCV}
+        onClose={() => { setEditingCV(null); setEditableCV(null); openCV.reset(); saveCV.reset(); }}
+        title={editingCV?.filename ?? "CV"}
+        resizable
+      >
+        {openCV.isPending ? (
+          <p className="flex items-center gap-2 text-[12px] text-muted"><Loader2 size={14} className="animate-spin" /> Loading and reading this CV…</p>
+        ) : openCV.error ? (
+          <p className="text-[12px] text-bad">{openCV.error.message}</p>
+        ) : editableCV ? (
+          <CVEditor cv={editableCV} saving={saveCV.isPending} error={saveCV.error?.message ?? null} onSave={(cv) => saveCV.mutate(cv)} />
+        ) : null}
+      </Modal>
       <Modal
         open={!!expandedProfile}
         onClose={() => { setExpandedProfileKey(null); setEditingProfile(false); }}

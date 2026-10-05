@@ -488,6 +488,37 @@ def test_api_cv_upload_accepts_multipart_file(
     assert state["cv_files"]["available"][0]["filename"] == "resume.txt"
 
 
+def test_api_selected_cv_can_be_opened_and_edited(
+    client: TestClient, ws: Workspace, master_cv: MasterCV, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.services import cv_service
+
+    async def parse_uploaded(*_: Any, **__: Any) -> MasterCV:
+        return master_cv
+
+    monkeypatch.setattr(cv_service, "import_cv", parse_uploaded)
+    asset = client.post(
+        "/api/cv/upload",
+        files={"file": ("review-me.txt", b"CV source retained unchanged", "text/plain")},
+    ).json()
+    opened = client.get("/api/cv/editable")
+    assert opened.status_code == 200
+    assert opened.json()["basics"]["name"] == master_cv.basics.name
+    parsed = ws.settings.data_dir / "cvs" / ".parsed" / f"{asset['id']}.json"
+    assert parsed.exists()
+    assert (ws.settings.data_dir / "cvs" / "review-me.txt").read_bytes() == (
+        b"CV source retained unchanged"
+    )
+
+    changed = master_cv.model_copy(deep=True)
+    changed.basics.summary = "Reviewed summary"
+    saved = client.put("/api/cv", json=changed.model_dump(mode="json"))
+    assert saved.status_code == 200
+    assert saved.json()["basics"]["summary"] == "Reviewed summary"
+    assert ws.master_cv and ws.master_cv.basics.summary == "Reviewed summary"
+    assert MasterCV.model_validate_json(parsed.read_text()).basics.summary == "Reviewed summary"
+
+
 def test_delete_uploaded_cv_removes_its_parsed_copy_profiles_and_intent(
     client: TestClient, ws: Workspace, master_cv: MasterCV
 ) -> None:
