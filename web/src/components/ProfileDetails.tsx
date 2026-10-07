@@ -1,19 +1,50 @@
-import type { ProfileRecord, ProfileSummary } from "../lib/types";
+import type { ProfileRecord, ProfileSummary, PublicationRecord } from "../lib/types";
 
 const SECTIONS: { key: keyof Pick<ProfileSummary,
   "core_expertise" | "domains" | "leadership" | "qualifications" | "achievements" |
-  "transferable_strengths" | "target_roles" | "stretch_roles" | "not_a_fit" | "search_keywords">; label: string }[] = [
+  "transferable_strengths" | "capabilities" | "target_roles" | "stretch_roles" | "not_a_fit" | "search_keywords">; label: string }[] = [
   { key: "core_expertise", label: "Core expertise" },
   { key: "domains", label: "Domains and sectors" },
   { key: "leadership", label: "Leadership" },
   { key: "qualifications", label: "Qualifications" },
   { key: "achievements", label: "Key achievements" },
   { key: "transferable_strengths", label: "Transferable strengths" },
+  { key: "capabilities", label: "Capabilities" },
   { key: "target_roles", label: "Target roles" },
   { key: "stretch_roles", label: "Stretch roles" },
   { key: "not_a_fit", label: "Not a fit" },
   { key: "search_keywords", label: "Search keywords" },
 ];
+
+/** The publication record as the profile summarised it. */
+export function PublicationsView({ record }: { record: PublicationRecord }) {
+  const counts = [
+    record.count > 0 && `${record.count} publications`,
+    record.lead_author > 0 && `${record.lead_author} as first, last or corresponding author`,
+    record.years,
+  ].filter(Boolean).join(" · ");
+  const lists: [string, string[]][] = [
+    ["Themes", record.themes],
+    ["Most relevant", record.notable],
+    ["Other outputs", record.other_outputs],
+    ["What it shows employers", record.signals],
+  ];
+  return (
+    <section className="space-y-1">
+      <h3 className="label">Publications</h3>
+      {counts && <p className="text-faint">{counts}</p>}
+      {record.summary && <p className="text-muted">{record.summary}</p>}
+      {lists.map(([label, items]) => items.length > 0 && (
+        <div key={label}>
+          <p className="font-medium text-fg">{label}</p>
+          <ul className="list-inside list-disc text-muted">
+            {items.map((item, index) => <li key={`${item}:${index}`}>{item}</li>)}
+          </ul>
+        </div>
+      ))}
+    </section>
+  );
+}
 
 /** Read the complete stored profile in a resizable popup. */
 export function ProfileDetails({ record }: { record: ProfileRecord }) {
@@ -25,6 +56,7 @@ export function ProfileDetails({ record }: { record: ProfileRecord }) {
         <p className="text-faint">{summary.seniority} · {summary.years_experience} years of experience</p>
       </div>
       <p className="whitespace-pre-wrap text-muted">{summary.summary}</p>
+      {summary.publications && <PublicationsView record={summary.publications} />}
       {summary.role_families && summary.role_families.length > 0 && (
         <section className="space-y-2">
           <h3 className="label">Role families</h3>
@@ -55,11 +87,11 @@ export function ProfileDetails({ record }: { record: ProfileRecord }) {
           </ul>
         </section>
       )}
-      {SECTIONS.map(({ key, label }) => summary[key].length > 0 && (
+      {SECTIONS.map(({ key, label }) => (summary[key] ?? []).length > 0 && (
         <section key={key}>
           <h3 className="label">{label}</h3>
           <ul className="list-inside list-disc text-muted">
-            {summary[key].map((item, index) => <li key={`${item}:${index}`}>{item}</li>)}
+            {(summary[key] ?? []).map((item, index) => <li key={`${item}:${index}`}>{item}</li>)}
           </ul>
         </section>
       ))}

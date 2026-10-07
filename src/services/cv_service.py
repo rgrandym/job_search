@@ -9,10 +9,11 @@ import json
 import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from src.core import progress
 from src.core.llm import UsageSink
 from src.core.llm_provider import LLMProvider
 from src.cv import master_cv_manager as mgr
@@ -37,6 +38,7 @@ ACCEPTED = {".pdf", ".docx", ".md", ".txt"}
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 ASSET_DIRNAME = "cvs"
 PARSED_DIRNAME = ".parsed"
+PREVIEW_DIRNAME = ".preview"
 LEGACY_ASSET_ID = re.compile(r"[a-f0-9]{24}")
 LEGACY_SOURCE_NAME = re.compile(r"[a-f0-9]{24}\.source\.(pdf|docx|md|txt)", re.IGNORECASE)
 
@@ -63,12 +65,12 @@ def store_cv(ws: Workspace, filename: str, data: bytes) -> CVAsset:
     _migrate_legacy_uploads(ws)
     asset_id = _content_id(data)
     duplicate = next((item for item in _uploaded_assets(ws) if item.id == asset_id), None)
-    if duplicate is not None:
-        return select_cv(ws, duplicate.id)
-    source = _storage_target(directory, safe_name, data)
-    tmp = directory / f".{safe_name}.uploading"
-    tmp.write_bytes(data)
-    tmp.replace(source)
+    if duplicate is None:
+        source = _storage_target(directory, safe_name, data)
+        tmp = directory / f".{safe_name}.uploading"
+        tmp.write_bytes(data)
+        tmp.replace(source)
+    document_files.save_upload_copy(ws, safe_name, data)
     return select_cv(ws, asset_id)
 
 
@@ -100,9 +102,14 @@ def list_cvs(ws: Workspace) -> list[CVAsset]:
         )
     assets.extend(uploaded)
     if ws.output_dir.exists():
-        generated = list(ws.output_dir.glob("*.docx")) + list(
-            (ws.output_dir / "cvs").glob("*.docx")
-        )
+        uploaded_ids = {item.id for item in uploaded}
+        # Copies of uploads kept in output/cvs/ are the same CV, not generated ones.
+        generated = [
+            path
+            for path in list(ws.output_dir.glob("*.docx"))
+            + list((ws.output_dir / "cvs").glob("*.docx"))
+            if not uploaded_ids or _content_id(path.read_bytes()) not in uploaded_ids
+        ]
         assets.extend(
             CVAsset(
                 id=f"generated:{path.name}",
@@ -159,6 +166,8 @@ def delete_cv(ws: Workspace, asset_id: str) -> None:
         path.with_suffix(path.suffix + ".bak").unlink(missing_ok=True)
     else:
         path = _source_path(ws, asset_id)
+        if asset.kind == "uploaded":
+            document_files.remove_upload_copies(ws, path.read_bytes())
         path.unlink()
         _parsed_path(ws, asset_id).unlink(missing_ok=True)
         if asset.kind == "generated":
@@ -213,6 +222,49 @@ async def ensure_selected_cv(ws: Workspace, usage_sink: UsageSink | None = None)
     return cv
 
 
+def source_file(ws: Workspace, asset_id: str) -> Path:
+    """The stored CV document exactly as uploaded or generated; never modified here."""
+    if asset_id == "master":
+        raise ValueError("The Master CV is structured data, not a document")
+    return _source_path(ws, asset_id)
+
+
+def working_copy(ws: Workspace, asset_id: str) -> Path:
+    """The file desktop apps open: the CV's copy in output/cvs/, so saves land there and the
+    stored upload is never changed. An existing copy of the same name keeps earlier edits."""
+    source = source_file(ws, asset_id)
+    directory = ws.output_dir / "cvs"
+    if source.parent.resolve() == directory.resolve():
+        return source
+    existing = directory / source.name
+    if existing.is_file():
+        return existing
+    return document_files.save_upload_copy(ws, source.name, source.read_bytes())
+
+
+def source_text(ws: Workspace) -> str | None:
+    """Full text of the selected CV's original document (None for the structured Master CV or
+    an unreadable file), so profiles read everything, not only what the parser extracted."""
+    if ws.active_cv_id is None or ws.active_cv_id == "master":
+        return None
+    try:
+        path = source_file(ws, ws.active_cv_id)
+        return extract_text(path.name, path.read_bytes())
+    except (OSError, ValueError):
+        return None
+
+
+def preview_file(ws: Workspace, asset_id: str) -> Path:
+    """A browser-viewable rendering of a stored CV: the file itself, or Word's PDF of a .docx."""
+    source = source_file(ws, asset_id)
+    if source.suffix.lower() != ".docx":
+        return source
+    preview = document_files.word_pdf_preview(source, _asset_dir(ws) / PREVIEW_DIRNAME)
+    if preview is None:
+        raise ValueError("Microsoft Word is needed to show this Word file; use Open in Word")
+    return preview
+
+
 def save_selected_cv(ws: Workspace, cv: MasterCV) -> None:
     """Persist structured edits against the currently selected CV."""
     if ws.active_cv_id is None or ws.active_cv_id == "master":
@@ -235,8 +287,7 @@ def extract_text(filename: str, data: bytes) -> str:
     elif suffix == ".docx":
         from docx import Document
 
-        doc = Document(io.BytesIO(data))
-        text = "\n".join(p.text for p in doc.paragraphs)
+        text = _docx_text(Document(io.BytesIO(data)))
     else:
         text = data.decode("utf-8", errors="replace")
     if len(text.strip()) < 100:
@@ -265,6 +316,22 @@ async def import_cv(
     if save:  # summaries are keyed by CV content, so a new CV naturally gets new ones
         save_selected_cv(ws, cv)
     return cv
+
+
+def _docx_text(doc: Any) -> str:
+    """Paragraphs and table rows in document order (CV layouts often sit in tables)."""
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    lines: list[str] = []
+    for child in doc.element.body.iterchildren():
+        if child.tag.endswith("}p"):
+            lines.append(Paragraph(child, doc).text)
+        elif child.tag.endswith("}tbl"):
+            for row in Table(child, doc).rows:
+                cells = list(dict.fromkeys(c.text.strip() for c in row.cells if c.text.strip()))
+                lines.append(" | ".join(cells))
+    return "\n".join(lines)
 
 
 def _validate_upload(filename: str, data: bytes) -> str:
@@ -457,15 +524,19 @@ async def tailor_to_job(
 ) -> tuple[TailoredCV, Path]:
     """Tailor the Master CV to `job` (steered by the job_matcher's verdict on it, then
     reviewed and revised), export it to .docx and check what an ATS reads from the file."""
+    progress.step("Reading your CV", total=9)
     master_cv = await ensure_selected_cv(ws, usage_sink)
     llm = ws.structured("quality", usage_sink, "CV tailoring")
     text = _job_text(job)
+    progress.step("Analysing the job description")
     jd = await _analysis(ws, text, llm)
     guidance = matcher_guidance(result.verdict if result is not None else _verdict(ws, job.id))
     tailored = await asyncio.to_thread(
         tailor, master_cv, text, llm, guidance, True, jd, emphasis, level
     )
+    progress.step("Exporting to Word")
     path = export_docx(tailored, _new_output_path(ws, _file_stem(master_cv, job)), template)
+    progress.step("Checking what an ATS reads from the file")
     keywords = tailored.matched_keywords + tailored.missing_keywords
     ws.output_dir.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=ws.output_dir) as source_dir:
@@ -519,7 +590,9 @@ async def export_general_cv(
     usage_sink: UsageSink | None = None,
 ) -> tuple[Path, int]:
     """Export every role from the selected CV as an editable, general Word CV."""
+    progress.step("Reading your CV", total=2)
     cv = await ensure_selected_cv(ws, usage_sink)
+    progress.step("Exporting to Word")
     name = re.sub(r"[^A-Za-z0-9]+", "_", cv.basics.name).strip("_") or "Candidate"
     path = export_docx(cv, _new_output_path(ws, f"{name}_General_CV"), template)
     return path, len(cv.experience)
@@ -536,15 +609,18 @@ async def write_cover_letter(
     document = tailored_documents.load(ws, tailored_cv_id, job.id) if tailored_cv_id else None
     if document is not None and not document.reviewed:
         raise ValueError("Review and save the imported CV before using it for a cover letter")
+    progress.step("Reading your CV", total=6)
     master_cv = document.tailored.cv if document else await ensure_selected_cv(ws, usage_sink)
     llm = ws.structured("quality", usage_sink, "Cover letter")
     text = _job_text(job)
+    progress.step("Analysing the job description")
     jd = await _analysis(ws, text, llm)
     letter = await asyncio.to_thread(
         write_letter, master_cv, jd, text, llm, motivation(ws, document.cv_id if document else None)
     )
     if not letter.paragraphs:
         raise ValueError("Every drafted paragraph was rejected by the guards; try again")
+    progress.step("Exporting to Word")
     path = _new_output_path(ws, f"{_file_stem(master_cv, job)}_cover_letter", "cover_letters")
     exported = export_cover_letter(letter, master_cv, path, template)
     from src.services import cover_letters

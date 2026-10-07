@@ -115,7 +115,10 @@ export function LearnFromLabels() {
           {s.accepted.map((p) => (
             <div key={p.id} className="flex items-start gap-1 text-[12px]">
               <Kind kind={p.kind} />
-              <span className="min-w-0 flex-1 text-muted">{p.text}</span>
+              <span className="min-w-0 flex-1 text-muted">
+                {p.text}
+                {p.auto && <span className="ml-1 text-[11px] text-faint">(added automatically from your reasons)</span>}
+              </span>
               <button
                 className="shrink-0 text-faint hover:text-bad"
                 title="Withdraw: searches stop using it (it will not be suggested again)"

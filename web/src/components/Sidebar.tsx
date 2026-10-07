@@ -8,8 +8,10 @@ import { EMPTY_QUERY, useSearch } from "../stores/searchStore";
 import { SourcePicker } from "./SourcePicker";
 import { ProfileDetails } from "./ProfileDetails";
 import { SummaryDialog } from "./SummaryDialog";
+import { TaskProgress, useTaskId } from "./TaskProgress";
 import { SearchHistory } from "./SearchHistory";
 import { TrackerPanel } from "./TrackerPanel";
+import { CVDocument } from "./CVDocument";
 import { CVEditor } from "./CVEditor";
 import { ChipInput, Field, Modal, Toggle } from "./ui";
 
@@ -116,6 +118,23 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
     },
     onError: () => { void qc.invalidateQueries({ queryKey: ["state"] }); },
   });
+  // Viewing a CV selects it but never parses it; the extracted details load on request.
+  const showCV = useMutation({
+    mutationFn: (item: CVAsset) => item.id === state?.cv_files.selected ? Promise.resolve(item) : api.selectCV(item.id),
+    onSuccess: (asset) => {
+      cacheSelection(asset);
+      s.set({ useCv: true, summary: null, outcome: null, profileKey: null });
+      void qc.invalidateQueries({ queryKey: ["profiles"] });
+    },
+  });
+  const viewCV = (item: CVAsset) => {
+    setEditingCV(item);
+    setEditableCV(null);
+    openCV.reset();
+    // Only the legacy Master CV (structured data, no file) opens in the editor.
+    if (item.kind === "master") openCV.mutate(item);
+    else showCV.mutate(item);
+  };
   const saveCV = useMutation({
     mutationFn: api.saveCV,
     onSuccess: (cv) => {
@@ -144,12 +163,14 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
       void qc.invalidateQueries({ queryKey: ["profiles"] });
     },
   });
+  const generalTask = useTaskId();
+  const buildTask = useTaskId();
   const generalCV = useMutation({
-    mutationFn: api.exportGeneralCV,
+    mutationFn: () => api.exportGeneralCV(generalTask.next()),
     onSuccess: () => { void qc.invalidateQueries({ queryKey: ["state"] }); },
   });
   const buildProfile = useMutation({
-    mutationFn: () => api.profileSummary(EMPTY_QUERY, true),
+    mutationFn: () => api.profileSummary(EMPTY_QUERY, true, false, buildTask.next()),
     onSuccess: (result) => {
       s.set({ useCv: true, summary: { summary: result.summary, fromMemory: result.from_memory }, profileKey: result.key });
       void qc.invalidateQueries({ queryKey: ["profiles"] });
@@ -255,7 +276,7 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
                     aria-current={item.id === state?.cv_files.selected ? "true" : undefined}
                     title={item.filename}
                     disabled={openCV.isPending || deleteCV.isPending || buildProfile.isPending}
-                    onClick={() => { setEditingCV(item); setEditableCV(null); openCV.mutate(item); }}
+                    onClick={() => viewCV(item)}
                     className={`block min-w-0 flex-1 rounded-md border px-2 py-1 text-left text-[11px] disabled:opacity-50 ${
                       item.id === state?.cv_files.selected ? "border-accent bg-accent-bg" : "border-border bg-surface hover:border-accent"
                     }`}
@@ -295,6 +316,7 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
               {buildProfile.isPending ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
               {buildProfile.isPending ? "Building profile…" : profiles.data?.profiles.some((record) => record.role_family === "any") ? "Edit general profile" : "Build profile from selected CV"}
             </button>
+            {buildProfile.isPending && <TaskProgress id={buildTask.id} />}
             {buildProfile.error && <p className="text-[11px] text-bad">{buildProfile.error.message}</p>}
             {profiles.isPending ? (
               <p className="text-[11px] text-faint">Loading profiles…</p>
@@ -358,6 +380,7 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
               Export CV
             </button>
             <p className="text-[10px] text-faint">Includes every role in the selected CV. Review parsed facts and edit the Word file before applying.</p>
+            {generalCV.isPending && <TaskProgress id={generalTask.id} />}
             {generalCV.data && <a className="block text-[11px] text-accent hover:underline" href={generalCV.data.download_url}>Download CV · {generalCV.data.roles} roles</a>}
             {generalCV.isError && <p className="text-[11px] text-bad">{(generalCV.error as Error).message}</p>}
           </div>
@@ -539,14 +562,16 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
       </details>
       <Modal
         open={!!editingCV}
-        onClose={() => { setEditingCV(null); setEditableCV(null); openCV.reset(); saveCV.reset(); }}
+        onClose={() => { setEditingCV(null); setEditableCV(null); openCV.reset(); showCV.reset(); saveCV.reset(); }}
         title={editingCV?.filename ?? "CV"}
-        resizable
+        document
       >
-        {openCV.isPending ? (
-          <p className="flex items-center gap-2 text-[12px] text-muted"><Loader2 size={14} className="animate-spin" /> Loading and reading this CV…</p>
+        {editingCV && editingCV.kind !== "master" ? (
+          showCV.error ? <p className="p-5 text-[12px] text-bad">{showCV.error.message}</p> : <CVDocument asset={editingCV} />
+        ) : openCV.isPending ? (
+          <p className="flex items-center gap-2 p-5 text-[12px] text-muted"><Loader2 size={14} className="animate-spin" /> Reading this CV…</p>
         ) : openCV.error ? (
-          <p className="text-[12px] text-bad">{openCV.error.message}</p>
+          <p className="p-5 text-[12px] text-bad">{openCV.error.message}</p>
         ) : editableCV ? (
           <CVEditor cv={editableCV} saving={saveCV.isPending} error={saveCV.error?.message ?? null} onSave={(cv) => saveCV.mutate(cv)} />
         ) : null}

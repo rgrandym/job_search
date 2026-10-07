@@ -4,9 +4,12 @@
 #   bash scripts/dev.sh              # restart both, stream logs, Ctrl-C stops both
 #   bash scripts/dev.sh --stop       # stop both and exit
 #   bash scripts/dev.sh --install    # force re-install of Python and npm dependencies
+#   bash scripts/dev.sh --no-update  # skip the Claude Code / Codex CLI version check
 #
 # Every run first stops whatever is listening on the backend/frontend ports (including a
 # previous run of this script), so there are never two servers fighting over a port.
+# The Claude Code and Codex CLIs (the "claude_code" / "codex" model providers) are updated
+# when older than the latest release, since new models need recent CLIs; offline, skipped.
 # Env overrides: CONDA_ENV (job_search), BACKEND_PORT (8000), FRONTEND_PORT (5173).
 
 set -euo pipefail
@@ -19,12 +22,14 @@ RUN_DIR="$ROOT/.run"
 LOG_DIR="$RUN_DIR/logs"
 FORCE_INSTALL=0
 STOP_ONLY=0
+CLI_UPDATE=1
 
 for arg in "$@"; do
   case "$arg" in
     --install) FORCE_INSTALL=1 ;;
     --stop) STOP_ONLY=1 ;;
-    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+    --no-update) CLI_UPDATE=0 ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
     *) echo "Unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -115,6 +120,58 @@ if [[ "$FORCE_INSTALL" == 1 || ! -d web/node_modules ]] || [[ web/package.json -
   (cd web && npm install --silent)
 fi
 
+# ------------------------------------------------------------------ model CLIs
+
+# The "claude_code" and "codex" providers run these CLIs, and new models need recent ones.
+# Each is found the way the backend finds it (same PATH, same fallbacks) and updated through
+# the install it came from when it is older than the latest release.
+version_of() { "$1" --version 2>/dev/null | grep -Eo '[0-9]+(\.[0-9]+)+' | head -1; }
+older_than() { python -c "import sys; v = lambda s: tuple(int(p) for p in s.split('.')); sys.exit(v(sys.argv[1]) >= v(sys.argv[2]))" "$1" "$2"; }
+
+update_cli() {  # label binary npm-package cask
+  local label="$1" bin="$2" package="$3" cask="$4" real current latest
+  [[ -z "$bin" ]] && return 0  # optional provider; Settings explains how to install it
+  current="$(version_of "$bin")"
+  latest="$(npm view "$package" version --fetch-timeout=5000 --fetch-retries=0 2>/dev/null || true)"
+  if [[ -z "$current" || -z "$latest" ]]; then
+    warn "Could not check the $label version (offline?); using $bin ${current:-unknown}"
+    return 0
+  fi
+  if ! older_than "$current" "$latest"; then
+    log "$label: $current (up to date)"
+    return 0
+  fi
+  log "Updating $label $current → $latest ($bin)"
+  real="$(python -c "import os, sys; print(os.path.realpath(sys.argv[1]))" "$bin")"
+  if [[ "$real" == */lib/node_modules/"$package"/* ]]; then
+    # Install into this copy's own npm prefix: a bare `npm -g` or `claude update` may update
+    # another copy (e.g. one in a different conda env) and leave this one old.
+    npm install -g --silent --prefix "${real%%/lib/node_modules/*}" "$package@latest"
+  elif [[ "$real" == */Caskroom/"$cask"/* ]]; then
+    brew upgrade --cask "$cask"
+  elif [[ "$real" == */extensions/openai.chatgpt-* ]] && command -v code >/dev/null; then
+    code --install-extension openai.chatgpt --force >/dev/null  # the bundled CLI comes with it
+  elif [[ "$label" == "Claude Code CLI" ]]; then
+    "$bin" update
+  else
+    false
+  fi || { warn "$label could not be updated here; update it by hand"; return 0; }
+  log "$label: $(version_of "$(command -v "$(basename "$bin")" || echo "$bin")")"
+}
+
+codex_bin() {  # as src/core/llm/codex_backend.codex_binary: PATH, newest extension, the app
+  command -v codex && return
+  # shellcheck disable=SC2012
+  ls -t "$HOME"/.vscode/extensions/openai.chatgpt-*/bin/*/codex \
+    "$HOME"/.cursor/extensions/openai.chatgpt-*/bin/*/codex \
+    /Applications/Codex.app/Contents/Resources/codex 2>/dev/null | head -1
+}
+
+if [[ "$CLI_UPDATE" == 1 ]]; then
+  update_cli "Claude Code CLI" "$(command -v claude || true)" "@anthropic-ai/claude-code" "claude-code"
+  update_cli "Codex CLI" "$(codex_bin || true)" "@openai/codex" "codex"
+fi
+
 [[ -f .env ]] || warn "No .env file. Set API keys in the app's Settings, or copy .env.example to .env"
 
 # ------------------------------------------------------------------ start
@@ -167,7 +224,11 @@ wait_for "http://localhost:$FRONTEND_PORT/" "Frontend" "$LOG_DIR/frontend.log"
 log "App: http://localhost:$FRONTEND_PORT   (API docs: http://localhost:$BACKEND_PORT/docs)"
 log "Logs: $LOG_DIR. Press Ctrl-C to stop both."
 if [[ "${OPEN_BROWSER:-1}" == 1 ]] && command -v open >/dev/null; then
-  open "http://localhost:$FRONTEND_PORT" || true
+  if [[ "$(uname -s)" == Darwin ]]; then
+    open -a "Google Chrome" "http://localhost:$FRONTEND_PORT" || open "http://localhost:$FRONTEND_PORT" || true
+  else
+    open "http://localhost:$FRONTEND_PORT" || true
+  fi
 fi
 
 # Stream both logs with a prefix; exit (and clean up) if either server dies.

@@ -30,7 +30,9 @@ class Workspace:
         self._cli_login: dict[str, tuple[bool, float]] = {}  # provider -> (ok, checked_at)
         self.llm_config_path = data / "llm_config.json"
         self.llm = self._load_llm_config()
-        self.memory = ProfileMemory(data / "profile_summaries.json")
+        self.memory = ProfileMemory(
+            data / "profile_summaries.json", self.settings.output_dir / "profiles"
+        )
         self.master_cv: MasterCV | None = (
             mgr.load(self.settings.master_cv_path)
             if self.settings.master_cv_path.exists()
@@ -59,12 +61,17 @@ class Workspace:
         self._saved_keys = keys
         return cfg
 
-    def set_llm_config(self, update: dict[str, Any], api_key: str | None = None) -> LLMConfig:
-        """Change provider/models (and optionally store an API key for that provider)."""
+    def set_llm_config(
+        self, update: dict[str, Any], api_key: str | None = None, profile_api_key: str | None = None
+    ) -> LLMConfig:
+        """Change provider/models (and optionally store an API key for that provider, and for
+        the profile's own provider)."""
         keys = self._saved_keys
         provider: LLMProviderName = update.get("provider", self.llm.provider)
         if api_key:
             keys[provider] = api_key
+        if profile_api_key and update.get("profile_provider"):
+            keys[update["profile_provider"]] = profile_api_key
         cfg = LLMConfig.from_settings(self.settings, provider)
         merged = {**self.llm.model_dump(exclude={"api_key", "provider"}), **update}
         cfg = cfg.model_copy(update={k: v for k, v in merged.items() if k != "api_key"})
@@ -81,18 +88,34 @@ class Workspace:
         """API key saved from the UI for `provider` (env keys are not returned)."""
         return self._saved_keys.get(provider)
 
+    def provider_config(self, provider: LLMProviderName) -> LLMConfig:
+        """`self.llm` on another provider, with that provider's saved or env credential."""
+        if provider == self.llm.provider:
+            return self.llm
+        key = self.saved_key(provider)
+        env_key = LLMConfig.from_settings(self.settings, provider).api_key
+        return self.llm.model_copy(
+            update={"provider": provider, "api_key": SecretStr(key) if key else env_key}
+        )
+
     def llm_ready(self) -> bool:
-        """Models chosen and credentials available (Anthropic may use env/CLI credentials)."""
+        """Models chosen and credentials available, for the profile's provider too."""
         if not (self.llm.quality_model and self.llm.screening_model):
             return False
-        if self.llm.api_key is not None:
+        return self.provider_ready(self.llm.provider) and self.provider_ready(
+            self.llm.profile_provider_for()
+        )
+
+    def provider_ready(self, provider: LLMProviderName) -> bool:
+        """Credentials available for `provider` (Anthropic may use env/CLI credentials)."""
+        if self.provider_config(provider).api_key is not None:
             return True
-        if self.llm.provider == "anthropic":
+        if provider == "anthropic":
             from src.core.llm.anthropic_backend import has_ambient_credentials
 
             return has_ambient_credentials()
-        if self.llm.provider in ("codex", "claude_code"):
-            return self._cli_logged_in(self.llm.provider)
+        if provider in ("codex", "claude_code"):
+            return self._cli_logged_in(provider)
         return False
 
     def _cli_logged_in(self, provider: str) -> bool:
@@ -116,7 +139,10 @@ class Workspace:
         usage_sink: UsageSink | None = None,
         purpose: str = "structured output",
     ) -> LLMProvider:
-        return make_structured(self.llm, role, usage_sink, purpose)
+        cfg = self.llm
+        if role == "profile":
+            cfg = self.provider_config(cfg.profile_provider_for())
+        return make_structured(cfg, role, usage_sink, purpose)
 
     def chat(self, role: Role) -> ChatModel:
         return make_chat(self.llm, role)

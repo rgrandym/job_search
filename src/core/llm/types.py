@@ -9,10 +9,11 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from src.core.config import LLMProviderName, Settings
 
-# quality: rare, accuracy-critical work (profile summary, CV parsing and tailoring, cover
-# letters, second opinions, the assistant). screening: the job_matcher's first pass, hundreds
-# of calls per search.
-Role = Literal["quality", "screening"]
+# quality: rare, accuracy-critical work (CV parsing and tailoring, cover letters, second
+# opinions, the assistant). screening: the job_matcher's first pass, hundreds of calls per
+# search. profile: the profile summary, which every verdict is judged against; it uses the
+# quality model unless a profile model is set.
+Role = Literal["quality", "screening", "profile"]
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 
 
@@ -41,6 +42,11 @@ class LLMConfig(BaseModel):
     screening_model: str
     quality_effort: Effort = "medium"
     screening_effort: Effort = "medium"
+    profile_model: str = Field("", description="Empty: the profile uses the quality model")
+    profile_effort: Effort = "high"
+    profile_provider: LLMProviderName | None = Field(
+        None, description="Another provider for the profile model; None: `provider`"
+    )
     max_tokens: int = 16000
     refusal_fallback: bool = True
     api_key: SecretStr | None = None
@@ -49,10 +55,20 @@ class LLMConfig(BaseModel):
     )
 
     def model_for(self, role: Role) -> str:
-        return self.quality_model if role == "quality" else self.screening_model
+        if role == "profile" and self.profile_model:
+            return self.profile_model
+        return self.screening_model if role == "screening" else self.quality_model
 
     def effort_for(self, role: Role) -> Effort:
-        return self.quality_effort if role == "quality" else self.screening_effort
+        if role == "profile" and self.profile_model:
+            return self.profile_effort
+        return self.screening_effort if role == "screening" else self.quality_effort
+
+    def profile_provider_for(self) -> LLMProviderName:
+        """The provider that builds the profile: its own only when a profile model is set."""
+        if self.profile_model and self.profile_provider:
+            return self.profile_provider
+        return self.provider
 
     def for_role(self, role: Role) -> LLMConfig:
         """The config one client uses: its role's effort in `effort`."""
@@ -76,6 +92,9 @@ class LLMConfig(BaseModel):
             screening_model=s.screening_model,
             quality_effort=s.quality_effort,
             screening_effort=s.screening_effort,
+            profile_model=s.profile_model,
+            profile_effort=s.profile_effort,
+            profile_provider=s.profile_provider,
             max_tokens=s.llm_max_tokens,
             refusal_fallback=s.llm_refusal_fallback,
             api_key=key,

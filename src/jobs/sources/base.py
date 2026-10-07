@@ -23,12 +23,42 @@ from urllib.robotparser import RobotFileParser
 import httpx
 
 from src.core.config import Settings, get_settings
+from src.core.llm.calls import call_group, is_cancelled
 from src.cv.models import WorkArrangement
 from src.jobs.models import JobPosting
 
 
 class SourceError(RuntimeError):
     """A source could not be queried (missing key, HTTP error, disallowed by robots.txt)."""
+
+
+def _check_stopped() -> None:
+    """Refuse new requests once the search that started them was stopped (its `call_group`
+    is cancelled), so an abandoned fetch ends at its next request instead of crawling on."""
+    if is_cancelled(call_group.get()):
+        raise SourceError("stopped")
+
+
+def pause(seconds: float) -> None:
+    """Sleep that ends early (raising SourceError) when the search is stopped."""
+    end = time.monotonic() + seconds
+    while (left := end - time.monotonic()) > 0:
+        _check_stopped()
+        time.sleep(min(0.5, left))
+    _check_stopped()
+
+
+def slow_down_status(exc: Exception) -> tuple[int, float | None] | None:
+    """(status, Retry-After seconds) when a failed request was the site asking us to slow
+    down (429, or LinkedIn's 999); None for any other failure."""
+    cause = exc.__cause__
+    if not isinstance(cause, httpx.HTTPStatusError):
+        return None
+    status = cause.response.status_code
+    if status not in (429, 999):
+        return None
+    after = cause.response.headers.get("retry-after", "")
+    return status, float(after) if after.strip().isdigit() else None
 
 
 class HttpFetcher:
@@ -59,6 +89,7 @@ class HttpFetcher:
         if check_robots and not self._allowed(url):
             raise SourceError(f"robots.txt disallows {url}")
         self._wait_turn(host)
+        _check_stopped()
         try:
             resp = self.client.get(url, **kwargs)
             resp.raise_for_status()
@@ -72,6 +103,7 @@ class HttpFetcher:
         if check_robots and not self._allowed(url):
             raise SourceError(f"robots.txt disallows {url}")
         self._wait_turn(host)
+        _check_stopped()
         try:
             resp = self.client.post(url, **kwargs)
             resp.raise_for_status()
@@ -88,6 +120,16 @@ class HttpFetcher:
             self._last_hit[host] = slot
         if slot > now:
             time.sleep(slot - now)
+
+    def allowed(self, url: str) -> bool:
+        """Whether `url`'s robots.txt lets this app read it (for fetches outside this client)."""
+        return self._allowed(url)
+
+    def wait_turn(self, host: str) -> None:
+        """Keep the per-host delay for a request made outside this client (the browser)."""
+        _check_stopped()
+        self._wait_turn(host)
+        _check_stopped()
 
     def _allowed(self, url: str) -> bool:
         parts = urlsplit(url)

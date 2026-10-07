@@ -1,7 +1,51 @@
 import { X } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type TextareaHTMLAttributes } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "../lib/utils";
+
+/** A text box that wraps and grows with its text, so nothing is hidden; drag its corner to make
+ *  it taller. `singleLine` keeps it to one paragraph (Enter does not add a line break). */
+export function AutoText({ value, onChange, singleLine, minRows = 1, className, ...rest }:
+  Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, "value" | "onChange" | "rows"> & {
+    value: string;
+    onChange: (value: string) => void;
+    singleLine?: boolean;
+    minRows?: number;
+  }) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  const fit = () => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight + el.offsetHeight - el.clientHeight}px`;
+  };
+  useLayoutEffect(fit, [value]);
+  useEffect(() => {
+    // Re-fit when the box gets narrower or wider (resizable dialogs, window resizes).
+    const el = ref.current;
+    if (!el) return;
+    let width = el.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (el.clientWidth !== width) {
+        width = el.clientWidth;
+        fit();
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  return (
+    <textarea
+      ref={ref}
+      rows={minRows}
+      value={value}
+      className={cn("input resize-y overflow-hidden leading-snug", className)}
+      onChange={(e) => onChange(singleLine ? e.target.value.replace(/\n/g, " ") : e.target.value)}
+      onKeyDown={singleLine ? (e) => e.key === "Enter" && e.preventDefault() : undefined}
+      {...rest}
+    />
+  );
+}
 
 /** Free-text list input: Enter or comma adds a chip, Backspace removes the last. */
 export function ChipInput({
@@ -22,8 +66,8 @@ export function ChipInput({
   return (
     <div className="input flex min-h-[34px] min-w-0 max-w-full flex-wrap items-center gap-1 py-1">
       {value.map((v) => (
-        <span key={v} className="chip min-w-0 max-w-full bg-accent-bg text-fg">
-          <span className="truncate">{v}</span>
+        <span key={v} className="chip min-w-0 max-w-full rounded-md bg-accent-bg text-left text-fg">
+          <span className="min-w-0 [overflow-wrap:anywhere]">{v}</span>
           <button className="shrink-0" aria-label={`Remove ${v}`} onClick={() => onChange(value.filter((x) => x !== v))}>
             <X size={11} />
           </button>
@@ -165,6 +209,7 @@ export function Modal({
   children,
   wide,
   resizable,
+  document: isDocument,
   headerAction,
 }: {
   open: boolean;
@@ -173,6 +218,8 @@ export function Modal({
   children: ReactNode;
   wide?: boolean;
   resizable?: boolean;
+  /** Full-window frame whose child owns the scrolling (the CV page editor). */
+  document?: boolean;
   headerAction?: ReactNode;
 }) {
   useEffect(() => {
@@ -182,29 +229,35 @@ export function Modal({
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
   if (!open) return null;
+  const header = (
+    <div className={cn("flex items-center justify-between gap-3 bg-panel", isDocument ? "border-b border-border px-4 py-2.5" : "sticky top-0 z-10 mb-4 pb-2")}>
+      <h2 className="truncate text-[15px] font-semibold">{title}</h2>
+      <div className="flex shrink-0 items-center gap-3">
+        {headerAction}
+        <button aria-label="Close" className="text-faint hover:text-fg" onClick={onClose}>
+          <X size={16} />
+        </button>
+      </div>
+    </div>
+  );
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onMouseDown={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-2 sm:p-4" onMouseDown={onClose}>
       <div
         role="dialog"
         aria-label={title}
         className={cn(
-          "card max-h-[85vh] overflow-y-auto p-5 shadow-2xl scroll-thin",
-          resizable
+          "card shadow-2xl",
+          isDocument
+            ? "flex h-[96vh] w-[min(1180px,100%)] flex-col overflow-hidden"
+            : "max-h-[85vh] overflow-y-auto p-5 scroll-thin",
+          !isDocument && (resizable
             ? "h-[70vh] w-[92vw] min-h-64 min-w-72 max-w-[calc(100vw-2rem)] resize overflow-auto"
-            : wide ? "w-full max-w-2xl" : "w-full max-w-md",
+            : wide ? "w-full max-w-2xl" : "w-full max-w-md"),
         )}
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <div className="sticky top-0 z-10 mb-4 flex items-center justify-between gap-3 bg-panel pb-2">
-          <h2 className="text-[15px] font-semibold">{title}</h2>
-          <div className="flex items-center gap-3">
-            {headerAction}
-            <button aria-label="Close" className="text-faint hover:text-fg" onClick={onClose}>
-              <X size={16} />
-            </button>
-          </div>
-        </div>
-        {children}
+        {header}
+        {isDocument ? <div className="min-h-0 flex-1">{children}</div> : children}
       </div>
     </div>,
     document.body,

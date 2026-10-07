@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 
+from src.core import progress
 from src.core.llm_provider import LLMProvider
 from src.cv.claims import overclaim
 from src.cv.models import (
@@ -172,8 +173,10 @@ def write_letter(
 ) -> CoverLetter:
     """Draft a guarded letter, retrying once for structure or unsupported claims."""
     feedback = ""
-    for _ in range(2):
+    for attempt in range(2):
+        progress.step("Drafting the letter" if attempt == 0 else "Redrafting to fix the checks")
         draft = draft_letter(master, jd, jd_text, llm, motivation, feedback)
+        progress.step("Checking every claim against your CV")
         letter = apply_letter(master, draft, jd, jd_text)
         problems = _letter_problems(draft, letter, jd)
         if not problems:

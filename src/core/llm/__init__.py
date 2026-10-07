@@ -10,8 +10,11 @@ Providers: "anthropic" (Claude, official SDK), "openai" and "openrouter" (Chat C
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
+from pydantic import BaseModel
+
+from src.core import progress
 from src.core.llm.types import (
     ChatMessage,
     ChatModel,
@@ -46,13 +49,37 @@ __all__ = [
 ]
 
 
+T = TypeVar("T", bound=BaseModel)
+
+
+class _Reported:
+    """Marks each call as in flight in the current task's progress (`core.progress`)."""
+
+    def __init__(self, inner: LLMProvider, purpose: str, model: str) -> None:
+        self.inner, self.purpose, self.model = inner, purpose, model
+
+    def generate(self, *, system: str, prompt: str, output_model: type[T]) -> T:
+        with progress.model_call(self.purpose, self.model):
+            return self.inner.generate(system=system, prompt=prompt, output_model=output_model)
+
+
 def make_structured(
     cfg: LLMConfig,
     role: Role = "screening",
     usage_sink: UsageSink | None = None,
     purpose: str = "structured output",
 ) -> LLMProvider:
-    """Structured-output provider for `cfg.provider`."""
+    """Structured-output provider for `cfg.provider`, reporting its calls as task progress."""
+    return _Reported(_backend(cfg, role, usage_sink, purpose), purpose, cfg.model_for(role))
+
+
+def _backend(
+    cfg: LLMConfig,
+    role: Role = "screening",
+    usage_sink: UsageSink | None = None,
+    purpose: str = "structured output",
+) -> LLMProvider:
+    """The provider-specific structured backend."""
     if cfg.provider == "codex":
         from src.core.llm.codex_backend import CodexStructured
 

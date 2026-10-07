@@ -18,6 +18,7 @@ import type {
   OutcomeStage,
   QueuedEvidence,
   SearchIntent,
+  TaskProgress,
   SavedJob,
   ProfileRecord,
   SourceYield,
@@ -38,6 +39,12 @@ import type {
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await checked(path, init);
+  return res.json() as Promise<T>;
+}
+
+/** Fetch, turning an error response into an Error carrying the server's detail. */
+async function checked(path: string, init?: RequestInit): Promise<Response> {
   const res = await fetch(path, init);
   if (!res.ok) {
     let detail = res.statusText;
@@ -49,7 +56,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new Error(detail);
   }
-  return res.json() as Promise<T>;
+  return res;
 }
 
 /** POST to a streaming search endpoint and deliver each NDJSON event as it arrives;
@@ -84,6 +91,15 @@ const searchStream = (body: SearchRequest, onEvent: (event: SearchStreamEvent) =
 /** Judge the shortlisted jobs a stopped or partly failed search left unjudged. */
 const continueStream = (body: { history_id: string; run_id: string }, onEvent: (event: SearchStreamEvent) => void) =>
   streamOutcome("/api/search/continue/stream", body, onEvent);
+/** Read full postings (or judge pasted text) for results whose requirements were not checked. */
+const recheckStream = (
+  body: { history_id: string; run_id: string; job_ids?: string[]; description?: string },
+  onEvent: (event: SearchStreamEvent) => void,
+) => streamOutcome("/api/search/recheck/stream", body, onEvent);
+
+/** `?progress_id=…` so the server reports this request's steps (see `TaskProgress`). */
+const tracked = (path: string, progressId?: string) =>
+  progressId ? `${path}${path.includes("?") ? "&" : "?"}progress_id=${encodeURIComponent(progressId)}` : path;
 
 const json = (method: string, body: unknown): RequestInit => ({
   method,
@@ -134,7 +150,11 @@ export const api = {
     screening_model: string;
     quality_effort: Effort;
     screening_effort: Effort;
+    profile_model: string;
+    profile_effort: Effort;
+    profile_provider: Provider | null;
     api_key?: string;
+    profile_api_key?: string;
   }) => request<LLMView>("/api/llm", json("PUT", body)),
   codexStatus: () => request<CodexStatus>("/api/codex/status"),
   codexUsage: () => request<CodexUsage>("/api/codex/usage"),
@@ -152,11 +172,18 @@ export const api = {
   saveCV: (cv: MasterCV) => request<MasterCV>("/api/cv", json("PUT", cv)),
   deleteCV: (assetId: string) =>
     request<{ deleted: boolean }>(`/api/cv/${encodeURIComponent(assetId)}`, { method: "DELETE" }),
-  exportGeneralCV: () =>
-    request<{ download_url: string; roles: number }>("/api/cv/general", { method: "POST" }),
-  profileSummary: (query: SearchQuery, use_cv: boolean, refresh = false) =>
+  exportGeneralCV: (progressId?: string) =>
+    request<{ download_url: string; roles: number }>(tracked("/api/cv/general", progressId), { method: "POST" }),
+  taskProgress: (taskId: string) => request<TaskProgress>(`/api/progress/${encodeURIComponent(taskId)}`),
+  cvSourceUrl: (assetId: string) => `/api/cv/source/${encodeURIComponent(assetId)}`,
+  /** The CV as the browser can show it (Word files arrive as Word's own PDF rendering). */
+  cvPreview: async (assetId: string) =>
+    (await checked(`/api/cv/preview/${encodeURIComponent(assetId)}`)).blob(),
+  openCVSource: (assetId: string, app: "default" | "word" = "default") =>
+    request<{ opened: boolean }>(`/api/cv/open/${encodeURIComponent(assetId)}?app=${app}`, { method: "POST" }),
+  profileSummary: (query: SearchQuery, use_cv: boolean, refresh = false, progressId?: string) =>
     request<{ summary: ProfileSummary; from_memory: boolean; key: string }>(
-      "/api/profile-summary",
+      tracked("/api/profile-summary", progressId),
       json("POST", { query, use_cv, refresh }),
     ),
   search: (body: SearchRequest) => request<SearchOutcome>("/api/search", json("POST", body)),
@@ -168,6 +195,12 @@ export const api = {
   clearHistory: () => request<{ cleared: boolean }>("/api/history", { method: "DELETE" }),
   searchStream,
   continueStream,
+  recheckStream,
+  removeResult: (jobId: string, historyId: string | null) =>
+    request<{ removed: boolean }>(
+      `/api/results/${encodeURIComponent(jobId)}${historyId ? `?history_id=${encodeURIComponent(historyId)}` : ""}`,
+      { method: "DELETE" },
+    ),
   stopSearch: (runId: string) =>
     request<{ stopped: boolean }>(`/api/search/stop/${encodeURIComponent(runId)}`, { method: "POST" }),
   profiles: () =>
@@ -201,8 +234,8 @@ export const api = {
     request<QueuedEvidence>(`/api/evidence/${encodeURIComponent(id)}`, json("POST", { accept, text })),
   editProfile: (key: string, summary: ProfileSummary) =>
     request<ProfileRecord>(`/api/profiles/${encodeURIComponent(key)}`, json("PUT", summary)),
-  refreshProfile: (key: string) =>
-    request<ProfileRecord>(`/api/profiles/refresh/${encodeURIComponent(key)}`, { method: "POST" }),
+  refreshProfile: (key: string, progressId?: string) =>
+    request<ProfileRecord>(tracked(`/api/profiles/refresh/${encodeURIComponent(key)}`, progressId), { method: "POST" }),
   deleteProfile: (key: string) =>
     request<{ deleted: boolean }>(`/api/profiles/${encodeURIComponent(key)}`, { method: "DELETE" }),
   claudeCodeUsage: () => request<ClaudeCodeUsage>("/api/claude-code/usage"),
@@ -219,7 +252,7 @@ export const api = {
   sourceYield: () => request<SourceYield[]>("/api/sources/yield"),
   tailor: (jobId: string, template: string, result?: MatchResult,
     emphasis: "auto" | "leadership" | "hands_on" = "auto",
-    level: "auto" | "senior" | "junior" = "auto") =>
+    level: "auto" | "senior" | "junior" = "auto", progressId?: string) =>
     request<{
       document_id: string;
       download_url: string;
@@ -233,7 +266,7 @@ export const api = {
       rejections: Rejection[];
       tracking: JobTracking | null;
     }>(
-      `/api/jobs/${encodeURIComponent(jobId)}/tailor`,
+      tracked(`/api/jobs/${encodeURIComponent(jobId)}/tailor`, progressId),
       json("POST", { template, result, emphasis, level }),
     ),
   tailoredCVs: (jobId: string) =>
@@ -246,9 +279,9 @@ export const api = {
       json("POST", { asset_id: assetId, result })),
   editTailoredCV: (id: string, edits: { headline?: string; summary?: string; bullets?: Record<string, string> }) =>
     request<TailoredCVView>(`/api/tailored-cvs/${encodeURIComponent(id)}`, json("PUT", edits)),
-  coverLetter: (jobId: string, template: string, result?: MatchResult, tailored_cv_id?: string) =>
+  coverLetter: (jobId: string, template: string, result?: MatchResult, tailored_cv_id?: string, progressId?: string) =>
     request<{ download_url: string; paragraphs: number; rejections: Rejection[] }>(
-      `/api/jobs/${encodeURIComponent(jobId)}/cover-letter`,
+      tracked(`/api/jobs/${encodeURIComponent(jobId)}/cover-letter`, progressId),
       json("POST", { template, result, tailored_cv_id }),
     ),
   coverLetters: () => request<CoverLetterView[]>("/api/cover-letters"),

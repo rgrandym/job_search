@@ -1,4 +1,5 @@
-"""Profile summaries: built by the quality model, remembered per (CV, role family).
+"""Profile summaries: built by the profile model (the quality model unless one is set),
+remembered per (CV, role family).
 
 The same CV searched for the same kind of role reuses the same summary, so screening is
 consistent across searches and costs one LLM call per role family, not one per search.
@@ -11,6 +12,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,28 +22,52 @@ from pydantic import BaseModel, TypeAdapter
 from src.core.llm_provider import LLMProvider
 from src.cv.models import MasterCV, TailoredCV
 from src.jobs.models import ProfileSummary, RoleFamily, SearchIntent, SearchQuery
-from src.tools.search_tools import board_terms, shares_role_words, title_core
+from src.tools.search_tools import board_terms, role_words, shares_role_words, title_core
 
-SUMMARY_SYSTEM = """You are the profile analyst of a job-search system. Read the entire CV and \
-write an accurate, evidence-based candidate profile that a screening agent will use to \
-score live vacancies. Precision matters more than flattery.
+SUMMARY_SYSTEM = """You are the profile analyst of a job-search system. Read the candidate's \
+whole CV and write an accurate, evidence-based profile. A screening agent scores live \
+vacancies against it and its role families decide which searches run, so it must be complete \
+as well as precise: a capability left out is a search never run.
+
+Inputs:
+- <source_document>: the CV exactly as the candidate wrote it, one [src-N] id per line. It is \
+the authority, and may hold sections the extract lacks: publications, patents, grants, talks, \
+awards, collaborations, teaching, consulting, committees.
+- <cv>: a structured extract with dates, role lengths and ids ([role-id], [bullet-id]). Use \
+it for dates and seniority. Where it omits or disagrees with the source document, the source \
+document wins.
+
+Work in this order:
+1. capabilities: inventory every distinct capability the document evidences, each with brief \
+evidence. Cover technical and scientific depth, methods and platforms, delivery (programmes, \
+budgets, timelines), line and matrix leadership, external work (clients, partners, CROs and \
+CDMOs, vendors, academic collaborators, investors, regulators), commercial contact (customer \
+projects, proposals, pitches, licensing, alliances, business or revenue the technical work \
+created), communication (publications, talks, training, writing) and strategy.
+2. publications: summarise the publication record, plus patents, grants, invited talks, \
+reviewing and awards: counts, lead-author share, span, themes, the outputs most relevant to \
+the target roles, and what it signals to employers (recognised expertise in a field, \
+scientific writing, peer and KOL network, industry collaborations, translational impact). \
+Take counts from the document; write "about" when you estimate. null when there are none.
+3. Only then derive roles, from the capabilities rather than from past job titles alone.
 
 Rules:
-- Every claim must trace to the CV. Never invent skills, experience or qualifications; mark \
-anything inferred with "(inferred)".
-- Distinguish direct experience (core_expertise, key_skills) from transferable experience \
-(transferable_strengths). Never let the second stand in for the first.
+- Every claim must trace to the document. Never invent skills, experience, employers, \
+numbers or qualifications; mark anything inferred with "(inferred)".
+- Direct vs transferable: core_expertise and key_skills are direct experience; \
+transferable_strengths is experience that carries into other functions. Never let the second \
+stand in for the first, and never drop it either: give 6-12 specific transferable strengths, \
+each naming its evidence.
 - key_skills.level: "expert" = used deeply/recently with results; "proficient" = solid \
 practical use; "familiar" = mentioned or light use. Cite the evidence briefly.
 - seniority and years_experience: current level, job family and total relevant years.
 - domains: technical domains and sectors/organisation types (pharma, biotech, CRO, CDMO, \
 academia, services, ...). leadership: line, matrix and external leadership with team size, \
 budget and decision scope. qualifications: degrees, PhD, registrations, certifications. \
-achievements: the 3-5 strongest quantified results.
-- target_roles: 2-4 obvious role families plus 2-4 credible adjacent ones, written as the \
-titles employers actually advertise (short, e.g. "Principal Scientist", "Head of Cell \
-Biology"), including equivalent titles a recruiter would consider. Do not force the \
-candidate into one narrow category.
+achievements: the 3-6 strongest results, quantified where the document quantifies them.
+- target_roles: 3-5 obvious titles plus 3-6 credible adjacent ones, written as employers \
+advertise them (short, e.g. "Principal Scientist", "Head of Cell Biology"), including \
+equivalent titles a recruiter would consider. Do not force the candidate into one category.
 - stretch_roles: plausible but would need a strong pitch.
 - not_a_fit: role types that superficially match keywords but are wrong for this person \
 (different discipline, wrong level, wrong focus). Give a reason for each.
@@ -48,24 +75,44 @@ candidate into one narrow category.
 - If the search intent names role titles, orient the summary towards that role family \
 without distorting the facts.
 - role_families: the roles to search, grouped. 2-4 "core" families (the work they do now), \
-0-2 "progression" families (the next level in the same function) and 0-3 "adjacent" \
-families: a different function the experience credibly carries into (for example a \
-scientific leader into business development, licensing, venture investment due diligence, \
-medical affairs or consulting). Each family: 2-4 titles as employers advertise them, 1-3 \
-short domain terms, `evidence` = the ids in square brackets from the CV that show the \
-transferable work (at least one for progression, two for adjacent), the main `gap`, and a \
-one-line `rationale` a hiring manager would accept. Propose an adjacent family only if a \
-hiring manager would genuinely shortlist this candidate; never one that needs a licence, \
-registration or degree they lack.
+0-2 "progression" families (the next level in the same function) and 0-4 "adjacent" \
+families (a different function the capabilities credibly carry into). Look for every route \
+a recruiter would accept where the evidence exists, for example: a technical expert who \
+worked with industry clients, partners or customers, scoped projects or grew collaborations \
+or business -> business development, alliance or partnership management, technical or \
+scientific sales, field application or solutions science; a scientific leader with a \
+publication record and networks -> scientific consulting, venture or investment due \
+diligence, technology transfer and licensing, medical or scientific affairs; programme and \
+portfolio delivery -> programme or portfolio management, operations, strategy. Direct \
+experience of the new function may be missing: that is the `gap`, not a reason to leave the \
+family out. Each family: 2-4 titles as employers advertise them, 1-3 short domain terms, \
+`evidence` = ids in square brackets showing the transferable work ([role-id], [bullet-id] \
+or [src-N] lines, e.g. publications; at least one for progression, two for adjacent), the \
+main `gap`, and a one-line `rationale` a hiring manager would accept. Propose an adjacent \
+family only if a hiring manager would genuinely shortlist this candidate; never one that \
+needs a licence, registration or degree they lack.
 - career_intent: the candidate's own goals. For every target area, return one adjacent \
 family with requested=true under the same evidence rules; if the CV offers no credible \
 route in, still return it, with the evidence you found and a gap saying what is missing. Use \
 the intent to orient families and wording, never to change the facts. Areas they want to \
-avoid belong in not_a_fit."""
+avoid belong in not_a_fit.
+- summary: 4-6 sentences a recruiter would find compelling and accurate: who they are, depth \
+and breadth, the publication record if any, and the directions they credibly fit."""
 
 # Evidence a family needs to be searched, by tier (ids that exist in the CV).
 MIN_EVIDENCE = {"core": 0, "progression": 1, "adjacent": 2}
-MAX_FAMILIES = {"core": 4, "progression": 2, "adjacent": 3}  # model-suggested, per tier
+MAX_FAMILIES = {"core": 4, "progression": 2, "adjacent": 4}  # model-suggested, per tier
+SOURCE_ID = re.compile(r"src-\d+")
+SOURCE_CHARS = 60_000  # the whole of any real CV; guards against pasted books
+
+
+def numbered_source(text: str) -> tuple[str, set[str]]:
+    """The original CV document as the summary reads it: one [src-N] id per non-empty line, so
+    families can cite content the structured extract has no field for (e.g. publications)."""
+    lines = [line.strip() for line in text[:SOURCE_CHARS].splitlines() if line.strip()]
+    ids = [f"src-{n}" for n in range(1, len(lines) + 1)]
+    body = "\n".join(f"[{i}] {line}" for i, line in zip(ids, lines, strict=True))
+    return body, set(ids)
 
 
 def profile_cv_text(cv: MasterCV) -> str:
@@ -131,20 +178,31 @@ def _family_problem(fam: RoleFamily) -> str | None:
 
 
 def check_families(
-    summary: ProfileSummary, cv: MasterCV | None, intent: SearchIntent | None = None
+    summary: ProfileSummary,
+    cv: MasterCV | None,
+    intent: SearchIntent | None = None,
+    source_ids: set[str] | None = None,
 ) -> ProfileSummary:
     """Code checks what it can verify before a family is searched: evidence ids must exist in
     the CV (two for adjacent, one for progression), and non-core families state a gap. Fit itself
     is the job_matcher's call, per posting. Failures are kept with
     `rejected` so the user sees why. Without a CV only core families can be searched.
-    Idempotent: re-running it on a stored summary with the same CV and intent changes nothing."""
+    Idempotent: re-running it on a stored summary with the same CV and intent changes nothing.
+    `source_ids` are the original document's [src-N] lines when the summary is built; later
+    re-checks (without the document) keep the src ids that were verified then."""
     ids = _cv_ids(cv) if cv is not None else set()
+
+    def known(i: str) -> bool:
+        if SOURCE_ID.fullmatch(i):
+            return cv is not None and (source_ids is None or i in source_ids)
+        return i in ids
+
     asked = bool(intent and intent.target_areas)
     counts = dict.fromkeys(MAX_FAMILIES, 0)
     out: list[RoleFamily] = []
     for fam in summary.role_families:
         requested = fam.requested and asked
-        evidence = [i.strip("[] ") for i in fam.evidence if i.strip("[] ") in ids]
+        evidence = [i.strip("[] ") for i in fam.evidence if known(i.strip("[] "))]
         fam = fam.model_copy(update={"evidence": evidence, "requested": requested})
         problem = _family_problem(fam)
         if cv is None and fam.tier != "core":
@@ -172,6 +230,60 @@ class ProfileRecord(BaseModel):
     intent_fingerprint: str = ""  # career intent the summary was (re)built with
 
 
+def profile_markdown(rec: ProfileRecord) -> str:
+    """A stored profile as a readable document (the copy kept in output/profiles/)."""
+    s = rec.summary
+    family = "General profile" if rec.role_family == "any" else rec.role_family
+    out = [f"# {s.headline}", "", f"*{family} · from {rec.cv_name or rec.cv_id or 'CV'}*", ""]
+    out += [f"**{s.seniority}** · {s.years_experience:g} years of experience", "", s.summary]
+
+    def section(title: str, items: list[str]) -> None:
+        if items:
+            out.extend(["", f"## {title}", *(f"- {item}" for item in items)])
+
+    if (p := s.publications) is not None:
+        counts = [f"{p.count} publications" if p.count else "", p.years]
+        if p.lead_author:
+            counts.insert(1, f"{p.lead_author} as first, last or corresponding author")
+        out += ["", "## Publications", " · ".join(c for c in counts if c), "", p.summary]
+        for title, items in [("Themes", p.themes), ("Most relevant", p.notable)]:
+            section(title, items)
+        section("Other outputs", p.other_outputs)
+        section("What the record shows employers", p.signals)
+    families = [
+        f"**{f.name}** ({f.tier}): {', '.join(f.titles)}"
+        + (f". {f.rationale}" if f.rationale else "")
+        + (f" Gap: {f.gap}" if f.gap else "")
+        + (f" *Not searched: {f.rejected}*" if f.rejected else "")
+        for f in s.role_families
+    ]
+    section("Role families", families)
+    section("Key skills", [f"{k.skill} ({k.level}): {k.evidence}" for k in s.key_skills])
+    for title, items in [
+        ("Core expertise", s.core_expertise),
+        ("Capabilities", s.capabilities),
+        ("Transferable strengths", s.transferable_strengths),
+        ("Domains and sectors", s.domains),
+        ("Leadership", s.leadership),
+        ("Qualifications", s.qualifications),
+        ("Key achievements", s.achievements),
+        ("Target roles", s.target_roles),
+        ("Stretch roles", s.stretch_roles),
+        ("Not a fit", s.not_a_fit),
+        ("Search keywords", s.search_keywords),
+    ]:
+        section(title, items)
+    return "\n".join(out).strip() + "\n"
+
+
+def profile_filename(rec: ProfileRecord) -> str:
+    """`<CV name>_<role family>.md`, safe for any file system."""
+    cv = Path(rec.cv_name or rec.cv_id or rec.cv_fingerprint).stem
+    family = "general" if rec.role_family == "any" else rec.role_family
+    stem = re.sub(r"[^A-Za-z0-9]+", "_", f"{cv}_{family}").strip("_")
+    return f"{stem[:120] or 'profile'}.md"
+
+
 def cv_fingerprint(cv: MasterCV | TailoredCV | None) -> str:
     """Stable hash of CV content ("no-cv" for filter-only searches)."""
     if cv is None:
@@ -192,12 +304,14 @@ def role_family(query: SearchQuery | None) -> str:
 class ProfileMemory:
     """JSON-file store of profile summaries."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, export_dir: Path | None = None) -> None:
         self.path = path
+        self.export_dir = export_dir  # readable copies, one Markdown file per profile
         self._records: dict[str, ProfileRecord] = {}
         if path.exists():
             items = TypeAdapter(list[ProfileRecord]).validate_json(path.read_bytes())
             self._records = {r.key: r for r in items}
+            self.export()  # profiles stored before the readable copies existed
 
     @staticmethod
     def key(owner: str, family: str) -> str:
@@ -304,6 +418,26 @@ class ProfileMemory:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         data = [r.model_dump(mode="json") for r in self._records.values()]
         self.path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        self.export()
+
+    def export(self) -> None:
+        """Write each profile to `export_dir` as Markdown; remove copies of deleted ones."""
+        if self.export_dir is None:
+            return
+        self.export_dir.mkdir(parents=True, exist_ok=True)
+        wanted: dict[str, str] = {}
+        for rec in self._records.values():
+            name = profile_filename(rec)
+            if name in wanted:  # same CV name and family under another CV id
+                name = f"{name[:-3]}_{hashlib.sha256(rec.key.encode()).hexdigest()[:6]}.md"
+            wanted[name] = profile_markdown(rec)
+        for stale in self.export_dir.glob("*.md"):
+            if stale.name not in wanted:
+                stale.unlink()
+        for name, text in wanted.items():
+            target = self.export_dir / name
+            if not target.is_file() or target.read_text(encoding="utf-8") != text:
+                target.write_text(text, encoding="utf-8")
 
 
 def summarize_profile(
@@ -314,8 +448,12 @@ def summarize_profile(
     refresh: bool = False,
     cv_id: str | None = None,
     intent: SearchIntent | None = None,
+    source_text: str | None = None,
 ) -> tuple[ProfileSummary, bool]:
     """Return (summary, from_memory). Builds and stores a new one on a miss or `refresh`.
+
+    `source_text` is the original CV document's text: the summary reads it in full (with the
+    structured extract for dates and ids), so nothing the extract omits is lost.
 
     With `cv_id`, the summary belongs to that CV whatever its current content, so CV edits
     never trigger a silent rebuild; only `refresh` does. The career `intent` orients role
@@ -342,9 +480,13 @@ def summarize_profile(
         )
     else:
         body = f"<cv>\n{profile_cv_text(master)}\n</cv>"
+    source_ids: set[str] | None = None
+    if master is not None and source_text and source_text.strip():
+        numbered, source_ids = numbered_source(source_text)
+        body = f"<source_document>\n{numbered}\n</source_document>\n\n" + body
     prompt = search + intent_text(intent) + body
     summary = llm.generate(system=SUMMARY_SYSTEM, prompt=prompt, output_model=ProfileSummary)
-    summary = check_families(summary, master, intent)
+    summary = check_families(summary, master, intent, source_ids or set())
     memory.put(owner, family, summary, fp, intent_fingerprint(intent))
     return summary, False
 
@@ -395,10 +537,40 @@ def family_terms(summary: ProfileSummary, widen: bool, limit: int) -> list[tuple
     return out[:limit]
 
 
+# The job noun says what kind of job, not which field: in life sciences every family is
+# "scientist". Families are told apart by the other (domain) words of a title.
+_ROLE_NOUNS = {
+    "scientist", "engineer", "analyst", "consultant", "technician", "researcher", "advisor",
+    "adviser", "expert", "professional", "executive", "partner", "fellow",
+}  # fmt: skip
+
+
 def family_of(title: str, families: list[RoleFamily]) -> str | None:
-    """The first searched family (core first) a job title belongs to, by role words."""
+    """The searched family a job title belongs to: the one sharing the most distinctive domain
+    words with it (from the family's titles and domain terms; a word fewer families use counts
+    more). Job nouns ("scientist") do not tell families apart. A title made only of words one
+    family has ("Principal Scientist") belongs to it; a title whose domain words no family has
+    ("Implementation Scientist") is left unattributed, unless a family made only of generic
+    words ("Business Development Manager") matches it whole. Ties go to core first."""
     order = sorted(families, key=lambda f: list(TIER_BUDGET).index(f.tier))
-    return next((f.name for f in order if shares_role_words(title, f.titles)), None)
+    vocab = {
+        f.name: set().union(*(role_words(t) for t in [*f.titles, *f.domain_terms]))
+        for f in order
+    }
+    spread = Counter(w for words in vocab.values() for w in words)
+    words = role_words(title)
+    domain = words - _ROLE_NOUNS
+    best, best_score = None, 0.0
+    for f in order:
+        score = sum(1 / spread[w] for w in domain & vocab[f.name])
+        if score > best_score:
+            best, best_score = f.name, score
+    if best is None and words:
+        best = next((f.name for f in order if words <= vocab[f.name]), None)
+    if best is not None:
+        return best
+    generic = [f for f in order if not vocab[f.name]]
+    return next((f.name for f in generic if shares_role_words(title, f.titles)), None)
 
 
 def pivot_titles(summary: ProfileSummary | None) -> list[str]:

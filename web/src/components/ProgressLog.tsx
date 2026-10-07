@@ -1,6 +1,56 @@
 import { CheckCircle2, Loader2, XCircle } from "lucide-react";
-import type { ProgressEvent } from "../lib/types";
+import type { Heartbeat, ProgressEvent } from "../lib/types";
 import { cn } from "../lib/utils";
+import { duration, ProgressBar, useNow } from "./TaskProgress";
+
+// The pipeline's stages in order; overall progress is the stage reached plus its own share done.
+const STAGES = ["cv", "summary", "plan", "capture", "prefilter", "enrich", "screen", "done"];
+
+/** Overall search progress (0-1) from the events so far: real counts within sources and
+ *  screening, stage position otherwise. */
+export function searchFraction(log: ProgressEvent[]): number {
+  const reached = Math.max(0, ...log.map((ev) => STAGES.indexOf(ev.stage)));
+  if (STAGES[reached] === "done") return 1;
+  let within = 0;
+  if (STAGES[reached] === "capture") {
+    const sources = new Map<string, string | undefined>();
+    for (const ev of log) if (ev.source) sources.set(ev.source, ev.status);
+    const finished = [...sources.values()].filter((status) => status !== "running").length;
+    within = sources.size ? finished / sources.size : 0;
+  } else if (STAGES[reached] === "screen") {
+    // The first pass fills most of the stage, the second opinions the rest.
+    const share = (phase?: string) => {
+      const latest = [...log].reverse().find((ev) => ev.stage === "screen" && ev.total && ev.phase === phase);
+      return latest?.total ? (latest.done ?? 0) / latest.total : 0;
+    };
+    const review = log.some((ev) => ev.phase === "review");
+    within = review ? 0.8 + 0.2 * share("review") : share(undefined);
+  }
+  return (reached + within) / (STAGES.length - 1);
+}
+
+/** Elapsed time, overall bar and what the server is waiting on, above a running search's log. */
+export function SearchStatus({ log, startedAt, beat }: { log: ProgressEvent[]; startedAt: number | null; beat: Heartbeat | null }) {
+  const now = useNow(true) * 1000;
+  const last = log.length ? log[log.length - 1].at : startedAt ?? now;
+  const quiet = (now - Math.max(last, beat?.at ?? 0)) / 1000;
+  return (
+    <div className="space-y-1 text-[11px]" aria-live="polite">
+      <div className="flex justify-between gap-2 text-faint">
+        <span>{Math.round(searchFraction(log) * 100)}% · stage {STAGE_LABEL[log[log.length - 1]?.stage] ?? "starting"}</span>
+        {startedAt && <span className="tabular-nums">{duration((now - startedAt) / 1000)}</span>}
+      </div>
+      <ProgressBar fraction={searchFraction(log)} />
+      <p className={cn("text-faint", quiet > 15 && "text-warn")}>
+        {quiet > 15
+          ? `No word from the server for ${duration(quiet)}. It may have stopped; check that it is running.`
+          : beat?.waiting_on
+            ? `Waiting for the model: ${beat.waiting_on}${beat.waiting_s !== undefined ? ` · ${duration(beat.waiting_s)}` : ""}`
+            : `Last update ${duration((now - last) / 1000)} ago`}
+      </p>
+    </div>
+  );
+}
 
 const STAGE_LABEL: Record<string, string> = {
   cv: "CV",
@@ -14,11 +64,11 @@ const STAGE_LABEL: Record<string, string> = {
 };
 
 /** Collapse the raw event stream into display rows: one row per source, one live row for
- *  screening progress, and every other message in order. */
+ *  screening progress (and one for the second opinions), and every other message in order. */
 function rows(log: ProgressEvent[]): ProgressEvent[] {
   const out: ProgressEvent[] = [];
   const bySource = new Map<string, number>();
-  let screenRow = -1;
+  const screenRows = new Map<string, number>();
   for (const ev of log) {
     if (ev.source) {
       const at = bySource.get(ev.source);
@@ -30,11 +80,15 @@ function rows(log: ProgressEvent[]): ProgressEvent[] {
         out[at] = { ...ev, message: ev.status === "running" ? ev.message : `${out[at].message} → ${ev.message}` };
       }
     } else if (ev.stage === "screen" && ev.total !== undefined) {
-      if (screenRow < 0) {
-        screenRow = out.length;
+      const key = ev.phase ?? "first";
+      const at = screenRows.get(key);
+      if (at === undefined) {
+        screenRows.set(key, out.length);
         out.push(ev);
+      } else if (ev.phase) {
+        out[at] = ev; // its message is the count itself
       } else {
-        out[screenRow] = { ...ev, message: `${out[screenRow].message.split(" — ")[0]} — ${ev.message}` };
+        out[at] = { ...ev, message: `${out[at].message.split(" — ")[0]} — ${ev.message}` };
       }
     } else {
       out.push(ev);

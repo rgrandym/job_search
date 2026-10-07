@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -519,6 +520,109 @@ def test_api_selected_cv_can_be_opened_and_edited(
     assert MasterCV.model_validate_json(parsed.read_text()).basics.summary == "Reviewed summary"
 
 
+def test_cv_source_is_viewed_and_opened_exactly_as_uploaded(
+    client: TestClient, ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.services import document_files
+
+    original = b"%PDF-1.4 original upload, including publications"
+    asset = client.post(
+        "/api/cv/upload", files={"file": ("cv.pdf", original, "application/pdf")}
+    ).json()
+    shown = client.get(f"/api/cv/source/{asset['id']}")
+    assert shown.status_code == 200
+    assert shown.content == original
+    assert shown.headers["content-disposition"].startswith("inline")
+
+    opened: list[Path] = []
+    apps: list[str | None] = []
+
+    def fake_open(path: Path, app: str | None = None) -> bool:
+        opened.append(path)
+        apps.append(app)
+        return True
+
+    monkeypatch.setattr(document_files, "open_in_default_app", fake_open)
+    assert client.post(f"/api/cv/open/{asset['id']}").json() == {"opened": True}
+    assert client.post(f"/api/cv/open/{asset['id']}?app=word").json() == {"opened": True}
+    # Apps open the copy in output/cvs/, so Word's saves land there and the upload is untouched.
+    assert opened == [ws.output_dir / "cvs" / "cv.pdf"] * 2
+    assert apps == [None, "Microsoft Word"]
+    assert opened[0].read_bytes() == original
+    assert (ws.settings.data_dir / "cvs" / "cv.pdf").read_bytes() == original
+
+    # A file saved outside output/cvs/ (e.g. by Word next to the upload) gets a copy there too.
+    saved = ws.settings.data_dir / "cvs" / "cv.docx"
+    saved.write_bytes(b"PK edited in Word")
+    docx_id = next(
+        item["id"]
+        for item in client.get("/api/state").json()["cv_files"]["available"]
+        if item["filename"] == "cv.docx"
+    )
+    client.post(f"/api/cv/open/{docx_id}?app=word")
+    assert opened[-1] == ws.output_dir / "cvs" / "cv.docx"
+    assert opened[-1].read_bytes() == b"PK edited in Word"
+    edited_copy = b"PK edited again in output"
+    opened[-1].write_bytes(edited_copy)
+    client.post(f"/api/cv/open/{docx_id}?app=word")
+    assert opened[-1].read_bytes() == edited_copy  # earlier edits in the copy are kept
+    assert client.get("/api/cv/source/master").status_code == 404
+
+
+def test_cv_preview_shows_pdfs_as_stored_and_word_files_via_word(
+    client: TestClient, ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.services import document_files
+
+    pdf = client.post(
+        "/api/cv/upload", files={"file": ("cv.pdf", b"%PDF-1.4 as uploaded", "application/pdf")}
+    ).json()
+    assert client.get(f"/api/cv/preview/{pdf['id']}").content == b"%PDF-1.4 as uploaded"
+
+    edited = ws.settings.data_dir / "cvs" / "cv.docx"
+    edited.write_bytes(b"PK saved from Word")
+    asset = next(
+        item
+        for item in client.get("/api/state").json()["cv_files"]["available"]
+        if item["filename"] == "cv.docx"
+    )
+    rendered = ws.settings.data_dir / "word.pdf"
+    rendered.write_bytes(b"%PDF-1.7 rendered by Word")
+    calls: list[Path] = []
+
+    def fake_word(source: Path, cache_dir: Path) -> Path | None:
+        calls.append(source)
+        return rendered
+
+    monkeypatch.setattr(document_files, "word_pdf_preview", fake_word)
+    shown = client.get(f"/api/cv/preview/{asset['id']}")
+    assert shown.content == b"%PDF-1.7 rendered by Word"
+    assert calls == [edited]
+    assert edited.read_bytes() == b"PK saved from Word"
+
+    monkeypatch.setattr(document_files, "word_pdf_preview", lambda source, cache_dir: None)
+    missing = client.get(f"/api/cv/preview/{asset['id']}")
+    assert missing.status_code == 422
+    assert "Open in Word" in missing.json()["detail"]
+
+
+def test_upload_saves_an_identical_copy_to_output_cvs_immediately(
+    client: TestClient, ws: Workspace
+) -> None:
+    original = b"PK original word file bytes"
+    upload = {"file": ("my_cv.docx", original, "application/octet-stream")}
+    body = client.post("/api/cv/upload", files=upload).json()
+    copy = ws.output_dir / "cvs" / body["filename"]
+    assert copy.read_bytes() == original
+    assert (ws.settings.data_dir / "cvs" / body["filename"]).read_bytes() == original
+    listed = client.get("/api/state").json()["cv_files"]["available"]
+    assert [item["kind"] for item in listed] == ["uploaded"]
+    client.post("/api/cv/upload", files=upload)  # re-uploading does not add a second copy
+    assert sorted(p.name for p in (ws.output_dir / "cvs").iterdir()) == [body["filename"]]
+    assert client.delete(f"/api/cv/{body['id']}").status_code == 200
+    assert not copy.exists()
+
+
 def test_delete_uploaded_cv_removes_its_parsed_copy_profiles_and_intent(
     client: TestClient, ws: Workspace, master_cv: MasterCV
 ) -> None:
@@ -563,8 +667,13 @@ def test_delete_master_and_generated_cv_entries(
     generated.write_bytes(b"Word file")
     jd = JDAnalysis(job_title="ML Engineer")
     document = tailored_documents.create(
-        ws, "linked-job", master_cv, jd, apply_plan(master_cv, TailoringPlan(), jd),
-        "classic", generated,
+        ws,
+        "linked-job",
+        master_cv,
+        jd,
+        apply_plan(master_cv, TailoringPlan(), jd),
+        "classic",
+        generated,
     )
     assert client.delete("/api/cv/generated%3Agenerated.docx").json() == {"deleted": True}
     assert not generated.exists()
@@ -639,10 +748,14 @@ def test_api_claude_code_provider(client: TestClient, monkeypatch: pytest.Monkey
             "screening_model": "claude-haiku-4-5",
             "quality_effort": "high",
             "screening_effort": "low",
+            "profile_model": "claude-opus-5-5",
+            "profile_effort": "xhigh",
         },
     ).json()
     assert llm["provider"] == "claude_code"
     assert (llm["quality_effort"], llm["screening_effort"]) == ("high", "low")
+    assert (llm["profile_model"], llm["profile_effort"]) == ("claude-opus-5-5", "xhigh")
+    assert llm["profile_provider"] is None and llm["profile_ready"] is True
     assert llm["key_set"] is False
     assert llm["ready"] is True
     models = client.get("/api/llm/models", params={"provider": "claude_code"}).json()
@@ -679,6 +792,8 @@ def test_search_stream_reports_each_stage_then_results(client: TestClient) -> No
     demo = [e for e in progress if e.get("source") == "demo"]
     assert [e["status"] for e in demo] == ["running", "done"]
     assert any(e["stage"] == "screen" and e.get("done") == e.get("total") for e in progress)
+    reviews = [e for e in progress if e.get("phase") == "review"]  # second opinions, own bar
+    assert reviews[0]["done"] == 0 and reviews[-1]["done"] == reviews[-1]["total"] > 0
     assert events[-1]["type"] == "search_results"
     assert events[-1]["outcome"]["report"]["matches"][0]["job"]["id"] == "job-strong"
 
@@ -758,6 +873,29 @@ def test_profiles_survive_cv_edits_until_the_user_updates_them(
     _, cached = asyncio.run(search_service.get_summary(ws, master_cv, None, False))
     assert cached is False and ws.memory.record("a" * 24 + ":any") is not None
     assert [r.key for r in ws.memory.records("master")] == [key]
+
+
+def test_new_profiles_read_the_original_document_including_publications(
+    ws: Workspace, master_cv: MasterCV
+) -> None:
+    from src.services import cv_service
+
+    original = (
+        b"Jane Doe, Senior ML Engineer\n\nPublications\n"
+        b"Doe J et al. Graph recommenders at scale. Nature Methods 2023.\n"
+        b"Doe J, Roe K. Sparse attention for ranking. NeurIPS 2022.\n"
+    )
+    cv_service.store_cv(ws, "jane.txt", original)
+    ws.master_cv = master_cv  # the parsed extract, which has no publications field
+    asyncio.run(search_service.get_summary(ws, master_cv, None, False))
+    prompt = ws.structured().calls[-1][0]
+    assert "<source_document>" in prompt and "<cv>" in prompt
+    assert "] Doe J et al. Graph recommenders at scale. Nature Methods 2023." in prompt
+    assert "[src-1] Jane Doe, Senior ML Engineer" in prompt
+
+    calls = len(ws.structured().calls)
+    asyncio.run(search_service.get_summary(ws, master_cv, None, False))  # from memory
+    assert len(ws.structured().calls) == calls
 
 
 def test_profiles_record_the_uploaded_cv_file_name(ws: Workspace, master_cv: MasterCV) -> None:
@@ -912,6 +1050,68 @@ def test_stop_keeps_partial_results_and_continue_judges_the_rest(
         asyncio.run(search_service.continue_search(ws, stopped.history_id))
 
 
+def test_older_history_lists_unread_matches_to_check(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.jobs import screener
+    from src.services import history
+
+    monkeypatch.setattr(ws, "structured", lambda *_: fake_llm())
+    monkeypatch.setattr(screener, "checkable", lambda job: False)  # no posting is readable
+    out = asyncio.run(
+        run_search(ws, SearchRequest(query=SearchQuery(sources=["demo"]), smart=True))
+    )
+    unread = {r.job.id for r in out.report.to_check}
+    assert unread and out.history_id is not None
+    # Saved before `to_check` existed: unread postings sat among the matches.
+    entries = history._entries(ws)
+    report = entries[0]["outcome"]["report"]
+    report["matches"], report["to_check"] = report["to_check"], []
+    history._save(ws, entries)
+    _, opened = history.open_entry(ws, out.history_id)
+    assert opened.report.matches == []
+    assert {r.job.id for r in opened.report.to_check} == unread
+
+
+def test_postings_without_requirements_can_be_read_later_or_pasted(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.jobs import screener
+    from src.services import history
+
+    monkeypatch.setattr(ws, "structured", lambda *_: fake_llm())
+    monkeypatch.setattr(screener, "checkable", lambda job: False)  # no posting is readable
+    first = asyncio.run(
+        run_search(ws, SearchRequest(query=SearchQuery(sources=["demo"]), smart=True))
+    )
+    judged = [r for r in first.report.all_results() if r.verdict]
+    assert judged and not any(r.verdict.requirements_checked for r in judged)  # type: ignore[union-attr]
+    # Unread postings that would match are listed to check, never among the matches.
+    assert first.report.matches == [] and first.report.to_check
+    assert all(r.verdict and r.verdict.match for r in first.report.to_check)
+    assert first.history_id is not None
+    target, other = judged[0], judged[1]
+
+    monkeypatch.setattr(screener, "checkable", lambda job: len(job.description) >= 600)
+    pasted = "Essential: lead ML engineering for recommender systems in production. " * 10
+    with pytest.raises(ValueError, match="whole job description"):
+        asyncio.run(search_service.recheck_postings(ws, first.history_id, [target.job.id], "short"))
+    done = asyncio.run(
+        search_service.recheck_postings(ws, first.history_id, [target.job.id], pasted)
+    )
+    after = {r.job.id: r for r in done.report.all_results()}
+    assert target.job.id not in {r.job.id for r in done.report.to_check}  # read: judged in full
+    assert after[target.job.id].job.description == pasted.strip()
+    assert after[target.job.id].verdict.requirements_checked  # type: ignore[union-attr]
+    assert after[other.job.id].verdict == other.verdict  # the rest keep their verdict
+    _, saved = history.open_entry(ws, first.history_id)  # updated in place
+    assert any(r.job.description == pasted.strip() for r in saved.report.all_results())
+
+    monkeypatch.setattr(search_service, "_enrich", lambda *_: {})  # nothing readable now
+    again = asyncio.run(search_service.recheck_postings(ws, first.history_id))
+    assert again.report.all_results()  # unchanged, and says so in the progress log
+
+
 # ---------------------------------------------------------------- job tracker and source yield
 
 
@@ -1058,9 +1258,10 @@ def test_note_edits_preserve_current_tracking_status(client: TestClient) -> None
     client.post("/api/saved", json={"job_ids": ["job-strong"]})
     client.put("/api/jobs/job-strong/tracking", json={"status": "applied"})
     entry = next(item for item in client.get("/api/tracker").json() if item["status"] == "applied")
-    assert client.put(
-        f"/api/tracker/{entry['id']}", json={"note": "First note"}
-    ).json()["status"] == "applied"
+    assert (
+        client.put(f"/api/tracker/{entry['id']}", json={"note": "First note"}).json()["status"]
+        == "applied"
+    )
 
     client.put("/api/jobs/job-strong/tracking", json={"status": "open"})
     updated = client.put("/api/jobs/job-strong/tracking", json={"note": "Second note"})
@@ -1092,3 +1293,18 @@ def test_api_state_lists_the_source_catalog_and_company_boards(
     boards = client.get("/api/companies/boards").json()
     assert [b["key"] for b in boards] == ["lever:abcam", "greenhouse:gsk"]
     assert boards[1]["companies"] == ["ViiV", "GSK"]  # one shared board, read once
+
+
+def test_a_saved_search_keeps_its_progress_log(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.services import history
+
+    monkeypatch.setattr(ws, "structured", lambda *_: fake_llm())
+    out = asyncio.run(
+        run_search(ws, SearchRequest(query=SearchQuery(sources=["demo"]), smart=True))
+    )
+    assert out.history_id is not None
+    _, saved = history.open_entry(ws, out.history_id)
+    assert any("Pre-filter" in line for line in saved.progress_log)
+    assert saved.progress_log[0].strip().split("s ")[0].replace(".", "").isdigit()  # timed

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { JobTracking, MatchReport, ProfileSummary, ProgressEvent, SearchOutcome, SearchQuery } from "../lib/types";
+import type { Heartbeat, JobTracking, MatchReport, ProfileSummary, ProgressEvent, SearchOutcome, SearchQuery } from "../lib/types";
 
 export const EMPTY_QUERY: SearchQuery = {
   titles: [],
@@ -40,6 +40,10 @@ interface SearchState {
   loading: boolean;
   progress: string | null;
   log: ProgressEvent[];
+  /** Latest heartbeat of the running search (cleared by each new progress event). */
+  beat: Heartbeat | null;
+  /** When the running search started (ms), for its elapsed time. */
+  startedAt: number | null;
   profileKey: string | null;
   /** Sources switched off in a category's settings: switching the category back on skips them. */
   disabledSources: string[];
@@ -54,16 +58,27 @@ interface SearchState {
   setQuery: (patch: Partial<SearchQuery>) => void;
   /** Show a job's new status/note wherever it appears in the current results. */
   setTracking: (jobId: string, tracking: JobTracking) => void;
-  set: (patch: Partial<Omit<SearchState, "set" | "setQuery" | "setTracking" | "toggleSelected">>) => void;
+  /** Take a deleted job out of the current results. */
+  removeJob: (jobId: string) => void;
+  set: (patch: Partial<Omit<SearchState, "set" | "setQuery" | "setTracking" | "removeJob" | "toggleSelected">>) => void;
 }
 
-const BUCKETS = ["matches", "below_threshold", "excluded", "applied", "dismissed"] as const;
+const BUCKETS = ["matches", "to_check", "below_threshold", "excluded", "applied", "dismissed"] as const;
 
 function withTracking(report: MatchReport, jobId: string, tracking: JobTracking): MatchReport {
   const next = { ...report };
   for (const bucket of BUCKETS) {
     const items = report[bucket];
     if (items) next[bucket] = items.map((r) => (r.job.id === jobId ? { ...r, tracking } : r));
+  }
+  return next;
+}
+
+function withoutJob(report: MatchReport, jobId: string): MatchReport {
+  const next = { ...report };
+  for (const bucket of BUCKETS) {
+    const items = report[bucket];
+    if (items) next[bucket] = items.filter((r) => r.job.id !== jobId);
   }
   return next;
 }
@@ -81,6 +96,8 @@ export const useSearch = create<SearchState>()(
       loading: false,
       progress: null,
       log: [],
+      beat: null,
+      startedAt: null,
       profileKey: null,
       disabledSources: ["demo"],
       openedFrom: null,
@@ -96,6 +113,11 @@ export const useSearch = create<SearchState>()(
         set((s) =>
           s.outcome ? { outcome: { ...s.outcome, report: withTracking(s.outcome.report, jobId, tracking) } } : {},
         ),
+      removeJob: (jobId) =>
+        set((s) => ({
+          selected: s.selected.filter((id) => id !== jobId),
+          ...(s.outcome ? { outcome: { ...s.outcome, report: withoutJob(s.outcome.report, jobId) } } : {}),
+        })),
       set: (patch) => set(patch),
     }),
     {

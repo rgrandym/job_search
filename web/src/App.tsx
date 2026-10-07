@@ -47,7 +47,8 @@ function Handle() {
 }
 
 export default function App() {
-  const state = useQuery({ queryKey: ["state"], queryFn: api.state });
+  // Refetch on focus so CVs saved from Word appear in the library on return.
+  const state = useQuery({ queryKey: ["state"], queryFn: api.state, refetchOnWindowFocus: true });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [summaryProfileKey, setSummaryProfileKey] = useState<string | null>(null);
@@ -94,7 +95,10 @@ export default function App() {
               title="LLM settings"
             >
               <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", ready ? "bg-good" : "bg-warn")} />
-              <span className="truncate">{ready ? `${llm.provider} · ${llm.quality_model} / ${llm.screening_model}` : "Configure LLM"}</span>
+              <span className="truncate">{ready
+                  ? `${llm.provider} · ${llm.quality_model} / ${llm.screening_model}` +
+                    (llm.profile_model ? ` · profile ${llm.profile_provider ?? llm.provider} ${llm.profile_model}` : "")
+                  : "Configure LLM"}</span>
             </button>
           )}
           <button

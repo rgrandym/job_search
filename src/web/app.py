@@ -13,6 +13,7 @@ import json
 import logging
 import secrets
 import time
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -31,6 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr
 
 from src.agents import chat
+from src.core import progress
 from src.core.config import PROJECT_ROOT, LLMProviderName
 from src.core.llm import LLMConfig, LLMError, ModelUsage, available_models, claude_code_backend
 from src.core.llm.catalog import ModelInfo
@@ -56,6 +58,7 @@ from src.services import (
     company_discovery,
     cover_letters,
     cv_service,
+    document_files,
     enrichment,
     history,
     intent,
@@ -84,6 +87,7 @@ def _llm_view() -> dict[str, Any]:
     return cfg.model_dump(exclude={"api_key"}) | {
         "key_set": cfg.api_key is not None,
         "ready": ws.llm_ready(),
+        "profile_ready": ws.provider_ready(cfg.profile_provider_for()),
     }
 
 
@@ -287,12 +291,18 @@ class LLMUpdate(BaseModel):
     screening_model: str
     quality_effort: Effort = "medium"
     screening_effort: Effort = "medium"
+    profile_model: str = ""  # empty: the profile uses the quality model
+    profile_effort: Effort = "high"
+    profile_provider: LLMProviderName | None = None  # None: the main provider
     api_key: str | None = None
+    profile_api_key: str | None = None
 
 
 @app.put("/api/llm")
 def update_llm(body: LLMUpdate) -> dict[str, Any]:
-    get_workspace().set_llm_config(body.model_dump(exclude={"api_key"}), body.api_key)
+    get_workspace().set_llm_config(
+        body.model_dump(exclude={"api_key", "profile_api_key"}), body.api_key, body.profile_api_key
+    )
     return _llm_view()
 
 
@@ -406,13 +416,48 @@ def delete_cv(asset_id: str) -> dict[str, bool]:
 
 
 @app.post("/api/cv/general")
-async def export_general_cv() -> dict[str, Any]:
+async def export_general_cv(progress_id: str | None = None) -> dict[str, Any]:
     """Export the selected CV with its full work history to an editable Word file."""
     try:
-        path, roles = await cv_service.export_general_cv(get_workspace())
+        with progress.track(progress_id, "Exporting your CV"):
+            path, roles = await cv_service.export_general_cv(get_workspace())
     except (ValueError, LLMError) as exc:
         raise HTTPException(422, str(exc)) from exc
     return {"download_url": _file_url(path), "roles": roles}
+
+
+@app.get("/api/cv/source/{asset_id:path}")
+def cv_source(asset_id: str) -> FileResponse:
+    """The CV file exactly as stored, shown inline (PDFs render in the browser)."""
+    try:
+        path = cv_service.source_file(get_workspace(), asset_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return FileResponse(path, filename=path.name, content_disposition_type="inline")
+
+
+@app.get("/api/cv/preview/{asset_id:path}")
+async def cv_preview(asset_id: str) -> FileResponse:
+    """The CV as the browser can show it: PDFs and text as stored, Word files as Word's PDF."""
+    try:
+        path = await asyncio.to_thread(cv_service.preview_file, get_workspace(), asset_id)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return FileResponse(path, filename=path.name, content_disposition_type="inline")
+
+
+@app.post("/api/cv/open/{asset_id:path}")
+async def open_cv_source(
+    asset_id: str, app: Literal["default", "word"] = "default"
+) -> dict[str, bool]:
+    """Open the CV's copy in output/cvs/ in a desktop app, so edits are saved there."""
+    try:
+        path = cv_service.working_copy(get_workspace(), asset_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    named = "Microsoft Word" if app == "word" else None
+    opened = await asyncio.to_thread(document_files.open_in_default_app, path, named)
+    return {"opened": opened}
 
 
 class SummaryRequest(BaseModel):
@@ -422,13 +467,15 @@ class SummaryRequest(BaseModel):
 
 
 @app.post("/api/profile-summary")
-async def profile_summary(body: SummaryRequest) -> dict[str, Any]:
+async def profile_summary(body: SummaryRequest, progress_id: str | None = None) -> dict[str, Any]:
     ws = get_workspace()
     if not ws.llm_ready():
         raise HTTPException(400, "Configure an LLM provider first (Settings)")
     try:
-        cv = await cv_service.ensure_selected_cv(ws) if body.use_cv else None
-        summary, cached = await get_summary(ws, cv, body.query, body.refresh)
+        with progress.track(progress_id, "Building the profile", total=4):
+            progress.step("Reading your CV")
+            cv = await cv_service.ensure_selected_cv(ws) if body.use_cv else None
+            summary, cached = await get_summary(ws, cv, body.query, body.refresh)
     except (ValueError, LLMError) as exc:
         raise HTTPException(502, str(exc)) from exc
     key = search_service.summary_key(ws, cv, body.query)
@@ -477,13 +524,14 @@ def edit_profile(key: str, summary: ProfileSummary) -> ProfileRecord:
 
 
 @app.post("/api/profiles/refresh/{key:path}")
-async def refresh_profile(key: str) -> ProfileRecord:
+async def refresh_profile(key: str, progress_id: str | None = None) -> ProfileRecord:
     """Rebuild a stored profile from the CV's current content (only when the user asks)."""
     ws = get_workspace()
     if not ws.llm_ready():
         raise HTTPException(400, "Configure an LLM provider first (Settings)")
     try:
-        return await search_service.refresh_profile(ws, _profile_cv(), key)
+        with progress.track(progress_id, "Updating the profile", total=3):
+            return await search_service.refresh_profile(ws, _profile_cv(), key)
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
     except LLMError as exc:
@@ -510,6 +558,15 @@ async def search(body: SearchRequest) -> SearchOutcome:
         raise HTTPException(422, str(exc)) from exc
     except LLMError as exc:
         raise HTTPException(502, str(exc)) from exc
+
+
+@app.get("/api/progress/{task_id}")
+def task_progress(task_id: str) -> progress.TaskProgress:
+    """Live progress of a profile build or document being written (polled by the UI)."""
+    found = progress.snapshot(task_id)
+    if found is None:
+        raise HTTPException(404, "No task with that id is running")
+    return found
 
 
 @app.get("/api/history")
@@ -541,9 +598,13 @@ def clear_history() -> dict[str, bool]:
     return {"cleared": True}
 
 
+HEARTBEAT_S = 3.0  # a quiet stream sends a heartbeat this often
+
+
 def _stream(work: Callable[[Any, Any], Awaitable[Any]]) -> StreamingResponse:
     """Run `work(emit, usage)` streaming NDJSON lines: `search_progress` (what each stage is
-    doing), `model_usage` (tokens per model call), then `search_results` or `error`."""
+    doing), `model_usage` (tokens per model call), `heartbeat` (every few quiet seconds, with
+    the model call in flight), then `search_results` or `error`."""
     queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
     loop = asyncio.get_running_loop()
 
@@ -554,9 +615,12 @@ def _stream(work: Callable[[Any, Any], Awaitable[Any]]) -> StreamingResponse:
         item = {"type": "model_usage", "agent": "search", **u.model_dump()}
         loop.call_soon_threadsafe(queue.put_nowait, item)
 
+    task_id = uuid.uuid4().hex
+
     async def run() -> None:
         try:
-            await work(emit, usage)
+            with progress.track(task_id, "Search"):
+                await work(emit, usage)
         except (ValueError, LLMError) as exc:
             await queue.put({"type": "error", "message": str(exc)})
         except Exception as exc:  # noqa: BLE001 - report it in the stream, not as a broken pipe
@@ -568,7 +632,22 @@ def _stream(work: Callable[[Any, Any], Awaitable[Any]]) -> StreamingResponse:
     async def lines() -> AsyncIterator[str]:
         task = asyncio.create_task(run())
         try:
-            while (item := await queue.get()) is not None:
+            while True:
+                try:
+                    item = await asyncio.wait_for(queue.get(), HEARTBEAT_S)
+                except TimeoutError:
+                    # Quiet stretch: prove the server is alive and say what it is waiting on.
+                    now = progress.snapshot(task_id)
+                    beat: dict[str, Any] = {
+                        "type": "heartbeat",
+                        "waiting_on": now.waiting_on if now else None,
+                    }
+                    if now and now.waiting_since:
+                        beat["waiting_s"] = round(now.now - now.waiting_since)
+                    yield json.dumps(beat) + "\n"
+                    continue
+                if item is None:
+                    break
                 yield json.dumps(item, default=str) + "\n"
         finally:
             task.cancel()
@@ -595,6 +674,34 @@ async def continue_stream(body: ContinueRequest) -> StreamingResponse:
             get_workspace(), body.history_id, emit, usage, body.run_id
         )
     )
+
+
+class RecheckRequest(BaseModel):
+    history_id: str
+    job_ids: list[str] | None = None  # None: every result whose requirements were not checked
+    description: str | None = None  # the posting's text, pasted by the user (one job)
+    run_id: str | None = None
+
+
+@app.post("/api/search/recheck/stream")
+async def recheck_stream(body: RecheckRequest) -> StreamingResponse:
+    """Read full postings (or take pasted text) for results whose requirements were not
+    checked, and judge them again."""
+    return _stream(
+        lambda emit, usage: search_service.recheck_postings(
+            get_workspace(), body.history_id, body.job_ids, body.description, emit, usage,
+            body.run_id,
+        )  # fmt: skip
+    )
+
+
+@app.delete("/api/results/{job_id}")
+def remove_result(job_id: str, history_id: str | None = None) -> dict[str, bool]:
+    """Delete one posting from the results list (and from that search in the history)."""
+    removed = search_service.remove_result(get_workspace(), job_id, history_id)
+    if not removed:
+        raise HTTPException(404, "That job is not in the results")
+    return {"removed": True}
 
 
 @app.post("/api/search/stop/{run_id}")
@@ -720,15 +827,23 @@ def _document_result(ws: Workspace, job_id: str, body: TailorRequest) -> MatchRe
 
 
 @app.post("/api/jobs/{job_id}/tailor")
-async def tailor_job(job_id: str, body: TailorRequest) -> dict[str, Any]:
+async def tailor_job(
+    job_id: str, body: TailorRequest, progress_id: str | None = None
+) -> dict[str, Any]:
     ws = get_workspace()
     result = _document_result(ws, job_id, body)
     if result is None:
         raise HTTPException(404, "Job not found in results, saved jobs or search history")
     try:
-        tailored, path = await cv_service.tailor_to_job(
-            ws, result.job, body.template, result=result, emphasis=body.emphasis, level=body.level
-        )
+        with progress.track(progress_id, "Tailoring your CV"):
+            tailored, path = await cv_service.tailor_to_job(
+                ws,
+                result.job,
+                body.template,
+                result=result,
+                emphasis=body.emphasis,
+                level=body.level,
+            )
     except (ValueError, LLMError) as exc:
         raise HTTPException(422, str(exc)) from exc
     return {
@@ -751,16 +866,19 @@ async def tailor_job(job_id: str, body: TailorRequest) -> dict[str, Any]:
 
 
 @app.post("/api/jobs/{job_id}/cover-letter")
-async def cover_letter(job_id: str, body: TailorRequest) -> dict[str, Any]:
+async def cover_letter(
+    job_id: str, body: TailorRequest, progress_id: str | None = None
+) -> dict[str, Any]:
     """A guarded cover letter for a displayed or retained job, as .docx."""
     ws = get_workspace()
     result = _document_result(ws, job_id, body)
     if result is None:
         raise HTTPException(404, "Job not found in results, saved jobs or search history")
     try:
-        letter, path = await cv_service.write_cover_letter(
-            ws, result.job, body.template, tailored_cv_id=body.tailored_cv_id
-        )
+        with progress.track(progress_id, "Writing your cover letter"):
+            letter, path = await cv_service.write_cover_letter(
+                ws, result.job, body.template, tailored_cv_id=body.tailored_cv_id
+            )
     except (ValueError, LLMError) as exc:
         raise HTTPException(422, str(exc)) from exc
     return {

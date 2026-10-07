@@ -7,6 +7,8 @@ import asyncio
 import re
 from pathlib import Path
 
+import pytest
+
 from src.jobs.models import FIT_WEIGHTS, FitRatings, JobAssessment, JobPosting, ProfileSummary
 from src.jobs.screener import ScreeningBatch, VerdictCache, combine, screen_jobs
 from tests.conftest import FakeLLM
@@ -102,8 +104,16 @@ def test_borderline_postings_get_a_second_opinion_averaged_down(tmp_path: Path) 
     async def note(message: str) -> None:
         notes.append(message)
 
-    verdicts, _ = _screen(matcher, jobs, VerdictCache(tmp_path / "v.json"), note=note)
+    reviews: list[tuple[int, int]] = []
+
+    async def review_progress(done: int, total: int) -> None:
+        reviews.append((done, total))
+
+    verdicts, _ = _screen(
+        matcher, jobs, VerdictCache(tmp_path / "v.json"), note=note, review_progress=review_progress
+    )
     assert sorted(matcher.calls[1:]) == [["a"], ["b"]]  # second opinions: one posting each
+    assert reviews == [(0, 2), (1, 2), (2, 2)]  # a bar from the start, then each one done
     assert verdicts["b"].reviewed and verdicts["b"].fit_score == 58
     assert verdicts["a"].reviewed and "Second opinion on 2" in notes[0]
 
@@ -112,7 +122,8 @@ def test_borderline_postings_get_a_second_opinion_averaged_down(tmp_path: Path) 
 
 
 def test_clear_matches_get_a_second_opinion_that_can_cap_them(tmp_path: Path) -> None:
-    """A lenient first pass scores 91; the reviewer finds an unmet essential -> capped at 65."""
+    """A lenient first pass scores 91; the reviewer finds an unmet core requirement -> capped
+    below the floor and no longer a match."""
     jobs = [_job("a", "Principal Bioinformatician"), _job("b", "Lab Technician")]
     matcher = Matcher({"Principal Bioinformatician": [STRONG], "Lab Technician": [LOWER]})
     first = FakeLLM({ScreeningBatch: matcher})
@@ -127,7 +138,7 @@ def test_clear_matches_get_a_second_opinion_that_can_cap_them(tmp_path: Path) ->
     verdicts, _ = asyncio.run(
         screen_jobs(SUMMARY, jobs, first, threshold=60, review_llm=reviewer)  # type: ignore[arg-type]
     )
-    assert verdicts["a"].reviewed and verdicts["a"].fit_score == 65
+    assert verdicts["a"].reviewed and verdicts["a"].fit_score == 55 and not verdicts["a"].match
     assert verdicts["a"].cap_reason and "Python" in verdicts["a"].cap_reason
     assert not verdicts["b"].reviewed  # a clear rejection is not asked twice
 
@@ -179,3 +190,62 @@ def test_batches_are_small_and_always_the_same(tmp_path: Path) -> None:
     _screen(two, list(reversed(jobs)), None, batch_size=3)
     assert [len(c) for c in one.calls] == [3, 3, 1]
     assert sorted(map(sorted, one.calls)) == sorted(map(sorted, two.calls))  # same groupings
+
+
+def test_a_posting_without_readable_requirements_is_listed_as_a_low_stretch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A LinkedIn card LinkedIn refused to open (no text) scores high on its title alone; its
+    requirements were never checked, so it stays listed but capped under the checked matches,
+    and is not sent for a second opinion (a second reading cannot see more)."""
+    from src.jobs import screener
+
+    monkeypatch.setattr(screener, "CHECKABLE_CHARS", 600)
+    full = "Responsibilities and requirements. " * 30
+    jobs = [_job("card", "Principal Scientist"), _job("full", "Principal Scientist", full)]
+    matcher = Matcher({"Principal Scientist": [STRONG]})
+    llm = FakeLLM({ScreeningBatch: matcher})
+    verdicts, _ = asyncio.run(screen_jobs(SUMMARY, jobs, llm, threshold=60))
+    card = verdicts["card"]
+    assert (card.fit_score, card.match, card.reviewed, card.requirements_checked) == (
+        62, True, False, False,
+    )  # fmt: skip
+    assert card.cap_reason and "requirements not checked" in card.cap_reason
+    assert verdicts["full"].match and verdicts["full"].reviewed
+    assert verdicts["full"].requirements_checked and verdicts["full"].fit_score == 91
+
+
+def _unmet_by_reading(flags: list[bool]):  # type: ignore[no-untyped-def]
+    """A matcher answering STRONG levels whose n-th reading of a posting flags an unmet core
+    requirement when `flags[n]` is true."""
+    matcher = Matcher({"Principal Scientist": [STRONG]})
+    readings: list[bool] = list(flags)
+
+    def answer(prompt: str) -> ScreeningBatch:
+        out = matcher(prompt)
+        for v in out.verdicts:
+            if readings.pop(0):
+                v.essential_unmet = ["Proven bioconjugation process experience"]
+        return out
+
+    return answer, matcher
+
+
+@pytest.mark.parametrize(
+    ("flags", "blocked"),
+    [
+        ([True, False, False], False),  # one over-cautious reading is outvoted
+        ([True, False, True], True),  # two of three agree: the role needs what the CV lacks
+        ([True, True], True),  # both readings agree: no third reading needed
+    ],
+)
+def test_an_unmet_core_requirement_blocks_only_when_most_readings_agree(
+    flags: list[bool], blocked: bool
+) -> None:
+    answer, matcher = _unmet_by_reading(flags)
+    llm = FakeLLM({ScreeningBatch: answer})
+    job = _job("a", "Principal Scientist", "Requirements and responsibilities. " * 30)
+    verdicts, _ = asyncio.run(screen_jobs(SUMMARY, [job], llm, threshold=60))
+    v = verdicts["a"]
+    assert len(matcher.calls) == len(flags) and v.reviewed
+    assert v.match is not blocked and bool(v.essential_unmet) is blocked

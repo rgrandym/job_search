@@ -153,7 +153,7 @@ def sample(ws: Workspace, size: int, baseline: list[str] | None = None) -> list[
             continue
         adjacent = {f.name for f in report.summary.role_families if f.tier == "adjacent"}
         threshold = ws.settings.score_threshold if req.threshold is None else req.threshold
-        for r in [*report.matches, *report.below_threshold]:
+        for r in report.scored():
             if r.verdict is None or r.job.id in seen:
                 continue
             seen.add(r.job.id)

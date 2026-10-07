@@ -3,22 +3,26 @@
 1. Capture     sources (per title, location, distance, salary)  -> postings
 2. Pre-filter  deterministic: hard exclusions + cheap ranking    -> shortlist
 3. Enrich      full descriptions for shortlisted snippet-only postings (e.g. Reed)
-4. Summarise   ProfileSummary, quality model (from memory when the search type repeats)
+4. Summarise   ProfileSummary, profile model (from memory when the search type repeats)
 5. Screen      job_matcher (screening model) judges the shortlist -> true matches
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import time
 import uuid
+from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from typing import Any, Literal, NamedTuple
+from typing import Any, Literal, NamedTuple, TypeVar
 
 from pydantic import BaseModel, Field
 
+from src.core import progress
 from src.core.config import Settings
 from src.core.llm import UsageSink
 from src.core.llm.calls import call_group, cancel_group, clear_group
@@ -49,13 +53,21 @@ from src.jobs.profile_memory import (
 )
 from src.jobs.screener import VerdictCache, apply_verdicts, screen_jobs
 from src.jobs.sources.base import SourceError
+from src.jobs.sources.browser import BrowserFetcher
 from src.jobs.sources.gmail_alerts import GmailAlertSource, GmailAuth
+from src.jobs.sources.pages import PostingPages
+from src.jobs.sources.public_boards import LinkedInSource
 from src.services import company_discovery, cv_service, history, labels, learning, tracker
 from src.services.intent import get_intent
 from src.services.workspace import Workspace
 from src.tools.search_tools import board_terms, company_key, shares_role_words
 
 Emit = Callable[[str, dict[str, Any]], Awaitable[None]]
+T = TypeVar("T")
+# After Stop, a run gets this long to hand back its partial results before it is cancelled.
+STOP_GRACE_S = 1.5
+# Postings with less text than this get their full posting opened before screening.
+ENRICH_BELOW = 600
 BOARD_TERMS = 16  # job-board searches per source (profile roles split into short terms)
 # Server-side search by title.
 KEYWORD_SOURCES = {
@@ -113,16 +125,63 @@ class SearchOutcome(BaseModel):
     families: dict[str, str] = Field(
         default_factory=dict, description="Role families searched: name -> tier"
     )
+    progress_log: list[str] = Field(
+        default_factory=list, description="The progress lines, with seconds since the start"
+    )
 
 
 # Running searches by run id, so a stop request (another HTTP call) can reach them.
 _RUNS: dict[str, asyncio.Event] = {}
 _stop: ContextVar[asyncio.Event | None] = ContextVar("search_stop", default=None)
+# (start time, lines) of the running search's progress log, saved with its outcome.
+_log: ContextVar[tuple[float, list[str]] | None] = ContextVar("search_log", default=None)
+LOG_LINES = 600
 
 
 def _stopped() -> bool:
     event = _stop.get()
     return event is not None and event.is_set()
+
+
+async def _until_stopped(work: Awaitable[T], default: T) -> T:
+    """`work`'s result, or `default` as soon as the user presses Stop. The abandoned worker
+    thread ends on its own: HTTP requests and CLI model calls refuse to run once stopped."""
+    event = _stop.get()
+    if event is None:
+        return await work
+    task = asyncio.ensure_future(work)
+    stopper = asyncio.ensure_future(event.wait())
+    await asyncio.wait({task, stopper}, return_when=asyncio.FIRST_COMPLETED)
+    stopper.cancel()
+    if task.done():
+        return task.result()
+    task.add_done_callback(lambda t: t.cancelled() or t.exception())  # nobody awaits it
+    return default
+
+
+class SearchStopped(ValueError):
+    """The user stopped a run that could not hand back its partial results in time."""
+
+
+async def _stoppable(work: Awaitable[SearchOutcome]) -> SearchOutcome:
+    """`work`, ended within STOP_GRACE_S of Stop. A stopped pipeline normally returns its
+    partial outcome at once; whatever is still busy after the grace is cancelled outright
+    (like Ctrl+C, without restarting the app). Abandoned worker threads end on their own:
+    requests, Chrome and model calls all refuse to run once the run is cancelled."""
+    event = _stop.get()
+    task = asyncio.ensure_future(work)
+    if event is None:
+        return await task
+    stopper = asyncio.ensure_future(event.wait())
+    await asyncio.wait({task, stopper}, return_when=asyncio.FIRST_COMPLETED)
+    if not task.done():
+        await asyncio.wait({task}, timeout=STOP_GRACE_S)
+    stopper.cancel()
+    if task.done():
+        return task.result()
+    task.cancel()
+    await asyncio.wait({task}, timeout=1)
+    raise SearchStopped("Search stopped")
 
 
 def stop_search(run_id: str) -> bool:
@@ -141,7 +200,7 @@ async def _running(run_id: str | None) -> AsyncIterator[str]:
     """Register a run so it can be stopped; model calls inside join its cancellable group."""
     run_id = run_id or uuid.uuid4().hex
     event = _RUNS[run_id] = asyncio.Event()
-    tokens = (_stop.set(event), call_group.set(run_id))
+    tokens = (_stop.set(event), call_group.set(run_id), _log.set((time.monotonic(), [])))
     try:
         yield run_id
     finally:
@@ -149,6 +208,7 @@ async def _running(run_id: str | None) -> AsyncIterator[str]:
         clear_group(run_id)
         _stop.reset(tokens[0])
         call_group.reset(tokens[1])
+        _log.reset(tokens[2])
 
 
 async def run_search(
@@ -164,7 +224,7 @@ async def run_search(
     early; the partial outcome is still returned and recorded.
     """
     async with _running(req.run_id):
-        return await _run_search(ws, req, emit, usage_sink)
+        return await _stoppable(_run_search(ws, req, emit, usage_sink))
 
 
 async def _run_search(
@@ -173,6 +233,8 @@ async def _run_search(
     t0 = time.monotonic()
     names, gmail_skipped = _source_names(ws, req)
     cv = await _load_cv(ws, req, emit, usage_sink)
+    if cv is not None and req.smart and ws.llm_ready():
+        await _learn_from_reasons(ws, emit, usage_sink)
     intent = get_intent(ws)
     query, profile = await _plan_query(ws, req, cv, intent, emit, usage_sink)
     cv_key = f"{ws.active_cv_id}:{cv_fingerprint(cv)}" if cv and ws.active_cv_id else None
@@ -213,6 +275,7 @@ async def _run_search(
 
     ws.last_query, ws.last_report = query, outcome.report
     outcome.seconds = round(time.monotonic() - t0, 2)
+    _take_log(outcome)
     outcome.history_id = history.record(ws, req, outcome).id
     labels.attach_verdicts(ws, outcome.report, ws.last_models)  # labelled postings seen again
     history.log_family_yield(ws, outcome.history_id, _owner(ws, cv), families, outcome.report)
@@ -229,57 +292,182 @@ async def continue_search(
     """Judge the shortlisted jobs a stopped (or partly failed) search left unjudged, keeping
     every verdict it already has. Nothing is fetched again; the history entry is updated."""
     async with _running(run_id):
-        t0 = time.monotonic()
-        req, outcome = history.open_entry(ws, history_id)
-        report = outcome.report
-        previous = {r.job.id: r.verdict for r in report.all_results() if r.verdict}
-        shortlist = _shortlist(report, ws.settings)
-        pending = [job for job in shortlist if job.id not in previous]
-        if not pending:
-            raise ValueError("Every shortlisted job in this search has already been judged")
-        if not ws.llm_ready():
-            raise ValueError("Connect an LLM in Settings to continue screening")
-        cv = await _load_cv(ws, req, emit, usage_sink)
-        intent = get_intent(ws)
-        summary = (
-            report.summary
-            or (
-                pinned_profile(ws, cv, req.profile_key)
-                or await get_summary(ws, cv, req.query, False, emit, usage_sink, intent)
-            )[0]
-        )
-        threshold = ws.settings.score_threshold if req.threshold is None else req.threshold
-        await _say(emit, "plan", f"Continuing: {len(pending)} shortlisted jobs left to judge")
-        errors = await _screen(
-            ws, summary, pending, req.query, report, threshold, emit, usage_sink,
-            screening_base(cv, req.query), previous, intent_text(intent),
-        )  # fmt: skip
-        outcome.errors = {k: v for k, v in outcome.errors.items() if not k.startswith("screening")}
-        outcome.errors |= {f"screening {i}": e for i, e in enumerate(errors)}
-        outcome.smart_unavailable = None
-        outcome.cancelled = _stopped()
-        outcome.unscreened = count_unscreened(ws, req, report)
-        outcome.seconds = round(outcome.seconds + time.monotonic() - t0, 2)
-        outcome.history_id = history_id
-        history.update(ws, history_id, outcome)
-        labels.attach_verdicts(ws, report, ws.last_models)
-        history.log_family_yield(ws, history_id, _owner(ws, cv), outcome.families, report)
-        ws.last_report = report
+        return await _stoppable(_continue(ws, history_id, emit, usage_sink))
+
+
+async def _continue(
+    ws: Workspace, history_id: str, emit: Emit, usage_sink: UsageSink | None
+) -> SearchOutcome:
+    t0 = time.monotonic()
+    req, outcome = history.open_entry(ws, history_id)
+    report = outcome.report
+    judged = {r.job.id for r in report.all_results() if r.verdict}
+    pending = [job for job in _shortlist(report, ws.settings) if job.id not in judged]
+    if not pending:
+        raise ValueError("Every shortlisted job in this search has already been judged")
+    await _say(emit, "plan", f"Continuing: {len(pending)} shortlisted jobs left to judge")
+    return await _rejudge(ws, history_id, req, outcome, pending, emit, usage_sink, t0)
+
+
+async def recheck_postings(
+    ws: Workspace,
+    history_id: str,
+    job_ids: list[str] | None = None,
+    description: str | None = None,
+    emit: Emit = _noop,
+    usage_sink: UsageSink | None = None,
+    run_id: str | None = None,
+) -> SearchOutcome:
+    """Read the full posting of results whose requirements could not be checked (`job_ids`,
+    or every such result) and judge them again with their requirements; or judge one job on
+    the `description` the user pasted. Other verdicts are kept; the history entry is updated."""
+    async with _running(run_id):
+        return await _stoppable(_recheck(ws, history_id, job_ids, description, emit, usage_sink))
+
+
+async def _recheck(
+    ws: Workspace,
+    history_id: str,
+    job_ids: list[str] | None,
+    description: str | None,
+    emit: Emit,
+    usage_sink: UsageSink | None,
+) -> SearchOutcome:
+    t0 = time.monotonic()
+    req, outcome = history.open_entry(ws, history_id)
+    results = outcome.report.scored()
+    wanted = set(job_ids or [])
+    targets = [
+        r for r in results
+        if r.job.id in wanted
+        or (not wanted and r.verdict is not None and not r.verdict.requirements_checked)
+    ]  # fmt: skip
+    if not targets:
+        raise ValueError("No job in this search is waiting for its full posting")
+    fresh = await _read_postings(ws, targets, description, outcome.errors, emit)
+    if not fresh:
+        await _say(emit, "enrich", "No fuller posting could be read; paste its text instead")
         return await _finish(outcome, emit)
+    for r in targets:
+        if r.job.id in fresh:
+            r.job, r.verdict, r.passed = fresh[r.job.id], None, False
+    jobs = list(fresh.values())
+    return await _rejudge(ws, history_id, req, outcome, jobs, emit, usage_sink, t0)
+
+
+async def _read_postings(
+    ws: Workspace,
+    targets: list[MatchResult],
+    description: str | None,
+    errors: dict[str, str],
+    emit: Emit,
+) -> dict[str, JobPosting]:
+    """The pasted text for one job, or the full postings that could be read now."""
+    if description is not None:
+        text = description.strip()
+        if len(targets) != 1:
+            raise ValueError("Paste the description of one job at a time")
+        if len(text) < 200:
+            raise ValueError("Paste the whole job description, requirements included")
+        job = targets[0].job
+        return {job.id: job.model_copy(update={"description": text})}
+    await _say(emit, "enrich", f"Opening the full posting of {len(targets)} job(s)")
+    names = sorted({r.job.source for r in targets} & set(ALL_SOURCES))
+    sources, _ = build_sources(names, settings=ws.settings)
+    found: dict[str, str] = {}
+    jobs = [r.job for r in targets]
+    # Results are already on screen: this may take longer and wait out LinkedIn's slow-downs.
+    settings = ws.settings.model_copy(update={"enrich_budget_s": ws.settings.recheck_budget_s})
+    read = await _until_stopped(
+        asyncio.to_thread(_enrich, jobs, sources, found, settings, True, _thread_note(emit)),
+        {},
+    )
+    errors |= found
+    fresh = {k: v for k, v in read.items() if len(v.description) > ENRICH_BELOW}
+    await _say(emit, "enrich", f"Read {len(fresh)} of {len(targets)} full postings")
+    return fresh
+
+
+async def _rejudge(
+    ws: Workspace,
+    history_id: str,
+    req: SearchRequest,
+    outcome: SearchOutcome,
+    jobs: list[JobPosting],
+    emit: Emit,
+    usage_sink: UsageSink | None,
+    t0: float,
+) -> SearchOutcome:
+    """Judge `jobs` within a past search, keeping its other verdicts, and save it in place."""
+    report = outcome.report
+    if not ws.llm_ready():
+        raise ValueError("Connect an LLM in Settings to continue screening")
+    previous = {r.job.id: r.verdict for r in report.all_results() if r.verdict}
+    cv = await _load_cv(ws, req, emit, usage_sink)
+    intent = get_intent(ws)
+    summary = (
+        report.summary
+        or (
+            pinned_profile(ws, cv, req.profile_key)
+            or await get_summary(ws, cv, req.query, False, emit, usage_sink, intent)
+        )[0]
+    )
+    threshold = ws.settings.score_threshold if req.threshold is None else req.threshold
+    errors = await _screen(
+        ws, summary, jobs, req.query, report, threshold, emit, usage_sink,
+        screening_base(cv, req.query), previous, intent_text(intent),
+    )  # fmt: skip
+    outcome.errors = {k: v for k, v in outcome.errors.items() if not k.startswith("screening")}
+    outcome.errors |= {f"screening {i}": e for i, e in enumerate(errors)}
+    outcome.smart_unavailable = None
+    outcome.cancelled = _stopped()
+    outcome.unscreened = count_unscreened(ws, req, report)
+    outcome.seconds = round(outcome.seconds + time.monotonic() - t0, 2)
+    outcome.history_id = history_id
+    _take_log(outcome)
+    history.update(ws, history_id, outcome)
+    labels.attach_verdicts(ws, report, ws.last_models)
+    history.log_family_yield(ws, history_id, _owner(ws, cv), outcome.families, report)
+    ws.last_report = report
+    return await _finish(outcome, emit)
 
 
 async def _set_aside(
     ws: Workspace, jobs: list[JobPosting], emit: Emit
 ) -> tuple[list[JobPosting], list[MatchResult], list[MatchResult]]:
-    """Jobs already applied for or ruled out leave before screening (no model calls)."""
+    """Jobs already applied for, ruled out (N/A) or labelled "no" leave before screening (no
+    model calls); a "no" carries its note as the reason."""
     keep, applied, dismissed = tracker.set_aside(ws, jobs)
+    said_no = labels.said_no(ws)
+    searchable, labelled_no = [], 0
+    for job in keep:
+        item = said_no(job)
+        if item is None:
+            searchable.append(job)
+            continue
+        labelled_no += 1
+        reason = "you labelled it no" + (f": {item.note}" if item.note else "")
+        dismissed.append(MatchResult(job=job, excluded=True, exclusion_reasons=[reason]))
     if applied or dismissed:
         await _say(
             emit,
             "prefilter",
-            f"Set aside {len(applied)} already applied for and {len(dismissed)} marked N/A",
+            f"Set aside {len(applied)} already applied for, {len(dismissed) - labelled_no} "
+            f"marked N/A and {labelled_no} you labelled no",
         )
-    return keep, applied, dismissed
+    return searchable, _once(applied), _once(dismissed)
+
+
+def _once(results: list[MatchResult]) -> list[MatchResult]:
+    """One set-aside entry per role: the same job seen on two boards is listed once."""
+    seen: set[str] = set()
+    out = []
+    for r in results:
+        key = tracker.role_id(r.job.title, r.job.company)
+        if key not in seen:
+            seen.add(key)
+            out.append(r)
+    return out
 
 
 async def _finish(outcome: SearchOutcome, emit: Emit) -> SearchOutcome:
@@ -287,13 +475,26 @@ async def _finish(outcome: SearchOutcome, emit: Emit) -> SearchOutcome:
     found = "true matches" if outcome.report.screened else "above threshold"
     stopped = "Stopped" if outcome.cancelled else "Done"
     left = f"; {outcome.unscreened} shortlisted jobs not judged yet" if outcome.unscreened else ""
+    unread = len(outcome.report.to_check)
+    check = f" (+{unread} to check: full posting not read yet)" if unread else ""
     await _say(
         emit,
         "done",
-        f"{stopped}: {matches} {found} from {outcome.fetched} postings in {outcome.seconds}s{left}",
+        f"{stopped}: {matches} {found}{check} from {outcome.fetched} postings in "
+        f"{outcome.seconds}s{left}",
     )
+    _take_log(outcome)
     await emit("search_results", {"outcome": outcome.model_dump(mode="json")})
     return outcome
+
+
+def _take_log(outcome: SearchOutcome) -> None:
+    """Move the run's progress lines into its outcome (a Continue or a recheck adds its lines
+    to the search's log), so a saved search shows what happened and how long each step took."""
+    log = _log.get()
+    if log is not None:
+        outcome.progress_log = [*outcome.progress_log, *log[1]][-LOG_LINES:]
+        log[1].clear()
 
 
 def count_unscreened(ws: Workspace, req: SearchRequest, report: MatchReport) -> int:
@@ -306,6 +507,9 @@ def count_unscreened(ws: Workspace, req: SearchRequest, report: MatchReport) -> 
 
 
 async def _say(emit: Emit, stage: str, message: str, **extra: Any) -> None:
+    log = _log.get()
+    if log is not None:
+        log[1].append(f"{time.monotonic() - log[0]:7.1f}s  {message}")
     await emit("search_progress", {"stage": stage, "message": message, **extra})
 
 
@@ -332,15 +536,20 @@ async def _ensure_company_boards(ws: Workspace, emit: Emit) -> None:
         status="running",
     )
     try:
-        report = await asyncio.to_thread(
-            company_discovery.discover_companies,
-            ws.settings,
-            mode="new",
-            progress=progress,
-            should_stop=lambda: stop is not None and stop.is_set(),
+        report = await _until_stopped(
+            asyncio.to_thread(
+                company_discovery.discover_companies,
+                ws.settings,
+                mode="new",
+                progress=progress,
+                should_stop=lambda: stop is not None and stop.is_set(),
+            ),
+            None,
         )
     except SourceError as exc:
         await _say(emit, "capture", f"Company sites: discovery failed: {exc}", source="company")
+        return
+    if report is None:  # stopped: what was found so far is kept, the next search resumes
         return
     boards = sum(report.boards.values())
     await _say(emit, "capture", f"Company sites: {boards} job boards ready", source="company")
@@ -360,6 +569,23 @@ async def _load_cv(
     cv = await cv_service.ensure_selected_cv(ws, usage_sink)
     await _say(emit, "cv", f"CV ready: {len(cv.experience)} roles, {len(cv.all_skills())} skills")
     return cv
+
+
+async def _learn_from_reasons(ws: Workspace, emit: Emit, usage_sink: UsageSink | None) -> None:
+    """New labels, applied and N/A reasons become profile preferences before this search uses
+    the profile (one quality-model call, only when there is something new to read)."""
+    await _say(emit, "summary", "Checking your labels and reasons for anything new to learn")
+    llm = ws.structured("quality", usage_sink, "Learn from your labels")
+    try:
+        learned = await _until_stopped(asyncio.to_thread(learning.learn_new, ws, llm), None)
+    except Exception as exc:  # noqa: BLE001 - learning is optional: the search goes on
+        await _say(emit, "summary", f"Could not learn from your labels this time: {exc}")
+        return
+    if learned:
+        added = "; ".join(p.text for p in learned)
+        await _say(emit, "summary", f"Added to your profile from your labels and reasons: {added}")
+    elif learned is not None:
+        await _say(emit, "summary", "Read your new labels and reasons: nothing new to add")
 
 
 async def _plan_query(
@@ -382,9 +608,14 @@ async def _plan_query(
         await _say(emit, "summary", f"Using your selected profile ({label})")
     if cv is not None and _titles_from_cv(ws, req):
         # The summary is stored per CV, so the same CV always searches the same roles.
-        profile = profile or await get_summary(
-            ws, cv, query, req.refresh_summary, emit, usage_sink, intent
-        )
+        try:
+            profile = profile or await get_summary(
+                ws, cv, query, req.refresh_summary, emit, usage_sink, intent
+            )
+        except LLMError:
+            if not _stopped():
+                raise
+            return query, None  # stopped: the sources are skipped and the run ends at once
         summary = profile[0]
         planned = family_terms(summary, req.widen, BOARD_TERMS)
         if planned and not any(f.tier == "core" for f in searched_families(summary, req.widen)):
@@ -437,7 +668,7 @@ def _attribute(report: MatchReport, widen: bool) -> dict[str, str]:
     if summary is None:
         return {}
     families = searched_families(summary, widen)
-    for result in [*report.matches, *report.below_threshold, *report.excluded]:
+    for result in [*report.scored(), *report.excluded]:
         result.family = family_of(result.job.title, families)
     return {f.name: f.tier for f in families}
 
@@ -480,7 +711,7 @@ async def _match(
     excluded = len(report.excluded)
     await _say(emit, "prefilter", f"Pre-filter: {excluded} excluded by hard rules ({_RULES}); "
                f"shortlist of {len(shortlist)} for screening")  # fmt: skip
-    enriched = await _enrich_shortlist(shortlist, sources, errors, emit)
+    enriched = await _enrich_shortlist(shortlist, sources, errors, emit, settings)
     if enriched:  # re-score with full descriptions
         report = prefilter(_replace(jobs, enriched), first)
         shortlist = _shortlist(report, settings)
@@ -544,17 +775,36 @@ def screening_base(cv: Any, query: SearchQuery) -> str:
 
 
 async def _enrich_shortlist(
-    shortlist: list[JobPosting], sources: list[JobSource], errors: dict[str, str], emit: Emit
+    shortlist: list[JobPosting],
+    sources: list[JobSource],
+    errors: dict[str, str],
+    emit: Emit,
+    settings: Settings,
 ) -> dict[str, JobPosting]:
     if not shortlist:
         return {}
     await _say(
         emit, "enrich", f"Checking full descriptions for {len(shortlist)} shortlisted postings"
     )
-    enriched = await asyncio.to_thread(_enrich, shortlist, sources, errors)
-    if enriched:
-        await _say(emit, "enrich", f"Fetched {len(enriched)} full job descriptions")
+    found_errors: dict[str, str] = {}
+    enriched = await _until_stopped(
+        asyncio.to_thread(
+            _enrich, shortlist, sources, found_errors, settings, False, _thread_note(emit)
+        ),
+        {},
+    )
+    errors |= found_errors
     return enriched
+
+
+def _thread_note(emit: Emit) -> Callable[[str], None]:
+    """A progress line from a worker thread, delivered on the event loop."""
+    loop = asyncio.get_running_loop()
+
+    def note(message: str) -> None:
+        asyncio.run_coroutine_threadsafe(_say(emit, "enrich", message), loop)
+
+    return note
 
 
 async def _screen(
@@ -589,6 +839,11 @@ async def _screen(
     async def note(message: str) -> None:
         await _say(emit, "screen", message)
 
+    async def review_progress(done: int, total: int) -> None:
+        # Its own row and bar in the UI, so the first pass's count is not overwritten.
+        message = f"Second opinions {done}/{total}"
+        await _say(emit, "screen", message, done=done, total=total, phase="review")
+
     verdicts, screening_errors = await screen_jobs(
         summary,
         shortlist,
@@ -606,6 +861,7 @@ async def _screen(
         note=note,
         review_llm=ws.structured("quality", usage_sink, "Second opinion"),
         intent=intent,
+        review_progress=review_progress,
     )
     remembered = sum(v.from_memory for v in verdicts.values())
     if remembered:
@@ -643,7 +899,7 @@ async def get_summary(
     usage_sink: UsageSink | None = None,
     intent: SearchIntent | None = None,
 ) -> tuple[ProfileSummary, bool]:
-    """Profile summary (quality model), reused from memory for the same CV and search type.
+    """Profile summary (profile model), reused from memory for the same CV and search type.
     A new one is oriented by the career `intent` (the selected CV's when not given). The
     preferences you accepted from your labels are applied on top (`learning`)."""
     intent = intent if intent is not None else get_intent(ws)
@@ -652,23 +908,35 @@ async def get_summary(
     if cv is not None and ws.active_cv_id:
         ws.memory.adopt(ws.active_cv_id, cv_fingerprint(cv))
     known = not refresh and ws.memory.get(owner, family) is not None
-    model = ws.llm.model_for("quality")
+    model = ws.llm.model_for("profile")
     await _say(
         emit,
         "summary",
         f"Profile summary for role family '{family}': "
         + ("loading from memory" if known else f"building a new one with {model}"),
     )
-    result = await asyncio.to_thread(
-        summarize_profile,
-        cv,
-        query,
-        ws.structured("quality", usage_sink, "Profile summary"),
-        ws.memory,
-        refresh,
-        ws.active_cv_id,
-        intent,
+    # A new summary reads the original document, not only the parsed extract.
+    progress.step("Loading the stored profile" if known else "Reading your CV document")
+    source = None if known or cv is None else await asyncio.to_thread(cv_service.source_text, ws)
+    if not known:
+        progress.step(f"Building the profile with {model}")
+    result = await _until_stopped(
+        asyncio.to_thread(
+            summarize_profile,
+            cv,
+            query,
+            ws.structured("profile", usage_sink, "Profile summary"),
+            ws.memory,
+            refresh,
+            ws.active_cv_id,
+            intent,
+            source,
+        ),
+        None,
     )
+    if result is None:
+        raise LLMError("Search stopped before the profile summary was ready")
+    progress.step("Saving the profile")
     _label_profiles(ws, cv)
     await _say(emit, "summary", "Profile summary ready" + (" (from memory)" if result[1] else ""))
     return learning.learned_for(ws, result[0], cv), result[1]
@@ -738,6 +1006,15 @@ async def refresh_profile(
     titles = [] if rec.role_family == "any" else [rec.role_family]
     await get_summary(ws, cv, SearchQuery(titles=titles), True, usage_sink=usage_sink)
     return _own_record(ws, cv, key)
+
+
+def remove_result(ws: Workspace, job_id: str, history_id: str | None) -> bool:
+    """Delete a posting from the current results and from its search in the history. Its
+    tracker status and label are kept: this only tidies the list."""
+    removed = ws.last_report is not None and history.drop_job(ws.last_report, job_id)
+    if history_id is not None:
+        removed = history.remove_job(ws, history_id, job_id) or removed
+    return removed
 
 
 def pinned_profile(ws: Workspace, cv: Any, key: str | None) -> tuple[ProfileSummary, bool] | None:
@@ -825,7 +1102,12 @@ async def _capture(
             source=src.name,
             status="running",
         )
-        found, failed = await asyncio.to_thread(fetch_all, [src], source_query, counts)
+        found_counts: dict[str, int] = {}  # its own, so a fetch left running cannot touch ours
+        found, failed = await _until_stopped(
+            asyncio.to_thread(fetch_all, [src], source_query, found_counts),
+            ([], {src.name: "stopped while searching"}),
+        )
+        counts |= found_counts
         jobs += found
         errors |= failed
         if src.name in failed:
@@ -924,7 +1206,7 @@ def _shortlist(report: MatchReport, settings: Settings) -> list[JobPosting]:
     Ranked without AI verdicts, so it is the same list before and after screening."""
     targets = report.profile.target_titles
     ranked = sorted(
-        [*report.matches, *report.below_threshold],
+        report.scored(),
         key=lambda r: (
             not targets or shares_role_words(r.job.title, targets),
             r.score.total if r.score else 0.0,
@@ -946,19 +1228,107 @@ def _shortlist(report: MatchReport, settings: Settings) -> list[JobPosting]:
 
 
 def _enrich(
-    shortlist: list[JobPosting], sources: list[JobSource], errors: dict[str, str]
+    shortlist: list[JobPosting],
+    sources: list[JobSource],
+    errors: dict[str, str],
+    settings: Settings,
+    fresh_linkedin: bool = False,
+    note: Callable[[str], None] | None = None,
 ) -> dict[str, JobPosting]:
-    by_name = {s.name: s for s in sources if hasattr(s, "enrich")}
+    """Full text for snippet-only postings, so the job_matcher can check their requirements:
+    the posting's own source first (LinkedIn also opens LinkedIn alert jobs, which share its
+    ids), then the posting's own page's JSON-LD where robots.txt allows, then the page in
+    headless, signed-out Chrome (`BrowserFetcher`) when Chrome is available. LinkedIn
+    postings run in their own lane, in parallel with the rest, so its slower pace does not
+    hold the other boards back. Reports each posting through `note`; stops opening more
+    after `enrich_budget_s` (the rest can be fetched later from the results)."""
+    say = note or (lambda _: None)
+    by_name: dict[str, Any] = {s.name: s for s in sources if hasattr(s, "enrich")}
+    # A recheck later on starts a new LinkedIn client: the search's one may have been refused.
+    linkedin: Any = None if fresh_linkedin else by_name.get("linkedin_search")
+    if linkedin is None:
+        linkedin = LinkedInSource(settings=settings)
+    chrome = BrowserFetcher(settings)
+    readers = [PostingPages(settings=settings), *([chrome] if chrome.available else [])]
+    thin = [j for j in shortlist if len(j.description) <= ENRICH_BELOW]
+    lanes = {
+        "LinkedIn": [j for j in thin if j.id.startswith("linkedin:")],
+        "other boards": [j for j in thin if not j.id.startswith("linkedin:")],
+    }
+    deadline = time.monotonic() + settings.enrich_budget_s
+
+    def readers_for(job: JobPosting) -> list[Any]:
+        src = linkedin if job.id.startswith("linkedin:") else by_name.get(job.source)
+        return [src, *readers]
+
+    runs = [(contextvars.copy_context(), n, jobs) for n, jobs in lanes.items() if jobs]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(lambda r: r[0].run(_open_lane, r[1], r[2], readers_for, deadline, say), runs)
+        )
     out: dict[str, JobPosting] = {}
-    for job in shortlist:
-        src = by_name.get(job.source)
-        if src is None or len(job.description) > 600:
+    read_by: Counter[str] = Counter()
+    for found, errs, by in results:
+        out |= found
+        errors |= errs
+        read_by += by
+    if thin:
+        how = ", ".join(f"{n} via {r}" for r, n in sorted(read_by.items()))
+        say(f"Full text read for {len(out)} of {len(thin)} snippet-only postings"
+            + (f" ({how})" if how else ""))  # fmt: skip
+    return out
+
+
+_LaneResult = tuple[dict[str, JobPosting], dict[str, str], Counter[str]]
+
+
+def _open_lane(
+    name: str,
+    jobs: list[JobPosting],
+    readers_for: Callable[[JobPosting], list[Any]],
+    deadline: float,
+    say: Callable[[str], None],
+) -> _LaneResult:
+    """One lane of postings, opened one after another until the deadline."""
+    out: dict[str, JobPosting] = {}
+    errs: dict[str, str] = {}
+    read_by: Counter[str] = Counter()
+    for i, job in enumerate(jobs, 1):
+        if time.monotonic() > deadline:
+            say(f"{name}: time budget for opening postings reached; {len(jobs) - i + 1} "
+                "left to fetch later from the results")  # fmt: skip
+            break
+        say(f"{name}: opening full posting {i}/{len(jobs)}: {job.title} ({job.company})")
+        full, reader = _read_one(job, readers_for(job), errs)
+        if full is not job:
+            out[job.id] = full
+            read_by[reader] += 1
+    return out, errs, read_by
+
+
+def _read_one(
+    job: JobPosting, readers: list[Any], errors: dict[str, str]
+) -> tuple[JobPosting, str]:
+    """`job` through each reader until its text is long enough; (posting, who read it)."""
+    full, by = job, ""
+    for reader in readers:
+        if reader is None or len(full.description) > ENRICH_BELOW:
             continue
         try:
-            out[job.id] = src.enrich(job)
+            read = reader.enrich(full)
         except SourceError as exc:
             errors[f"enrich {job.id}"] = str(exc)
-    return out
+            continue
+        if read is not full:
+            full, by = read, READER_NAMES.get(reader.name, reader.name)
+    return full, by
+
+
+READER_NAMES = {
+    "linkedin_search": "LinkedIn",
+    "posting_pages": "page data",
+    "browser": "Chrome",
+}
 
 
 def _replace(jobs: list[JobPosting], enriched: dict[str, JobPosting]) -> list[JobPosting]:

@@ -5,7 +5,7 @@
   "description": "Semantic screening: judges each shortlisted posting against the profile summary (realistic role families only) and the career intent, and returns a verdict.",
   "model_role": "screening (first pass); quality (second opinions on every match and near the threshold)",
   "input": [
-    "ProfileSummary (role families code rejected are removed), with the preferences the user accepted from their labels (services.learning)",
+    "ProfileSummary built from the original CV document and its structured extract (capabilities, publication record, role families with CV or [src-N] document evidence; families code rejected are removed), with the preferences the user accepted from their labels (services.learning)",
     "career intent (optional)",
     "candidate base + search constraints (job-level exclusions only when the user sets a minimum or maximum)",
     "posting digests (batch of 3, or 1 for a second opinion); long descriptions keep their requirements section (3000 chars)"
@@ -20,10 +20,10 @@
     "batch_timeout_s": 240,
     "retries": 1
   },
-  "decision": "code: points = level/4 of each weight; fit_score = their sum, capped at 65 if an essential is unmet or a dimension < 40% of its weight; match = fit_score >= threshold (default 60) AND no dealbreakers; borderline = |fit_score - threshold| <= 5 and no dealbreakers; alignment never changes fit_score: 'against' caps priority at 'consider' and lowers the rank by 10 points",
+  "decision": "code: points = level/4 of each weight; fit_score = their sum, capped at 55 (never a match) if a core requirement is unmet; capped at 62 (requirements_checked false, still listable) if the posting has under 600 characters of text and no listed requirements; else capped at 65 if a dimension < 40% of its weight; match = fit_score >= threshold (default 60) AND no dealbreakers AND no unmet core requirement; borderline = |fit_score - threshold| <= 5 for postings that can match; alignment never changes fit_score: 'against' caps priority at 'consider' and lowers the rank by 10 points",
   "consistency": {
     "memory": "data/verdict_cache.json keyed by normalized posting text (known company aliases and presentation-only description labels) + profile summary + career intent + constraints + provider:screening model:effort|review:quality model:effort + MATCHER_VERSION",
-    "second_opinion": "every first-pass match, postings within 5 points of the threshold, or scoring 65-80 with seniority and leadership both at levels 2-3: one more single-posting assessment by the quality model, levels averaged and rounded down"
+    "second_opinion": "every first-pass match, postings within 5 points of the threshold, scoring 65-80 with seniority and leadership both at levels 2-3, or matching but for an unmet core requirement (never a posting whose requirements could not be read): one more single-posting assessment by the quality model, levels averaged and rounded down; an unmet core requirement stands only when most readings find one (a third reading breaks a tie); unread would-be matches go to report.to_check, not matches"
   },
   "sector_and_domain": "profile-driven (the profile's domains), not tied to one industry; adjacent role families are rated on how much of the work their evidence covers, never a dealbreaker on discipline alone"
 }

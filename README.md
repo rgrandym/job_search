@@ -28,8 +28,8 @@ It opens http://localhost:5173. Running it again restarts both servers cleanly; 
 `bash scripts/dev.sh --stop`) stops both. Logs are in `.run/logs/`.
 
 1. **Settings** (top right): pick Claude, Claude Code (Pro/Max), Codex (ChatGPT), or OpenAI API,
-   then choose two models, each with its own effort: the **quality** model (profile
-   summary, CV reading and tailoring, cover letters, second opinions on matches and near the threshold, the
+   then choose the models, each with its own effort: the **profile** model (the profile
+   summary every job is judged against; blank uses the quality model; it may use another signed-in provider, e.g. Opus through Claude Code while Codex screens), the **quality** model (CV reading and tailoring, cover letters, second opinions on matches and near the threshold, the
    assistant) and the **screening** model (first-pass job matching, hundreds of calls per
    search). Claude Code and Codex drive your local, signed-in CLI (`claude -p` / `codex exec`)
    and need no API key; usage counts against your plan's limits. The UI recommends a setup per
@@ -94,7 +94,7 @@ See [Connect a Gmail inbox for job alerts](USER_GUIDE.md#3-connect-a-gmail-inbox
    required certifications, seniority gap.
 2. **Pre-filter score** (deterministic, 0–100): title 25 · skills 35 · experience 20 · location 10 ·
    context 10. This only builds the shortlist.
-3. **Profile summary** (quality model): an evidence-based reading of your CV for the searched
+3. **Profile summary** (profile model, or the quality model when none is set): an evidence-based reading of your CV for the searched
    role family, remembered and reused.
 4. **job_matcher** (screening model; second opinions on matches and near the threshold by the quality model):
    judges each shortlisted posting like a recruiter. A fit score at or above the threshold

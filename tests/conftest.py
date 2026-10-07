@@ -45,6 +45,8 @@ def settings(tmp_path: Path) -> Settings:
         _env_file=None,  # type: ignore[call-arg]
         request_delay_s=0,
         linkedin_delay_s=0,
+        linkedin_cooldown_s=0,
+        browser_delay_s=0,
         data_dir=tmp_path,
         output_dir=tmp_path / "output",
         master_cv_path=tmp_path / "master_cv.json",
@@ -61,3 +63,21 @@ def _no_company_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
         return None
 
     monkeypatch.setattr(search_service, "_ensure_company_boards", skip)
+
+
+@pytest.fixture(autouse=True)
+def _title_only_postings_are_readable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Most fixtures are title-only postings that test other behaviour; the rule that a
+    posting without readable requirements is never a match is tested with `CHECKABLE_CHARS`
+    restored (`tests/test_screening.py`)."""
+    from src.jobs import screener
+
+    monkeypatch.setattr(screener, "CHECKABLE_CHARS", 0)
+
+
+@pytest.fixture(autouse=True)
+def _no_chrome(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests never launch the user's Chrome; browser tests pass their own `run`."""
+    from src.jobs.sources import browser
+
+    monkeypatch.setattr(browser, "find_chrome", lambda settings: None)

@@ -1,7 +1,7 @@
 import { Plus, X } from "lucide-react";
 import type { FamilyTier, FamilyYield, RoleFamily } from "../lib/types";
 import { cn } from "../lib/utils";
-import { ChipInput, Field } from "./ui";
+import { AutoText, ChipInput, Field } from "./ui";
 
 const TIERS: { value: FamilyTier; label: string; hint: string }[] = [
   { value: "core", label: "Core", hint: "the work you do now" },
@@ -81,8 +81,8 @@ export function RoleFamiliesEditor({ value, onChange }: { value: RoleFamily[]; o
       <p className="label">Role families</p>
       {value.map((f, i) => (
         <div key={i} className="space-y-1 rounded-md border border-border p-2">
-          <div className="grid grid-cols-[minmax(0,1fr)_130px_24px] gap-1">
-            <input className="input" placeholder="Family name" value={f.name} onChange={(e) => patch(i, { name: e.target.value })} />
+          <div className="grid grid-cols-[minmax(0,1fr)_130px_24px] items-start gap-1">
+            <AutoText singleLine placeholder="Family name" value={f.name} onChange={(name) => patch(i, { name })} />
             <select className="input" value={f.tier} onChange={(e) => patch(i, { tier: e.target.value as FamilyTier })}>
               {TIERS.map((t) => (
                 <option key={t.value} value={t.value}>
@@ -97,7 +97,8 @@ export function RoleFamiliesEditor({ value, onChange }: { value: RoleFamily[]; o
           <Field label="Titles employers advertise">
             <ChipInput value={f.titles} onChange={(titles) => patch(i, { titles })} placeholder="Add a title, press Enter" />
           </Field>
-          <input className="input" placeholder="Main gap" value={f.gap} onChange={(e) => patch(i, { gap: e.target.value })} />
+          <AutoText singleLine placeholder="Main gap" value={f.gap} onChange={(gap) => patch(i, { gap })} />
+          <AutoText singleLine placeholder="Why an employer would consider you" value={f.rationale} onChange={(rationale) => patch(i, { rationale })} />
           {f.rejected && (
             <label className="flex items-center gap-2 text-[11px] text-warn">
               <input type="checkbox" checked={false} onChange={() => patch(i, { rejected: null })} />

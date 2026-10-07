@@ -87,6 +87,21 @@ it centres on work they want to avoid, an avoided sector or a soft dealbreaker; 
 "neutral". alignment_note names which (under 15 words). Without a career intent, \
 alignment is neutral.
 
+Requirements check (do this first, for every posting with a description): find the \
+posting's core requirements: what the role is built on and an employer would screen \
+candidates out for, stated as essential or required, or plainly the centre of the job even \
+when not labelled so (e.g. "PhD in a relevant field", "5+ years leading GMP manufacturing", \
+"you will design novel algorithms"). Before calling one unmet, check the profile's \
+key_skills, capabilities, core_expertise and transferable_strengths for direct or clearly \
+equivalent evidence. A core requirement with none goes in essential_unmet, in the posting's \
+words, at most 2 per posting, and function is then at most 2. Never core: day-to-day duties \
+or outputs (producing reports, presentations, coordinating meetings), common tools learnable \
+within weeks (Linux, git, Excel, a named software package), organisation-specific knowledge, \
+and desirable or nice-to-have items; list those under gaps when the profile lacks them. In \
+an adjacent-family posting, a requirement the family's evidence covers through transferable \
+experience is not unmet; a core skill or experience nothing in the profile shows is unmet, \
+as for any role.
+
 Rules:
 - Distinguish direct experience (reasons) from transferable experience (transferable). \
 Never let transferable experience silently stand in for direct experience. Judge \
@@ -96,7 +111,9 @@ tool or product is not automatically disqualifying.
 - Many postings are alert snippets (title, company, location, a line or two). Judge from \
 what is there: score a dimension the posting is silent on from what the title, company and \
 level imply, and list what is missing under unknowns. Silence is not a gap.
-- essential_unmet: only requirements the posting itself states as essential or required.
+- essential_unmet: core requirements (see the requirements check) the profile does not \
+evidence. Code never lists such a role as a match, so be exact: neither miss one nor list \
+what the profile does show.
 - dealbreakers: only a clearly different discipline, a role in not_a_fit, or a stated \
 constraint violated. A dealbreaker means the role should not be listed.
 - Keyword overlap must never inflate a score where function, level or location are wrong.
@@ -106,9 +123,19 @@ gaps cite specifics from the posting and the profile.
 - Be concise: fit_summary is one sentence; every list has at most 3 items (the most \
 important first), each a short clause of under 20 words. The scores carry the judgement."""
 
-# A total is capped here when an essential requirement is unmet or any one dimension is
-# below this share of its weight: keyword density must not hide a real mismatch.
+# A total is capped here when any one dimension is below this share of its weight: keyword
+# density must not hide a real mismatch.
 CAP_SCORE = 65
+# A role missing a core requirement is never a match: its score is capped below the listing
+# floor (60) and `match` is false whatever the threshold. There is no point applying for a
+# role that needs what the CV does not show.
+UNMET_CAP = 55
+# A role whose requirements could not be read may still be listed, but never as a high scorer:
+# capped as a low stretch, under the checked matches, until its full posting is read.
+UNCHECKED_CAP = 62
+# Less posting text than this (and no structured requirements) cannot show the requirements:
+# alert listings and cards LinkedIn refused to open.
+CHECKABLE_CHARS = 600
 WEAK_DIMENSION_SHARE = 0.4
 # Scores this close to the threshold (either side) are flagged: different models, or the same
 # model on another run, typically differ by ~10 points, so these could fall either way.
@@ -118,7 +145,7 @@ MAX_POINTS = 3
 
 # Bump whenever the prompt or the scale changes: remembered verdicts from another version are
 # not reused.
-MATCHER_VERSION = "levels-2"  # profile-driven sectors, role families, career intent
+MATCHER_VERSION = "levels-4"  # tighter core requirements; a block needs two readings to agree
 CACHE_SIZE = 5000  # remembered assessments kept (newest)
 
 DESCRIPTION_CHARS = 3000  # long postings keep their requirements section (`posting_excerpt`)
@@ -146,22 +173,40 @@ def _priority(score: int, blocked: bool, against_intent: bool = False) -> Priori
     return "apply_now" if score >= 80 else "worth_applying" if score >= 70 else "consider"
 
 
+def checkable(job: JobPosting) -> bool:
+    """Whether the posting shows enough to check its requirements against the profile."""
+    return bool(job.required_skills) or len(posting_description(job.description)) >= CHECKABLE_CHARS
+
+
 def finalize(
-    assessment: JobAssessment, threshold: float, *, reviewed: bool = False, remembered: bool = False
+    assessment: JobAssessment,
+    threshold: float,
+    *,
+    reviewed: bool = False,
+    remembered: bool = False,
+    checked: bool = True,
 ) -> JobVerdict:
-    """Code decides: points from the levels, total = their sum, capped when an essential is
-    unmet or a dimension is weak; band, priority and match follow from the final score."""
+    """Code decides: points from the levels, total = their sum. An unmet core requirement caps
+    it below the listing floor and is never a match; a posting whose requirements could not
+    be read (`checked=False`) is capped as a low stretch; a weak dimension caps it at 65.
+    Band, priority and match follow from the final score."""
     points = rating_points(assessment.ratings)
     dims = points.model_dump()
     total = sum(min(dims[name], weight) for name, weight in FIT_WEIGHTS.items())
     weak = [n for n, w in FIT_WEIGHTS.items() if dims[n] < WEAK_DIMENSION_SHARE * w]
-    cap_reason: str | None = None
-    if total > CAP_SCORE and assessment.essential_unmet:
-        cap_reason = "essential requirement unmet: " + "; ".join(assessment.essential_unmet)
+    unmet = bool(assessment.essential_unmet)
+    cap, cap_reason = total, None
+    if unmet:
+        cap = UNMET_CAP
+        cap_reason = "core requirement unmet: " + "; ".join(assessment.essential_unmet)
+    elif not checked and total > UNCHECKED_CAP:
+        cap = UNCHECKED_CAP
+        cap_reason = "requirements not checked: the full posting could not be read yet"
     elif total > CAP_SCORE and weak:
-        cap_reason = "weak on " + ", ".join(weak)
-    score = min(total, CAP_SCORE) if cap_reason else total
+        cap, cap_reason = CAP_SCORE, "weak on " + ", ".join(weak)
+    score = min(total, cap)
     blocked = bool(assessment.dealbreakers)
+    eligible = not blocked and not unmet
     lists = ("reasons", "transferable", "gaps", "essential_unmet", "unknowns", "dealbreakers")
     trimmed = {k: v[:MAX_POINTS] if k in lists else v for k, v in assessment.model_dump().items()}
     return JobVerdict(
@@ -172,36 +217,55 @@ def finalize(
         fit_score=score,
         band=_band(score),
         priority=_priority(score, blocked, assessment.alignment == "against"),
-        match=score >= threshold and not blocked,
-        borderline=not blocked and abs(score - threshold) <= BORDERLINE_MARGIN,
+        match=score >= threshold and eligible,
+        borderline=eligible and checked and abs(score - threshold) <= BORDERLINE_MARGIN,
         cap_reason=cap_reason,
+        requirements_checked=checked,
     )
 
 
-def combine(first: JobAssessment, second: JobAssessment) -> JobAssessment:
-    """Two independent assessments of one posting: each level is their mean, rounded down
-    (a tie between two readings resolves to the cautious one); the text of the first is kept
-    with the union of dealbreakers and unmet essentials, so neither reading's blocker is lost."""
+def combine(
+    first: JobAssessment, second: JobAssessment, third: JobAssessment | None = None
+) -> JobAssessment:
+    """Independent assessments of one posting: each level is the mean of the first two,
+    rounded down (a tie resolves to the cautious one); the text of the first is kept with the
+    union of dealbreakers. An unmet core requirement blocks a match outright, so it stands
+    only when most readings find one (`third` breaks a tie between the first two); then
+    every reading's unmet requirements are kept."""
     a, b = first.ratings.model_dump(), second.ratings.model_dump()
     ratings = FitRatings(**{n: (a[n] + b[n]) // 2 for n in a})
+    readings = [r for r in (first, second, third) if r is not None]
+    blocking = [r for r in readings if r.essential_unmet]
+    agreed = 2 * len(blocking) > len(readings)
+    unmet = [u for r in blocking for u in r.essential_unmet] if agreed else []
+    dealbreakers = [*first.dealbreakers, *second.dealbreakers]
     union: dict[str, Any] = {
-        k: list(dict.fromkeys([*getattr(first, k), *getattr(second, k)]))[:MAX_POINTS]
-        for k in ("dealbreakers", "essential_unmet")
+        "dealbreakers": list(dict.fromkeys(dealbreakers))[:MAX_POINTS],
+        "essential_unmet": list(dict.fromkeys(unmet))[:MAX_POINTS],
     }
     if second.alignment == "against" and first.alignment != "against":
         union |= {"alignment": "against", "alignment_note": second.alignment_note}
     return first.model_copy(update={"ratings": ratings, **union})
 
 
-def _needs_review(assessment: JobAssessment, threshold: float) -> bool:
+def _needs_review(assessment: JobAssessment, threshold: float, checked: bool = True) -> bool:
     """Recheck every match, threshold cases and ambiguous midrange seniority/leadership
     judgments. Matches are rechecked because a lenient first pass can miss an unmet essential
-    and rank a weak job at the top; they are few, so the extra calls are cheap."""
+    and rank a weak job at the top; they are few, so the extra calls are cheap. A posting
+    without readable requirements is not rechecked: a second reading cannot see more."""
+    if not checked:
+        return False
     verdict = finalize(assessment, threshold)
     ratings = assessment.ratings
+    unmet_only = (
+        bool(assessment.essential_unmet)
+        and not assessment.dealbreakers
+        and finalize(assessment.model_copy(update={"essential_unmet": []}), threshold).match
+    )
     return (
         verdict.match
         or verdict.borderline
+        or unmet_only  # one reading's unmet requirement alone would drop a good role
         or (
             65 <= verdict.fit_score <= 80
             and ratings.seniority in (2, 3)
@@ -357,12 +421,24 @@ async def _review(
 ) -> dict[str, tuple[JobAssessment, bool]]:
     """Second, independent single-posting assessment for every match and borderline first
     verdict; returns (assessment to keep, whether it was reviewed) by job id."""
-    near = sorted(j for j, a in first.items() if _needs_review(a, threshold))
+    near = sorted(
+        j for j, a in first.items() if _needs_review(a, threshold, checkable(by_id[j]))
+    )
     if near and note is not None:
         await note(f"Second opinion on {len(near)} matching or borderline posting(s)")
+    if near and progress is not None:
+        await progress(0, len(near))
     second = await runner.run([by_id[j] for j in near], 1, progress) if near else {}
+    # The two readings disagree on whether a core requirement is unmet: a third decides.
+    split = sorted(
+        j for j in second if bool(first[j].essential_unmet) != bool(second[j].essential_unmet)
+    )
+    if split and note is not None:
+        await note(f"Third reading on {len(split)} posting(s) the first two disagreed on")
+    third = await runner.run([by_id[j] for j in split], 1, None) if split else {}
     return {
-        j: (combine(a, second[j]), True) if j in second else (a, False) for j, a in first.items()
+        j: (combine(a, second[j], third.get(j)), True) if j in second else (a, False)
+        for j, a in first.items()
     }
 
 
@@ -452,10 +528,12 @@ def _recall(
         if cache is not None and cache.get(keys[job.id]) is None:
             cache.put(keys[job.id], hit.assessment, hit.reviewed)
         found = hit.assessment.model_copy(update={"job_id": job.id})
-        if not hit.reviewed and _needs_review(found, threshold):
+        if not hit.reviewed and _needs_review(found, threshold, checkable(job)):
             pending[job.id] = found
         else:
-            verdicts[job.id] = finalize(found, threshold, reviewed=hit.reviewed, remembered=True)
+            verdicts[job.id] = finalize(
+                found, threshold, reviewed=hit.reviewed, remembered=True, checked=checkable(job)
+            )
     return verdicts, pending, todo
 
 
@@ -512,10 +590,12 @@ async def screen_jobs(
     )
     if reviewer is not runner:
         runner.errors += reviewer.errors
+    by_id = {j.id: j for j in jobs}
     for job_id, (assessment, reviewed) in final.items():
-        if cache is not None and (reviewed or not _needs_review(assessment, threshold)):
+        checked = checkable(by_id[job_id])
+        if cache is not None and (reviewed or not _needs_review(assessment, threshold, checked)):
             cache.put(keys[job_id], assessment, reviewed)  # an unreviewed match is retried
-        verdicts[job_id] = finalize(assessment, threshold, reviewed=reviewed)
+        verdicts[job_id] = finalize(assessment, threshold, reviewed=reviewed, checked=checked)
     if cache is not None:
         cache.save()
     return verdicts, runner.errors
@@ -524,15 +604,26 @@ async def screen_jobs(
 def apply_verdicts(report: MatchReport, verdicts: dict[str, JobVerdict], threshold: float) -> None:
     """Re-bucket a deterministic report using AI verdicts (in place).
 
-    matches          = verdict.match (fit_score >= threshold, no dealbreakers), best first
+    matches          = verdict.match (fit_score >= threshold, no dealbreakers) on a posting
+                       whose requirements were checked, best first
+    to_check         = would match, but the requirements could not be read yet
     below_threshold  = everything else that was scored (screened-out or not screened)
     """
     report.threshold = threshold  # the pre-filter's cut (0 in smart mode) no longer applies
-    pool = [*report.matches, *report.below_threshold]
+    pool = report.scored()
     for r in pool:
         r.verdict = verdicts.get(r.job.id)
         r.passed = bool(r.verdict and r.verdict.match and r.verdict.fit_score >= threshold)
-    report.matches = sorted((r for r in pool if r.passed), key=lambda r: r.rank_key(), reverse=True)
+    report.matches = sorted(
+        (r for r in pool if r.passed and r.verdict and r.verdict.requirements_checked),
+        key=lambda r: r.rank_key(),
+        reverse=True,
+    )
+    report.to_check = sorted(
+        (r for r in pool if r.passed and r.verdict and not r.verdict.requirements_checked),
+        key=lambda r: r.rank_key(),
+        reverse=True,
+    )
     rest = [r for r in pool if not r.passed]
     report.below_threshold = sorted(
         rest, key=lambda r: (r.verdict is not None, r.rank_key()), reverse=True

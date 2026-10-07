@@ -30,6 +30,7 @@ runs it before the first search that includes company sites, and on request.
 
 from __future__ import annotations
 
+import contextvars
 import html
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -230,8 +231,10 @@ class CompanyCareersSource:
                 boards.setdefault(c.key, c)  # a board shared by two entries is read once
         if not boards:
             raise SourceError("Every company job board is switched off")
+        # Each board runs in the caller's context, so a stopped search stops its requests.
+        runs = [(contextvars.copy_context(), c) for c in boards.values()]
         with ThreadPoolExecutor(max_workers=self.settings.company_workers) as pool:
-            results = list(pool.map(lambda c: self._fetch_one(c, query), boards.values()))
+            results = list(pool.map(lambda r: r[0].run(self._fetch_one, r[1], query), runs))
         jobs = [j for found in results for j in found]
         jobs = [j for j in jobs if query.is_loosely_relevant(j) and query.is_recent(j)]
         if query.remote_only:

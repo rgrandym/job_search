@@ -6,6 +6,7 @@ import type { Rejection } from "../lib/api";
 import type { FitDimensions, JobStatus, JobVerdict, MatchResult, OutcomeStage, UserLabel } from "../lib/types";
 import { cn, money, scoreColor } from "../lib/utils";
 import { useSearch } from "../stores/searchStore";
+import { TaskProgress, useTaskId } from "./TaskProgress";
 import { TailoredCVPanel } from "./TailoredCVPanel";
 
 const METRICS = [
@@ -300,6 +301,47 @@ function Rejected({ items, what }: { items: Rejection[]; what: string }) {
   );
 }
 
+/** For a posting whose requirements were not checked: fetch it again, or paste its text. */
+function UncheckedPosting({ onRecheck }: { onRecheck: (description?: string) => void }) {
+  const [pasting, setPasting] = useState(false);
+  const [text, setText] = useState("");
+  return (
+    <div className="space-y-1.5 rounded-md border border-border bg-surface p-2 text-[11px]">
+      <p className="text-muted">
+        Its requirements could not be read, so it was not checked against your profile. Fetch the full posting, or open it
+        and paste the job description.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <button type="button" className="btn-ghost py-1 text-[12px]" onClick={() => onRecheck()}>
+          Fetch full posting
+        </button>
+        <button type="button" className="btn-ghost py-1 text-[12px]" onClick={() => setPasting(!pasting)}>
+          Paste description
+        </button>
+      </div>
+      {pasting && (
+        <div className="space-y-1">
+          <textarea
+            className="input min-h-[120px] resize-y"
+            placeholder="Paste the whole job description, requirements included"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+          />
+          <button
+            type="button"
+            className="btn-primary py-1 text-[12px]"
+            disabled={text.trim().length < 200}
+            title={text.trim().length < 200 ? "Paste the whole description (at least 200 characters)" : undefined}
+            onClick={() => onRecheck(text)}
+          >
+            Judge with this description
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function JobCard({
   result,
   canTailor,
@@ -307,6 +349,9 @@ export function JobCard({
   onSelect,
   savedAt,
   onRemove,
+  onRecheck,
+  removeLabel = "Remove",
+  removeTitle = "Remove from saved jobs (its application record is kept)",
   labelable = true,
 }: {
   result: MatchResult;
@@ -317,6 +362,10 @@ export function JobCard({
   savedAt?: string | null;
   /** Saved-jobs view: remove it from the saved list. */
   onRemove?: () => void;
+  removeLabel?: string;
+  removeTitle?: string;
+  /** Read this job's full posting again (no text), or judge it on pasted `description`. */
+  onRecheck?: (description?: string) => void;
   /** Show "Your call" (only for jobs of the current search, which the label snapshots). */
   labelable?: boolean;
 }) {
@@ -328,8 +377,10 @@ export function JobCard({
   const [documentsOpen, setDocumentsOpen] = useState(false);
   const qc = useQueryClient();
   const setTracking = useSearch((s) => s.setTracking);
+  const tailorTask = useTaskId();
+  const letterTask = useTaskId();
   const tailor = useMutation({
-    mutationFn: () => api.tailor(job.id, template, result, emphasis, level),
+    mutationFn: () => api.tailor(job.id, template, result, emphasis, level, tailorTask.next()),
     onSuccess: (data) => {
       setDocumentsOpen(true);
       void qc.invalidateQueries({ queryKey: ["tailored-cvs"] });
@@ -340,7 +391,7 @@ export function JobCard({
     },
   });
   const letter = useMutation({
-    mutationFn: (documentId?: string) => api.coverLetter(job.id, template, result, documentId),
+    mutationFn: (documentId?: string) => api.coverLetter(job.id, template, result, documentId, letterTask.next()),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["cover-letters"] }),
   });
   const status = result.tracking?.status;
@@ -428,6 +479,14 @@ export function JobCard({
                 Judged before
               </span>
             )}
+            {verdict && !verdict.requirements_checked && (
+              <span
+                className="chip shrink-0 text-warn"
+                title="Only the title and a snippet could be read, so its requirements were not checked against your profile; the score is held to a low stretch"
+              >
+                Requirements not checked
+              </span>
+            )}
           </div>
           <p className="mt-0.5 text-[12px] text-muted">
             {job.company}
@@ -489,7 +548,8 @@ export function JobCard({
               <Lines items={verdict.transferable} mark="~" tone="text-accent" max={2} />
               <Lines items={[...verdict.dealbreakers, ...verdict.essential_unmet, ...verdict.gaps]} mark="−" tone="text-warn" />
               <Lines items={verdict.unknowns} mark="?" tone="text-faint" max={2} />
-              {verdict.cap_reason && <p className="text-[11px] text-faint">Score capped at 65: {verdict.cap_reason}</p>}
+              {verdict.cap_reason && <p className="text-[11px] text-faint">Score capped: {verdict.cap_reason}</p>}
+              {!verdict.requirements_checked && onRecheck && <UncheckedPosting onRecheck={onRecheck} />}
             </div>
           )}
         </div>
@@ -541,8 +601,8 @@ export function JobCard({
           <Mail size={12} /> Cover letter / review CV
         </button>
         {onRemove && (
-          <button className="btn-ghost py-1 text-[12px] text-bad" title="Remove from saved jobs (its application record is kept)" onClick={onRemove}>
-            <Trash2 size={12} /> Remove
+          <button className="btn-ghost py-1 text-[12px] text-bad" title={removeTitle} onClick={onRemove}>
+            <Trash2 size={12} /> {removeLabel}
           </button>
         )}
         {(score || verdict) && (
@@ -587,6 +647,7 @@ export function JobCard({
           <Rejected items={tailor.data.rejections} what="change(s)" />
         </div>
       )}
+      {tailor.isPending && <TaskProgress id={tailorTask.id} className="mt-2" />}
       {tailor.error && <p className="mt-2 text-[12px] text-bad">{(tailor.error as Error).message}</p>}
       {documentsOpen && <TailoredCVPanel jobId={job.id} result={result} hasCv={canTailor} letterPending={letter.isPending} onLetter={(id) => letter.mutate(id)} />}
       {letter.data && (
@@ -598,6 +659,7 @@ export function JobCard({
           <Rejected items={letter.data.rejections} what="paragraph(s)" />
         </div>
       )}
+      {letter.isPending && <TaskProgress id={letterTask.id} className="mt-2" />}
       {letter.error && <p className="mt-2 text-[12px] text-bad">{(letter.error as Error).message}</p>}
 
       {open && (

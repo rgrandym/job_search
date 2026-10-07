@@ -297,6 +297,31 @@ class SkillEvidence(_Strict):
     evidence: str = Field(description="Where in the CV this is demonstrated")
 
 
+class PublicationRecord(_Strict):
+    """What the candidate's publications (and patents, grants, talks, awards) show employers."""
+
+    count: int = Field(0, ge=0, description="Peer-reviewed publications in the document")
+    lead_author: int = Field(0, ge=0, description="Of those, first, last or corresponding author")
+    years: str = Field("", description="Span of the record, e.g. '2008-2025'")
+    themes: list[str] = Field(
+        default_factory=list, description="3-6 research themes, in the words employers use"
+    )
+    notable: list[str] = Field(
+        default_factory=list,
+        description="2-4 outputs most relevant to the target roles: short title, journal, year",
+    )
+    other_outputs: list[str] = Field(
+        default_factory=list,
+        description="Patents, grants, invited talks, reviewing or editorial roles, awards, counted",
+    )
+    signals: list[str] = Field(
+        default_factory=list,
+        description="What the record evidences for employers (recognised expertise in X, "
+        "scientific writing, KOL network, industry collaborations), each tied to the record",
+    )
+    summary: str = Field("", description="2-3 sentences: the record and the roles it strengthens")
+
+
 class ProfileSummary(_Strict):
     """The quality model's evidence-based reading of a candidate, used to screen jobs.
 
@@ -322,11 +347,19 @@ class ProfileSummary(_Strict):
         default_factory=list,
         description="Experience that carries into adjacent roles but is not direct experience",
     )
+    capabilities: list[str] = Field(
+        default_factory=list,
+        description="Every distinct capability the document evidences (technical, delivery, "
+        "leadership, external and commercial, communication), each with brief evidence",
+    )
+    publications: PublicationRecord | None = Field(
+        None, description="The publication record, summarised; null when the CV has none"
+    )
     target_roles: list[str] = Field(description="Roles they fit now, incl. adjacent titles")
     stretch_roles: list[str] = Field(default_factory=list)
     not_a_fit: list[str] = Field(description="Role types to reject, with a short reason each")
     search_keywords: list[str] = Field(default_factory=list)
-    summary: str = Field(description="3-5 sentence narrative")
+    summary: str = Field(description="4-6 sentence narrative")
     role_families: list[RoleFamily] = Field(
         default_factory=list,
         description="The roles to search, grouped and tiered, each with CV evidence",
@@ -463,7 +496,10 @@ class JobVerdict(_AssessmentText):
     borderline: bool = Field(
         False, description="Within BORDERLINE_MARGIN of the threshold: models may disagree"
     )
-    cap_reason: str | None = Field(None, description="Why the score was capped at 65, if it was")
+    cap_reason: str | None = Field(None, description="Why the score was capped, if it was")
+    requirements_checked: bool = Field(
+        True, description="False: too little posting text to check its requirements"
+    )
 
 
 JobStatus = Literal["new", "open", "applied", "na"]
@@ -528,21 +564,32 @@ class MatchReport(_Strict):
     profile: CandidateProfile
     threshold: float
     matches: list[MatchResult] = Field(description="Passed threshold, best first")
+    to_check: list[MatchResult] = Field(
+        default_factory=list,
+        description="Would match on what could be read, but the posting's requirements were not "
+        "checked yet (no full text): fetch or paste it",
+    )
     below_threshold: list[MatchResult] = Field(default_factory=list)
     excluded: list[MatchResult] = Field(default_factory=list)
     applied: list[MatchResult] = Field(
         default_factory=list, description="Already applied for: set aside before screening"
     )
     dismissed: list[MatchResult] = Field(
-        default_factory=list, description="Marked N/A by the user: set aside before screening"
+        default_factory=list,
+        description="Marked N/A or labelled no by the user: set aside before screening",
     )
     not_retrieved: list[str] = Field(default_factory=list, description="Job ids cut at retrieval")
     screened: bool = Field(False, description="True if the job_matcher judged matches")
     summary: ProfileSummary | None = None
 
+    def scored(self) -> list[MatchResult]:
+        """Every posting that went to scoring: matches, to check, and not selected."""
+        return [*self.matches, *self.to_check, *self.below_threshold]
+
     def all_results(self) -> list[MatchResult]:
         return [
             *self.matches,
+            *self.to_check,
             *self.below_threshold,
             *self.excluded,
             *self.applied,

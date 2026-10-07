@@ -97,6 +97,39 @@ def test_linkedin_search_tags_workplace_pages_and_stops_on_refusal(settings: Set
     assert "search" in source.errors
 
 
+def test_linkedin_search_pages_are_capped_to_leave_room_for_postings(settings: Settings) -> None:
+    pages: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        pages.append(request.url.params["keywords"])
+        start = int(request.url.params["start"])
+        return httpx.Response(200, text="".join(_card(start + i, "Scientist") for i in range(10)))
+
+    capped = settings.model_copy(update={"linkedin_max_search_requests": 4})
+    source = LinkedInSource(HttpFetcher(capped, _client(handler)), capped)
+    source.fetch(SearchQuery(titles=["Chemist", "Biologist", "Physicist"]))
+    assert len(pages) == 4 and "search" not in source.errors  # a budget, not a refusal
+
+
+def test_linkedin_waits_when_asked_to_slow_down_then_resumes(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.jobs.sources import public_boards
+
+    waits: list[float] = []
+    monkeypatch.setattr(public_boards, "pause", waits.append)
+    answers = iter([httpx.Response(429, headers={"Retry-After": "7"}), httpx.Response(429)])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        refused = next(answers, None)
+        return refused or httpx.Response(200, text=_card(1, "Chemist"))
+
+    source = LinkedInSource(HttpFetcher(settings, _client(handler)), settings)
+    jobs = source.fetch(SearchQuery(titles=["Chemist"]))
+    assert [j.id for j in jobs] == ["linkedin:1"] and "search" not in source.errors
+    assert waits == [7.0, settings.linkedin_cooldown_s]  # Retry-After honoured, then default
+
+
 def test_linkedin_first_refusal_fails_the_source(settings: Settings) -> None:
     source = LinkedInSource(HttpFetcher(settings, _client(lambda _: httpx.Response(999))), settings)
     with pytest.raises(SourceError):
@@ -317,3 +350,189 @@ def test_every_selectable_source_has_a_category_and_a_factory(settings: Settings
     assert {info.category for info in fetcher.SOURCE_CATALOG} == {"job_boards", "company", "alerts"}
     _, skipped = fetcher.build_sources(names, settings=settings)
     assert not any(why == "unknown source" for why in skipped.values())
+
+
+def test_posting_pages_read_json_ld_only_where_robots_allow(settings: Settings) -> None:
+    from src.jobs.sources.pages import PostingPages
+
+    ld = {
+        "@context": "https://schema.org",
+        "@type": "JobPosting",
+        "title": "Senior Scientist",
+        "description": "<p>Essential: designing novel algorithms for sequencing data.</p>" * 20,
+        "hiringOrganization": {"name": "Acme Bio"},
+    }
+    page = f'<script type="application/ld+json">{json.dumps(ld)}</script>'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nDisallow: /private/")
+        return httpx.Response(200, text=page)
+
+    pages = PostingPages(HttpFetcher(settings, _client(handler), delay_s=0), settings)
+    snippet = JobPosting(id="a", title="Senior Scientist", company="Acme Bio",
+                         url="https://jobs.example/job/1", description="Short card")  # fmt: skip
+    full = pages.enrich(snippet)
+    assert "novel algorithms" in full.description and full.title == "Senior Scientist"
+
+    private = snippet.model_copy(update={"url": "https://jobs.example/private/2"})
+    with pytest.raises(SourceError, match="robots"):
+        pages.enrich(private)
+    linkedin = snippet.model_copy(update={"url": "https://www.linkedin.com/jobs/view/3"})
+    assert pages.enrich(linkedin) is linkedin  # LinkedIn is opened by its own source
+
+
+def test_linkedin_alert_jobs_are_opened_through_linkedin(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.services import search_service
+
+    opened: list[str] = []
+
+    def enrich(self: LinkedInSource, job: JobPosting) -> JobPosting:
+        opened.append(job.id)
+        return job.model_copy(update={"description": "Full posting text. " * 50})
+
+    monkeypatch.setattr(LinkedInSource, "enrich", enrich)
+    alert = JobPosting(id="linkedin:77", title="Scientist", company="Acme", source="linkedin_alert")
+    errors: dict[str, str] = {}
+    out = search_service._enrich([alert], [], errors, settings)
+    assert opened == ["linkedin:77"] and "Full posting text" in out["linkedin:77"].description
+
+
+def _chrome(settings: Settings, pages: dict[str, str]) -> Any:
+    """A BrowserFetcher whose Chrome returns `pages[url]`; robots.txt allows /jobs only."""
+    from src.jobs.sources.browser import BrowserFetcher
+
+    robots = HttpFetcher(
+        settings,
+        _client(lambda _: httpx.Response(200, text="User-agent: *\nDisallow: /private/")),
+        delay_s=0,
+    )
+    opened: list[list[str]] = []
+
+    def run(cmd: list[str], timeout: float) -> str:
+        opened.append(cmd)
+        return pages[cmd[-1]]
+
+    fetcher = BrowserFetcher(settings, chrome="/chrome", run=run, http=robots)
+    return fetcher, opened
+
+
+def test_chrome_reads_linkedin_about_the_job_signed_out(settings: Settings) -> None:
+    view = """<html><main><section class="description">
+      <div class="show-more-less-html__markup">
+        <p>About the job: you will <strong>design novel algorithms</strong>.</p></div>
+      </section></main></html>"""
+    url = "https://www.linkedin.com/jobs/view/42"
+    fetcher, opened = _chrome(settings, {url: view})
+    card = JobPosting(id="linkedin:42", title="Senior Bioinformatics Scientist", company="Acme",
+                      url=url)  # fmt: skip
+    full = fetcher.enrich(card)
+    assert "design novel algorithms" in full.description
+    cmd = opened[0]
+    assert "--headless=new" in cmd and "--dump-dom" in cmd
+    assert any(c.startswith("--user-data-dir=") and "jobsearch-chrome-" in c for c in cmd)
+
+
+def test_chrome_stops_at_a_challenge_and_keeps_robots_txt(settings: Settings) -> None:
+    challenge = "<html><body>Please verify you are human (captcha)</body></html>"
+    indeed = "https://uk.indeed.com/viewjob?jk=1"
+    fetcher, opened = _chrome(settings.model_copy(update={"browser_host_strikes": 2}),
+                              {indeed: challenge})  # fmt: skip
+    job = JobPosting(id="indeed:1", title="Scientist", company="Acme", url=indeed)
+    for _ in range(2):  # these come and go: a site gets a few chances
+        with pytest.raises(SourceError, match="verify a human"):
+            fetcher.enrich(job)
+    with pytest.raises(SourceError, match="earlier"):  # then it is left for this search
+        fetcher.enrich(job)
+    assert len(opened) == 2
+
+    private = JobPosting(id="c:1", title="Scientist", company="Acme",
+                         url="https://careers.example/private/1")  # fmt: skip
+    with pytest.raises(SourceError, match="robots"):
+        fetcher.enrich(private)
+    assert len(opened) == 2  # never loaded
+
+
+def test_chrome_reads_a_careers_page_main_text_and_respects_the_cap(settings: Settings) -> None:
+    page = "<html><nav>Menu</nav><main><h1>Scientist</h1><p>Requirements: GMP. </p></main></html>"
+    url = "https://careers.example/jobs/9"
+    capped = settings.model_copy(update={"browser_max_pages": 1})
+    fetcher, _ = _chrome(capped, {url: page})
+    job = JobPosting(id="c:9", title="Scientist", company="Acme", url=url)
+    full = fetcher.enrich(job)
+    assert "Requirements: GMP" in full.description and "Menu" not in full.description
+    with pytest.raises(SourceError, match="limit"):
+        fetcher.enrich(job)
+
+
+def test_chrome_is_closed_once_the_page_is_printed() -> None:
+    """Chrome prints the rendered page, then may keep running while the page stays busy."""
+    import sys
+    import time
+
+    from src.jobs.sources.browser import _run_chrome
+
+    lingers = [sys.executable, "-c",
+               "import time; print('<html><main>About the job</main></html>', flush=True); "
+               "time.sleep(60)"]  # fmt: skip
+    t0 = time.monotonic()
+    assert "About the job" in _run_chrome(lingers, timeout=30)
+    assert time.monotonic() - t0 < 10
+
+    silent = [sys.executable, "-c", "import time; time.sleep(60)"]
+    with pytest.raises(SourceError, match="in time"):
+        _run_chrome(silent, timeout=0.5)
+
+
+def test_opening_postings_reports_each_one_and_keeps_to_its_time_budget(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    from src.services import search_service
+
+    def slow_enrich(self: LinkedInSource, job: JobPosting) -> JobPosting:
+        time.sleep(0.3)
+        return job.model_copy(update={"description": "Full posting text. " * 50})
+
+    monkeypatch.setattr(LinkedInSource, "enrich", slow_enrich)
+    jobs = [JobPosting(id=f"linkedin:{i}", title=f"Scientist {i}", company="Acme",
+                       source="linkedin_search") for i in range(5)]  # fmt: skip
+    notes: list[str] = []
+    budget = settings.model_copy(update={"enrich_budget_s": 0.5})
+    out = search_service._enrich(jobs, [], {}, budget, False, notes.append)
+    assert notes[0] == "LinkedIn: opening full posting 1/5: Scientist 0 (Acme)"
+    assert 1 <= len(out) < 5
+    assert any("time budget" in n and "fetch later" in n for n in notes)
+    assert notes[-1].startswith(f"Full text read for {len(out)} of 5")
+    assert "via LinkedIn" in notes[-1]
+
+
+def test_linkedin_postings_do_not_hold_other_boards_back(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    from src.jobs.sources.pages import PostingPages
+    from src.services import search_service
+
+    other_done = threading.Event()
+
+    def linkedin_enrich(self: LinkedInSource, job: JobPosting) -> JobPosting:
+        assert other_done.wait(5), "the other lane should finish while LinkedIn is still busy"
+        return job.model_copy(update={"description": "LinkedIn text. " * 60})
+
+    def page_enrich(self: PostingPages, job: JobPosting) -> JobPosting:
+        other_done.set()
+        return job.model_copy(update={"description": "Careers page text. " * 60})
+
+    monkeypatch.setattr(LinkedInSource, "enrich", linkedin_enrich)
+    monkeypatch.setattr(PostingPages, "enrich", page_enrich)
+    jobs = [
+        JobPosting(id="linkedin:1", title="Scientist", company="A", source="linkedin_search"),
+        JobPosting(id="c:1", title="Scientist", company="B", url="https://careers.b/1"),
+    ]
+    out = search_service._enrich(jobs, [], {}, settings)
+    assert set(out) == {"linkedin:1", "c:1"}

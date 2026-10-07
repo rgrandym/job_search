@@ -339,6 +339,50 @@ def test_adzuna_error_does_not_expose_key(settings: Settings) -> None:
     assert "secret" not in str(exc.value) and "ADZUNA_APP_KEY" in str(exc.value)
 
 
+def test_adzuna_retries_server_errors_and_skips_a_failing_search(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.jobs.sources import job_boards
+
+    monkeypatch.setattr(job_boards, "ADZUNA_RETRY_S", 0)
+    settings = settings.model_copy(
+        update={"adzuna_app_id": SecretStr("id"), "adzuna_app_key": SecretStr("secret")}
+    )
+    calls: dict[str, int] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        what = request.url.params["what"]
+        calls[what] = calls.get(what, 0) + 1
+        if what == "down" or (what == "flaky" and calls[what] == 1):
+            return httpx.Response(503)
+        item = {"id": what, "title": what, "company": {"display_name": "Acme"}}
+        return httpx.Response(200, json={"results": [item], "count": 1})
+
+    http = HttpFetcher(settings, httpx.Client(transport=httpx.MockTransport(handler)), delay_s=0)
+    jobs = AdzunaSource(http, settings).fetch(SearchQuery(titles=["down", "flaky", "fine"]))
+    assert sorted(j.id for j in jobs) == ["adzuna:fine", "adzuna:flaky"]
+    assert calls == {"down": 3, "flaky": 2, "fine": 1}  # retried twice, then skipped
+
+    with pytest.raises(SourceError, match=r"HTTP 503") as exc:  # every search failed
+        AdzunaSource(http, settings).fetch(SearchQuery(titles=["down"]))
+    assert "secret" not in str(exc.value)
+
+
+def test_requests_stop_once_the_search_is_stopped(settings: Settings) -> None:
+    from src.core.llm.calls import call_group, cancel_group, clear_group
+
+    http = _http(settings, {"/x": {"ok": True}})
+    token = call_group.set("run-1")
+    try:
+        assert http.get("https://example.com/x").json() == {"ok": True}
+        cancel_group("run-1")
+        with pytest.raises(SourceError, match="stopped"):
+            http.get("https://example.com/x")
+    finally:
+        clear_group("run-1")
+        call_group.reset(token)
+
+
 def test_company_ats_sources(settings: Settings) -> None:
     http = _http(
         settings,
@@ -587,9 +631,11 @@ def test_job_matcher_verdict_is_computed_by_code_from_levels() -> None:
     )
     assert strong.cap_reason is None and strong.dimensions.leadership == 8
 
+    # A missing core requirement is never a match, whatever the threshold.
     unmet = finalize(assess((4, 4, 3, 3, 4, 3), essential_unmet=["GMP licence"]), 60)
-    assert unmet.fit_score == 65 and "GMP licence" in (unmet.cap_reason or "")
-    assert (unmet.band, unmet.priority, unmet.match) == ("stretch", "consider", True)
+    assert unmet.fit_score == 55 and "GMP licence" in (unmet.cap_reason or "")
+    assert (unmet.band, unmet.priority, unmet.match) == ("weak", "low", False)
+    assert not finalize(assess((4, 4, 3, 3, 4, 3), essential_unmet=["GMP licence"]), 40).match
 
     far_away = finalize(assess((4, 4, 4, 4, 4, 1)), 60)  # practicality level 1: 3/10 < 40%
     assert far_away.fit_score == 65 and far_away.cap_reason == "weak on practicality"
@@ -597,7 +643,7 @@ def test_job_matcher_verdict_is_computed_by_code_from_levels() -> None:
     blocked = finalize(assess((3, 3, 3, 3, 3, 3), dealbreakers=["sales role"]), 60)
     assert blocked.fit_score == 77 and not blocked.match and blocked.priority == "low"
 
-    assert not strong.borderline and unmet.borderline  # 91 vs 65, threshold 60
+    assert not strong.borderline and not unmet.borderline  # an unmet core is not borderline
     near_miss = finalize(assess((3, 2, 2, 2, 2, 2)), 60)  # 58: just below
     assert near_miss.borderline and not near_miss.match
     assert not blocked.borderline  # a dealbreaker is a clear "no", however it scores

@@ -214,7 +214,7 @@ def annotate(
     today_s = (today or date.today()).isoformat()
     run = run or uuid.uuid4().hex
     entries = load(ws)
-    for result in [*report.matches, *report.below_threshold]:
+    for result in report.scored():
         job = result.job
         entry = find(entries, job)
         if entry is None:

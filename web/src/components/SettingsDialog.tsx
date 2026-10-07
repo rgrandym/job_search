@@ -21,16 +21,35 @@ const DEFAULT_MODEL: Record<Provider, string> = {
   openrouter: "",
 };
 
-type Role = "quality" | "screening";
-type ModelDraft = Record<Role, string>;
+type Role = "quality" | "screening" | "profile";
+const ROLES: Role[] = ["profile", "quality", "screening"];
+type ModelDraft = Record<"quality" | "screening", string>;
+/** The profile model; `provider` "" means the main provider, `model` "" the quality model. */
+type ProfileDraft = { provider: Provider | ""; model: string };
 type Efforts = Record<Role, Effort>;
 type Recommendation = Record<Role, { prefer: string[]; why: string }> & { footnote: string };
 
+const emptyDraft = (p: Provider): ModelDraft => ({ quality: DEFAULT_MODEL[p], screening: DEFAULT_MODEL[p] });
+const draftOf = (llm: LLMView): ModelDraft => ({ quality: llm.quality_model, screening: llm.screening_model });
+const profileOf = (llm: LLMView): ProfileDraft => ({
+  provider: llm.profile_provider && llm.profile_provider !== llm.provider ? llm.profile_provider : "",
+  model: llm.profile_model,
+});
+const effortsOf = (llm: LLMView): Efforts => ({
+  quality: llm.quality_effort,
+  screening: llm.screening_effort,
+  profile: llm.profile_effort,
+});
+
 // Preference order per role: the smallest, fastest model that does the work well comes first.
 const OPENAI_RECOMMENDATION: Recommendation = {
+  profile: {
+    prefer: ["gpt-6-sol", "gpt-6.1-sol", "gpt-5.6-sol"],
+    why: "at high effort: built once per role family, and every verdict is judged against it.",
+  },
   quality: {
     prefer: ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol", "gpt-6-luna"],
-    why: "for the profile, CV and cover letters and second opinions: rare calls where quality matters.",
+    why: "for CV and cover letters and second opinions: rare calls where quality matters.",
   },
   screening: {
     prefer: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-6.1-sol"],
@@ -40,9 +59,13 @@ const OPENAI_RECOMMENDATION: Recommendation = {
 };
 
 const CLAUDE_RECOMMENDATION: Recommendation = {
+  profile: {
+    prefer: ["claude-opus-5-5", "claude-sonnet-5-5"],
+    why: "at high effort: built once per role family, so the strongest model costs little here.",
+  },
   quality: {
     prefer: ["claude-sonnet-5-5", "claude-sonnet-5", "claude-opus-5-5"],
-    why: "for the profile, CV and cover letters and second opinions, at a fraction of Opus usage.",
+    why: "for CV and cover letters and second opinions, at a fraction of Opus usage.",
   },
   screening: {
     prefer: ["claude-haiku-4-5", "claude-sonnet-5-5"],
@@ -58,15 +81,129 @@ const RECOMMENDATIONS: Partial<Record<Provider, Recommendation>> = {
   claude_code: CLAUDE_RECOMMENDATION,
 };
 
-const ROLE_LABEL: Record<Role, string> = { quality: "Quality model", screening: "Screening model" };
+const ROLE_LABEL: Record<Role, string> = {
+  profile: "Profile model",
+  quality: "Quality model",
+  screening: "Screening model",
+};
 const ROLE_HINT: Record<Role, string> = {
-  quality: "Profile summary, CV reading and tailoring, cover letters, second opinions on matches and near the threshold, the assistant",
+  profile: "Builds the profile summary and role families every job is judged against. It can use another provider, e.g. Opus through Claude Code while Codex searches",
+  quality: "CV reading and tailoring, cover letters, second opinions on matches and near the threshold, the assistant",
   screening: "First-pass job matching (the job_matcher), batch after batch",
 };
 const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
-const DEFAULT_EFFORTS: Efforts = { quality: "medium", screening: "medium" };
+const DEFAULT_EFFORTS: Efforts = { quality: "medium", screening: "medium", profile: "high" };
 
 const isCliProvider = (p: Provider) => p === "codex" || p === "claude_code";
+const hasEffort = (p: Provider) => p === "anthropic" || isCliProvider(p);
+const planName = (p: Provider) => (p === "codex" ? "ChatGPT" : "Claude");
+const providerLabel = (p: Provider) => PROVIDERS.find((item) => item.value === p)?.label ?? p;
+
+function useModels(provider: Provider, open: boolean) {
+  return useQuery({
+    queryKey: ["models", provider],
+    queryFn: () => api.models(provider),
+    enabled: open,
+    retry: false,
+    staleTime: 5 * 60_000,
+  });
+}
+
+function useCliStatus(provider: Provider, enabled: boolean) {
+  return useQuery({
+    queryKey: ["cli-status", provider],
+    queryFn: provider === "codex" ? api.codexStatus : api.claudeCodeStatus,
+    enabled: enabled && isCliProvider(provider),
+    refetchInterval: 2_000,
+  });
+}
+
+/** Sign-in for a CLI provider, or the API key field for an API provider. */
+function ProviderAccess({
+  provider,
+  open,
+  apiKey,
+  onKey,
+  keySaved,
+  label = "API key",
+}: {
+  provider: Provider;
+  open: boolean;
+  apiKey: string;
+  onKey: (key: string) => void;
+  keySaved: boolean;
+  label?: string;
+}) {
+  const cli = useCliStatus(provider, open);
+  const login = useMutation({
+    mutationFn: () => (provider === "codex" ? api.loginCodex() : api.loginClaudeCode()),
+    onSuccess: () => cli.refetch(),
+  });
+  const plan = planName(provider);
+  if (!isCliProvider(provider)) {
+    return (
+      <Field label={label} hint={PROVIDERS.find((p) => p.value === provider)?.hint}>
+        <input
+          className="input"
+          type="password"
+          autoComplete="off"
+          placeholder={keySaved ? "•••••••• saved (leave blank to keep)" : "Paste key"}
+          value={apiKey}
+          onChange={(e) => onKey(e.target.value)}
+        />
+      </Field>
+    );
+  }
+  return (
+    <div className="rounded-md border border-border bg-surface p-3 text-[12px]">
+      {cli.isPending && <span className="text-muted">Checking {plan} sign-in…</span>}
+      {cli.data?.logged_in && (
+        <span className="text-good">
+          {provider === "codex" ? "Connected to ChatGPT." : cli.data.message} Usage comes from your {plan} plan.
+        </span>
+      )}
+      {cli.data && !cli.data.logged_in && (
+        <div className="space-y-2">
+          <p className="text-muted">{cli.data.message || `Sign in with ${plan}.`}</p>
+          {cli.data.installed && (
+            <button type="button" className="btn-primary" disabled={login.isPending} onClick={() => login.mutate()}>
+              {login.isPending && <Loader2 size={14} className="animate-spin" />} Continue with {plan}
+            </button>
+          )}
+        </div>
+      )}
+      {(cli.isError || login.isError) && <p className="text-bad">{((cli.error || login.error) as Error).message}</p>}
+    </div>
+  );
+}
+
+function EffortSelect({
+  value,
+  onChange,
+  disabled,
+  title,
+}: {
+  value: Effort;
+  onChange: (effort: Effort) => void;
+  disabled?: boolean;
+  title?: string;
+}) {
+  return (
+    <Field label="Effort">
+      <select
+        className="input"
+        disabled={disabled}
+        title={title}
+        value={value}
+        onChange={(e) => onChange(e.target.value as Effort)}
+      >
+        {EFFORTS.map((e) => (
+          <option key={e}>{e}</option>
+        ))}
+      </select>
+    </Field>
+  );
+}
 
 function preferredModel(models: ModelInfo[], choices: string[]): string {
   return choices.find((id) => models.some((model) => model.id === id)) ?? models[0]?.id ?? "";
@@ -78,21 +215,31 @@ function ModelPicker({
   models,
   loading,
   unavailable,
+  emptyLabel,
 }: {
   value: string;
   onChange: (value: string) => void;
   models: ModelInfo[];
   loading: boolean;
   unavailable: boolean;
+  /** When set, an empty value is a valid choice shown with this label. */
+  emptyLabel?: string;
 }) {
   if (unavailable) {
-    return <input className="input" value={value} onChange={(event) => onChange(event.target.value)} />;
+    return (
+      <input
+        className="input"
+        value={value}
+        placeholder={emptyLabel}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    );
   }
   const currentMissing = value && !models.some((model) => model.id === value);
   return (
     <select className="input" value={value} disabled={loading} onChange={(event) => onChange(event.target.value)}>
       {loading && <option value="">Loading models…</option>}
-      {!loading && !value && <option value="">Choose a model</option>}
+      {!loading && (emptyLabel || !value) && <option value="">{emptyLabel ?? "Choose a model"}</option>}
       {currentMissing && <option value={value}>{value} (current)</option>}
       {models.map((model) => (
         <option key={model.id} value={model.id}>
@@ -108,43 +255,36 @@ export function SettingsDialog({ open, onClose, llm }: { open: boolean; onClose:
   const [provider, setProvider] = useState<Provider>("anthropic");
   const [drafts, setDrafts] = useState<Partial<Record<Provider, ModelDraft>>>({});
   const [efforts, setEfforts] = useState<Efforts>(DEFAULT_EFFORTS);
+  const [profile, setProfile] = useState<ProfileDraft>({ provider: "", model: "" });
   const [key, setKey] = useState("");
+  const [profileKey, setProfileKey] = useState("");
 
-  const draft = drafts[provider] ?? { quality: DEFAULT_MODEL[provider], screening: DEFAULT_MODEL[provider] };
+  const draft = drafts[provider] ?? emptyDraft(provider);
   const setDraft = (update: Partial<ModelDraft>) =>
     setDrafts((current) => ({ ...current, [provider]: { ...draft, ...update } }));
+  const profileProvider: Provider = profile.provider || provider;
+  const ownProfileProvider = profileProvider !== provider;
 
   useEffect(() => {
     if (!open || !llm) return;
     setProvider(llm.provider);
-    setDrafts({
-      [llm.provider]: { quality: llm.quality_model, screening: llm.screening_model },
-    });
-    setEfforts({ quality: llm.quality_effort, screening: llm.screening_effort });
+    setDrafts({ [llm.provider]: draftOf(llm) });
+    setEfforts(effortsOf(llm));
+    setProfile(profileOf(llm));
     setKey("");
+    setProfileKey("");
   }, [open, llm]);
 
-  const models = useQuery({
-    queryKey: ["models", provider],
-    queryFn: () => api.models(provider),
-    enabled: open,
-    retry: false,
-    staleTime: 5 * 60_000,
-  });
-
-  const cliProvider = isCliProvider(provider);
-  const cli = useQuery({
-    queryKey: ["cli-status", provider],
-    queryFn: provider === "codex" ? api.codexStatus : api.claudeCodeStatus,
-    enabled: open && cliProvider,
-    refetchInterval: 2_000,
-  });
+  const models = useModels(provider, open);
+  const profileModels = useModels(profileProvider, open);
+  const cli = useCliStatus(provider, open);
+  const profileCli = useCliStatus(profileProvider, open && ownProfileProvider);
 
   useEffect(() => {
     const available = models.data ?? [];
     if (!available.length) return;
     setDrafts((current) => {
-      const selected = current[provider] ?? { quality: DEFAULT_MODEL[provider], screening: DEFAULT_MODEL[provider] };
+      const selected = current[provider] ?? emptyDraft(provider);
       if (selected.quality && selected.screening) return current;
       const rec = RECOMMENDATIONS[provider];
       return {
@@ -157,11 +297,6 @@ export function SettingsDialog({ open, onClose, llm }: { open: boolean; onClose:
     });
   }, [models.data, provider]);
 
-  const login = useMutation({
-    mutationFn: () => (provider === "codex" ? api.loginCodex() : api.loginClaudeCode()),
-    onSuccess: () => cli.refetch(),
-  });
-
   const save = useMutation({
     mutationFn: () =>
       api.updateLLM({
@@ -170,7 +305,11 @@ export function SettingsDialog({ open, onClose, llm }: { open: boolean; onClose:
         screening_model: draft.screening,
         quality_effort: efforts.quality,
         screening_effort: efforts.screening,
+        profile_model: profile.model,
+        profile_effort: efforts.profile,
+        profile_provider: ownProfileProvider && profile.model ? profileProvider : null,
         api_key: key || undefined,
+        profile_api_key: ownProfileProvider ? profileKey || undefined : undefined,
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["state"] });
@@ -180,25 +319,23 @@ export function SettingsDialog({ open, onClose, llm }: { open: boolean; onClose:
 
   const switchProvider = (p: Provider) => {
     setProvider(p);
-    setDrafts((current) =>
-      current[p]
-        ? current
-        : {
-            ...current,
-            [p]:
-              p === llm?.provider
-                ? { quality: llm.quality_model, screening: llm.screening_model }
-                : { quality: DEFAULT_MODEL[p], screening: DEFAULT_MODEL[p] },
-          },
-    );
-    setEfforts(p === llm?.provider ? { quality: llm.quality_effort, screening: llm.screening_effort } : DEFAULT_EFFORTS);
+    setDrafts((current) => (current[p] ? current : { ...current, [p]: p === llm?.provider ? draftOf(llm) : emptyDraft(p) }));
+    setEfforts(p === llm?.provider ? effortsOf(llm) : DEFAULT_EFFORTS);
+    // A profile model on the main provider belongs to the old provider's model list.
+    if (!profile.provider) setProfile({ provider: "", model: p === llm?.provider && !llm.profile_provider ? llm.profile_model : "" });
   };
+  const switchProfileProvider = (value: Provider | "") =>
+    setProfile({ provider: value === provider ? "" : value, model: "" });
 
-  const hint = PROVIDERS.find((p) => p.value === provider)?.hint;
   const keySaved = llm?.provider === provider && llm.key_set;
-  const availableModels = models.data ?? [];
+  const profileKeySaved = llm?.profile_provider === profileProvider && llm.profile_ready;
+  const modelsFor = (role: Role) => (role === "profile" ? profileModels : models);
+  const recommendationFor = (role: Role) => RECOMMENDATIONS[role === "profile" ? profileProvider : provider];
   const recommendation = RECOMMENDATIONS[provider];
-  const planName = provider === "codex" ? "ChatGPT" : "Claude";
+  const profileSignedOut = ownProfileProvider && !!profile.model && isCliProvider(profileProvider) && !profileCli.data?.logged_in;
+  const setRoleModel = (role: Role, model: string) =>
+    role === "profile" ? setProfile({ ...profile, model }) : setDraft({ [role]: model });
+  const roleModel = (role: Role) => (role === "profile" ? profile.model : draft[role]);
 
   return (
     <Modal open={open} onClose={onClose} title="LLM settings">
@@ -217,80 +354,95 @@ export function SettingsDialog({ open, onClose, llm }: { open: boolean; onClose:
             </button>
           ))}
         </div>
-        {cliProvider ? (
-          <div className="rounded-md border border-border bg-surface p-3 text-[12px]">
-            {cli.isPending && <span className="text-muted">Checking {planName} sign-in…</span>}
-            {cli.data?.logged_in && (
-              <span className="text-good">
-                {provider === "codex" ? "Connected to ChatGPT." : cli.data.message} Usage comes from your {planName} plan.
-              </span>
-            )}
-            {cli.data && !cli.data.logged_in && (
-              <div className="space-y-2">
-                <p className="text-muted">{cli.data.message || `Sign in with ${planName}.`}</p>
-                {cli.data.installed && (
-                  <button type="button" className="btn-primary" disabled={login.isPending} onClick={() => login.mutate()}>
-                    {login.isPending && <Loader2 size={14} className="animate-spin" />} Continue with {planName}
-                  </button>
-                )}
-              </div>
-            )}
-            {(cli.isError || login.isError) && (
-              <p className="text-bad">
-                {((cli.error || login.error) as Error).message}
-              </p>
+        <ProviderAccess provider={provider} open={open} apiKey={key} onKey={setKey} keySaved={keySaved} />
+        <div className="space-y-2 rounded-md border border-border p-3">
+          <Field label="Profile provider" hint={ROLE_HINT.profile}>
+            <select
+              className="input"
+              value={profile.provider}
+              onChange={(e) => switchProfileProvider(e.target.value as Provider | "")}
+            >
+              <option value="">Same as above ({providerLabel(provider)})</option>
+              {PROVIDERS.filter((p) => p.value !== provider).map((p) => (
+                <option key={p.value} value={p.value}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          {ownProfileProvider && (
+            <ProviderAccess
+              provider={profileProvider}
+              open={open}
+              apiKey={profileKey}
+              onKey={setProfileKey}
+              keySaved={profileKeySaved}
+              label={`${providerLabel(profileProvider)} API key`}
+            />
+          )}
+          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_110px]">
+            <Field label={ROLE_LABEL.profile}>
+              <ModelPicker
+                value={profile.model}
+                onChange={(model) => setRoleModel("profile", model)}
+                models={profileModels.data ?? []}
+                loading={profileModels.isPending}
+                unavailable={profileModels.isError}
+                emptyLabel={
+                  ownProfileProvider ? "Choose a model" : `Same as quality model (${draft.quality || "not set"})`
+                }
+              />
+            </Field>
+            {hasEffort(profileProvider) && (
+              <EffortSelect
+                value={profile.model ? efforts.profile : efforts.quality}
+                onChange={(effort) => setEfforts({ ...efforts, profile: effort })}
+                disabled={!profile.model}
+                title={profile.model ? undefined : "Uses the quality model's effort"}
+              />
             )}
           </div>
-        ) : (
-          <Field label="API key" hint={hint}>
-            <input
-              className="input"
-              type="password"
-              autoComplete="off"
-              placeholder={keySaved ? "•••••••• saved (leave blank to keep)" : "Paste key"}
-              value={key}
-              onChange={(e) => setKey(e.target.value)}
-            />
-          </Field>
-        )}
+          {ownProfileProvider && !profile.model && (
+            <p className="text-[11px] text-faint">Choose a model, or the profile stays with the quality model.</p>
+          )}
+        </div>
         {(["quality", "screening"] as const).map((role) => (
           <div key={role} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_110px]">
             <Field label={ROLE_LABEL[role]} hint={ROLE_HINT[role]}>
               <ModelPicker
                 value={draft[role]}
                 onChange={(model) => setDraft({ [role]: model })}
-                models={availableModels}
+                models={models.data ?? []}
                 loading={models.isPending}
                 unavailable={models.isError}
               />
             </Field>
-            {(provider === "anthropic" || cliProvider) && (
-              <Field label="Effort">
-                <select
-                  className="input"
-                  value={efforts[role]}
-                  onChange={(e) => setEfforts({ ...efforts, [role]: e.target.value as Effort })}
-                >
-                  {EFFORTS.map((e) => (
-                    <option key={e}>{e}</option>
-                  ))}
-                </select>
-              </Field>
+            {hasEffort(provider) && (
+              <EffortSelect value={efforts[role]} onChange={(effort) => setEfforts({ ...efforts, [role]: effort })} />
             )}
           </div>
         ))}
-        {models.isError && <p className="text-[11px] text-faint">Model list unavailable: type a model id.</p>}
-        {recommendation && availableModels.length > 0 && (
+        {(models.isError || profileModels.isError) && (
+          <p className="text-[11px] text-faint">Model list unavailable: type a model id.</p>
+        )}
+        {recommendation && (models.data ?? []).length > 0 && (
           <div className="space-y-2 rounded-md border border-border bg-surface p-3 text-[11px]">
             <p className="font-medium text-fg">Recommended setup</p>
-            {(["quality", "screening"] as const).map((role) => {
-              const model = preferredModel(availableModels, recommendation[role].prefer);
+            {ROLES.map((role) => {
+              const rec = recommendationFor(role);
+              const available = modelsFor(role).data ?? [];
+              if (!rec || !available.length) return null;
+              const model = preferredModel(available, rec[role].prefer);
+              const use = () => {
+                setRoleModel(role, model);
+                if (role === "profile") setEfforts({ ...efforts, profile: "high" });
+              };
               return (
                 <div key={role} className="flex items-start justify-between gap-3">
                   <span className="text-muted">
-                    <strong className="text-fg">{ROLE_LABEL[role]}:</strong> {model} {recommendation[role].why}
+                    <strong className="text-fg">{ROLE_LABEL[role]}:</strong> {model} {rec[role].why}
                   </span>
-                  <button type="button" className="text-accent" onClick={() => setDraft({ [role]: model })}>
+                  <button type="button" className="text-accent" disabled={roleModel(role) === model} onClick={use}>
                     Use
                   </button>
                 </div>
@@ -300,9 +452,13 @@ export function SettingsDialog({ open, onClose, llm }: { open: boolean; onClose:
           </div>
         )}
         <p className="text-[11px] text-faint">
-          {cliProvider
-            ? `The app delegates to the local ${provider === "codex" ? "Codex" : "Claude Code"} CLI and never reads your ${planName} credentials.`
-            : "Keys are stored locally in data/llm_config.json (git-ignored)."}
+          {[provider, ...(ownProfileProvider ? [profileProvider] : [])]
+            .map((p) =>
+              isCliProvider(p)
+                ? `${providerLabel(p)} runs through its local CLI; the app never reads your ${planName(p)} credentials.`
+                : `${providerLabel(p)} keys are stored locally in data/llm_config.json (git-ignored).`,
+            )
+            .join(" ")}
         </p>
         {save.error && <p className="text-[12px] text-bad">{(save.error as Error).message}</p>}
         <div className="flex justify-end gap-2">
@@ -312,7 +468,13 @@ export function SettingsDialog({ open, onClose, llm }: { open: boolean; onClose:
           <button
             className="btn-primary"
             type="button"
-            disabled={!draft.quality || !draft.screening || save.isPending || (cliProvider && !cli.data?.logged_in)}
+            disabled={
+              !draft.quality ||
+              !draft.screening ||
+              save.isPending ||
+              (isCliProvider(provider) && !cli.data?.logged_in) ||
+              profileSignedOut
+            }
             onClick={() => save.mutate()}
           >
             {save.isPending && <Loader2 size={14} className="animate-spin" />} Save

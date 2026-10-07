@@ -7,8 +7,10 @@ import { cn } from "../lib/utils";
 import { profileSearchQuery, useSearch } from "../stores/searchStore";
 import { EvidenceReview } from "./EvidenceReview";
 import { IntentEditor } from "./IntentEditor";
+import { PublicationsView } from "./ProfileDetails";
 import { RoleFamiliesEditor, RoleFamiliesView } from "./RoleFamilies";
-import { Field, Modal } from "./ui";
+import { TaskProgress, useTaskId } from "./TaskProgress";
+import { AutoText, Field, Modal } from "./ui";
 
 const LEVEL_COLOR = { expert: "var(--good)", proficient: "var(--accent)", familiar: "var(--text-muted)" };
 const LEVELS: SkillEvidence["level"][] = ["expert", "proficient", "familiar"];
@@ -22,6 +24,7 @@ const LIST_FIELDS = [
   ["qualifications", "Qualifications"],
   ["achievements", "Key achievements"],
   ["transferable_strengths", "Transferable (not direct) experience"],
+  ["capabilities", "Capabilities (all the CV evidences)"],
   ["search_keywords", "Search keywords"],
 ] as const;
 
@@ -71,8 +74,10 @@ export function SummaryDialog({ open, onClose, initialProfileKey, embedded = fal
   }, [profiles.data, profileKey, set]);
 
   const refresh = () => qc.invalidateQueries({ queryKey: ["profiles"] });
+  const buildTask = useTaskId();
+  const updateTask = useTaskId();
   const build = useMutation({
-    mutationFn: (rebuild: boolean) => api.profileSummary(profileSearchQuery(query), useCv, rebuild),
+    mutationFn: (rebuild: boolean) => api.profileSummary(profileSearchQuery(query), useCv, rebuild, buildTask.next()),
     onSuccess: (r) => {
       set({ summary: { summary: r.summary, fromMemory: r.from_memory } });
       setSelected(r.key);
@@ -80,7 +85,7 @@ export function SummaryDialog({ open, onClose, initialProfileKey, embedded = fal
     },
   });
   const update = useMutation({
-    mutationFn: (key: string) => api.refreshProfile(key),
+    mutationFn: (key: string) => api.refreshProfile(key, updateTask.next()),
     onSuccess: (r) => {
       setSelected(r.key);
       void refresh();
@@ -152,8 +157,8 @@ export function SummaryDialog({ open, onClose, initialProfileKey, embedded = fal
                       current?.key === r.key ? "border-accent bg-accent-bg" : "border-border hover:border-accent",
                     )}
                   >
-                    <span className="block truncate font-medium text-fg">{familyLabel(r.role_family)}</span>
-                    {r.cv_name && <span className="block truncate text-[11px] text-muted">{r.cv_name}</span>}
+                    <span className="block font-medium text-fg [overflow-wrap:anywhere]">{familyLabel(r.role_family)}</span>
+                    {r.cv_name && <span className="block text-[11px] text-muted [overflow-wrap:anywhere]">{r.cv_name}</span>}
                     <span className="text-[11px] text-faint">
                       Created {day(r.created_at)}
                       {r.edited && " · edited"}
@@ -168,6 +173,7 @@ export function SummaryDialog({ open, onClose, initialProfileKey, embedded = fal
                     {build.isPending ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />} Build general profile
                   </button>
                 </div>
+                {build.isPending && <TaskProgress id={buildTask.id} />}
                 {build.error && <p className="text-[11px] text-bad">{(build.error as Error).message}</p>}
               </aside>
               <section className="min-w-0">
@@ -190,6 +196,7 @@ export function SummaryDialog({ open, onClose, initialProfileKey, embedded = fal
                     }}
                   />
                 )}
+                {update.isPending && <TaskProgress id={updateTask.id} className="mb-3 rounded-md border border-border bg-surface p-2" />}
                 {update.error && <p className="mt-2 text-[12px] text-bad">{(update.error as Error).message}</p>}
                 {remove.error && <p className="mt-2 text-[12px] text-bad">{(remove.error as Error).message}</p>}
               </section>
@@ -270,24 +277,55 @@ function ProfileView({
         <p className="text-[11px] text-faint">Updating replaces your edits with a fresh summary from the CV.</p>
       )}
       <p className="text-muted">{s.summary}</p>
+      {s.publications && <PublicationsView record={s.publications} />}
       <div>
         <p className="label mb-1">Role families (what the job boards search)</p>
         <RoleFamiliesView families={s.role_families ?? []} yields={yields} />
       </div>
       <div>
         <p className="label mb-1">Key skills</p>
-        <div className="flex flex-wrap gap-1">
+        <ul className="space-y-1">
           {s.key_skills.map((k) => (
-            <span key={k.skill} className="chip" title={k.evidence} style={{ color: LEVEL_COLOR[k.level] }}>
-              {k.skill} · {k.level}
-            </span>
+            <li key={k.skill}>
+              <details className="group rounded-md border border-border px-2 py-1">
+                <summary className="cursor-pointer list-none">
+                  <span style={{ color: LEVEL_COLOR[k.level] }}>{k.skill} · {k.level}</span>
+                  {k.evidence && <span className="ml-2 text-[11px] text-faint group-open:hidden">Show evidence</span>}
+                </summary>
+                {k.evidence && <p className="mt-1 whitespace-pre-wrap text-[12px] text-muted">{k.evidence}</p>}
+              </details>
+            </li>
           ))}
-        </div>
+        </ul>
       </div>
       {LIST_FIELDS.map(([field, title]) => (
         <Section key={field} title={title} items={s[field]} />
       ))}
     </div>
+  );
+}
+
+/** One item per line. Keeps the text as typed (trailing spaces, blank lines) so typing feels
+ *  normal; the list it reports is trimmed and without blank lines. */
+function LinesText({
+  value,
+  onChange,
+  minRows,
+}: {
+  value: string[];
+  onChange: (lines: string[]) => void;
+  minRows?: number;
+}) {
+  const [text, setText] = useState(() => value.join("\n"));
+  return (
+    <AutoText
+      minRows={minRows}
+      value={text}
+      onChange={(next) => {
+        setText(next);
+        onChange(next.split("\n").map((line) => line.trim()).filter(Boolean));
+      }}
+    />
   );
 }
 
@@ -315,12 +353,12 @@ function ProfileEditor({ record, onDone }: { record: ProfileRecord; onDone: () =
 
   return (
     <div className="space-y-3 text-[12px]">
-      <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_140px_90px]">
-        <Field label="Headline">
-          <input className="input" value={draft.headline} onChange={(e) => patch({ headline: e.target.value })} />
-        </Field>
+      <Field label="Headline">
+        <AutoText singleLine value={draft.headline} onChange={(headline) => patch({ headline })} />
+      </Field>
+      <div className="grid items-start gap-2 sm:grid-cols-[minmax(0,1fr)_90px]">
         <Field label="Seniority">
-          <input className="input" value={draft.seniority} onChange={(e) => patch({ seniority: e.target.value })} />
+          <AutoText singleLine value={draft.seniority} onChange={(seniority) => patch({ seniority })} />
         </Field>
         <Field label="Years">
           <input
@@ -334,20 +372,20 @@ function ProfileEditor({ record, onDone }: { record: ProfileRecord; onDone: () =
         </Field>
       </div>
       <Field label="Summary">
-        <textarea className="input min-h-20" value={draft.summary} onChange={(e) => patch({ summary: e.target.value })} />
+        <AutoText minRows={3} value={draft.summary} onChange={(summary) => patch({ summary })} />
       </Field>
       <div>
         <p className="label mb-1">Key skills</p>
         <div className="space-y-1">
           {draft.key_skills.map((k, i) => (
-            <div key={i} className="grid grid-cols-[minmax(0,1fr)_110px_minmax(0,1.4fr)_24px] gap-1">
-              <input className="input" placeholder="Skill" value={k.skill} onChange={(e) => setSkill(i, { skill: e.target.value })} />
+            <div key={i} className="grid grid-cols-[minmax(0,1fr)_110px_minmax(0,1.4fr)_24px] items-start gap-1">
+              <AutoText singleLine placeholder="Skill" value={k.skill} onChange={(skill) => setSkill(i, { skill })} />
               <select className="input" value={k.level} onChange={(e) => setSkill(i, { level: e.target.value as SkillEvidence["level"] })}>
                 {LEVELS.map((level) => (
                   <option key={level}>{level}</option>
                 ))}
               </select>
-              <input className="input" placeholder="Evidence" value={k.evidence} onChange={(e) => setSkill(i, { evidence: e.target.value })} />
+              <AutoText singleLine placeholder="Evidence" value={k.evidence} onChange={(evidence) => setSkill(i, { evidence })} />
               <button
                 type="button"
                 title="Remove skill"
@@ -373,11 +411,7 @@ function ProfileEditor({ record, onDone }: { record: ProfileRecord; onDone: () =
       />
       {LIST_FIELDS.map(([field, title]) => (
         <Field key={field} label={title} hint="One per line">
-          <textarea
-            className="input min-h-16"
-            value={draft[field].join("\n")}
-            onChange={(e) => patch({ [field]: e.target.value.split("\n").map((line) => line.trim()).filter(Boolean) })}
-          />
+          <LinesText minRows={2} value={draft[field]} onChange={(lines) => patch({ [field]: lines })} />
         </Field>
       ))}
       {save.error && <p className="text-bad">{(save.error as Error).message}</p>}

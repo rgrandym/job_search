@@ -50,7 +50,8 @@ class Settings(BaseSettings):
 
     # LLM (defaults; the web UI can change provider/models at runtime, see core/llm)
     llm_provider: LLMProviderName = "anthropic"
-    # quality: profile, CV and letters, second opinions, assistant · screening: job matching.
+    # quality: CV and letters, second opinions, assistant · screening: job matching ·
+    # profile: the profile summary (empty profile_model: the quality model and its effort).
     # The pre-rename variable names (ORCHESTRATOR_MODEL, WORKER_MODEL, LLM_EFFORT) still work.
     quality_model: str = Field(
         "claude-opus-5-5",
@@ -67,6 +68,9 @@ class Settings(BaseSettings):
         "medium",
         validation_alias=AliasChoices("JOBSEARCH_SCREENING_EFFORT", "JOBSEARCH_LLM_EFFORT"),
     )
+    profile_model: str = ""
+    profile_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
+    profile_provider: LLMProviderName | None = None  # e.g. Claude Code profiles, Codex searches
     llm_max_tokens: int = 16000
     llm_refusal_fallback: bool = True
     anthropic_api_key: SecretStr | None = Field(
@@ -120,8 +124,37 @@ class Settings(BaseSettings):
     # of requests a minute. Full postings are opened only for the shortlist.
     linkedin_delay_s: float = Field(2.5, ge=0, description="Seconds between LinkedIn requests")
     linkedin_max_pages: int = Field(3, ge=1, le=10, description="Result pages per search term")
+    # LinkedIn refuses (429) after a burst of requests; capping the search pages leaves room to
+    # open the shortlisted postings, whose text the job_matcher needs to check requirements.
+    linkedin_max_search_requests: int = Field(
+        12, ge=1, description="Search result pages per search, over all terms and places"
+    )
+    # When LinkedIn asks to slow down (429/999), wait and resume instead of giving up.
+    linkedin_cooldown_s: float = Field(30.0, ge=0, description="Wait after a 429 (or Retry-After)")
+    linkedin_max_cooldowns: int = Field(4, ge=0, description="Waits per search before giving up")
     linkedin_max_details: int = Field(
         60, ge=0, description="Shortlisted LinkedIn postings opened for the full text per search"
+    )
+    enrich_budget_s: float = Field(
+        180.0, gt=0, description="Time a search spends opening full postings; the rest can be "
+        "fetched later from the results",
+    )
+    recheck_budget_s: float = Field(
+        600.0, gt=0, description="Time a later read of unread postings may take (results stay on "
+        "screen meanwhile, so it can wait out LinkedIn's slow-downs)",
+    )
+    # Headless Chrome, signed out, for postings still too thin to check (sources/browser.py).
+    browser_enabled: bool = True
+    chrome_path: str | None = Field(None, description="None: an installed Chrome or Chromium")
+    browser_max_pages: int = Field(30, ge=0, description="Posting pages Chrome opens per search")
+    browser_host_strikes: int = Field(
+        3, ge=1, description="Challenge or sign-in pages from one site before it is left"
+    )
+    browser_delay_s: float = Field(4.0, ge=0, description="Seconds between pages on one host")
+    browser_wait_ms: int = Field(8000, ge=0, description="Time a page gets to render")
+    browser_timeout_s: float = Field(45.0, gt=0, description="Give up on a page after")
+    page_max_details: int = Field(
+        40, ge=0, description="Posting pages opened per search for their JSON-LD (robots.txt kept)"
     )
     # LinkedIn's public pages answer browsers; a script identity gets an empty "auth wall".
     browser_user_agent: str = (

@@ -6,8 +6,8 @@
 **Frontend (`web/`):** React 18 · TypeScript (strict) · Vite · Tailwind (CSS tokens in `index.css`) · Zustand · TanStack Query · Lucide · react-resizable-panels
 **Conda env:** `job_search`. Always activate it before running Python commands.
 **LLMs:** Claude (Anthropic SDK), OpenAI or OpenRouter (Chat Completions), selected in the UI. Separate
-quality model (profile, CV and letters, second opinions, assistant) and screening model (job matching),
-each with its own effort. All model access goes through `src/core/llm/`.
+quality model (CV and letters, second opinions, assistant), screening model (job matching) and an
+optional profile model (profile summary; blank = quality model; may use another provider), each with its own effort. All model access goes through `src/core/llm/`.
 **Scope (user preference):** keep it simple. No audit or trace infrastructure. Effort goes into
 search quality and profile matching.
 
@@ -46,6 +46,7 @@ cd web && npm run typecheck && npm run lint && npm run build
 ```
 src/
   core/        config.py (Settings) · llm_provider.py (protocols, embedder, factory)
+               progress.py (live task steps + in-flight model calls, polled by the UI)
     llm/       types.py · anthropic_backend.py · openai_backend.py (OpenAI + OpenRouter)
   cv/          models.py · master_cv_manager.py · tailor.py (guards + review) · cover_letter.py
                ats.py (docx read-back) · docx_exporter.py
@@ -57,14 +58,18 @@ src/
                companies.py (Greenhouse, Lever, Ashby, Workable, SmartRecruiters, Recruitee, Personio,
                Teamtailor, Pinpoint, Workday, iCIMS, BambooHR, careers pages) · directories.py (BioPharmGuy)
                inbox.py (LinkedIn/Indeed alerts, saved postings)
+               pages.py (a posting's own page: JSON-LD full text, robots.txt kept)
+               browser.py (headless signed-out Chrome for postings still too thin)
   tools/       search_tools.py (pure text utils) · docx_tools.py (python-docx primitives)
   services/    workspace.py (state) · search_service.py (THE search pipeline) · cv_service.py
                tracker.py (applied / N/A / New / Open + outcome stages, data/job_tracker.json)
                history.py (+ source and role-family yield) · intent.py (career intent, per CV)
                calibration.py (read-only outcome review) · enrichment.py (evidence review queue)
                saved.py (saved jobs, data/saved_jobs.json; status from the tracker)
-               labels.py (your yes/maybe/no per job + snapshot, data/job_labels.json; measures models)
-               learning.py (preferences learned from labels, accepted by the user, applied to profiles)
+               labels.py (your yes/maybe/no per job + snapshot, data/job_labels.json; measures models;
+               a "no" is set aside in later searches)
+               learning.py (preferences learned from labels and applied/N/A reasons; new reasons are
+               added automatically at the start of a search, the user can remove any)
                model_compare.py (CLI: score model setups against your labels) · compare_usage.py
                (its cost per model, plan usage and progress bar)
                company_discovery.py (directory -> data/companies.json; run by searches + Update button)
@@ -125,16 +130,26 @@ Personal job-search tool: public job pages may be read, within reason.
   `sources.base.HttpFetcher` (User-Agent, per-host delay, robots checks); careers-site endpoints
   always pass `check_robots=True`. Open postings one by one only for titles that fit the search,
   capped by `company_max_details`.
+- A shortlisted posting still too thin to check its requirements may have its own page read
+  once (`sources/pages.PostingPages`: JSON-LD only, `check_robots=True`, capped by
+  `page_max_details`; never LinkedIn or Indeed hosts).
 - Company directories (BioPharmGuy) are read once per discovery run, never per search, and only
   pages their `robots.txt` allows.
 - **Public job boards** (`sources/public_boards.py`): LinkedIn's logged-out job search, Totaljobs,
   jobs.ac.uk, NHS Jobs. List result cards per search; open full postings only in `enrich` (the
   shortlist). LinkedIn ignores robots.txt but is slow (`linkedin_delay_s`), capped
-  (`linkedin_max_pages`, `linkedin_max_details`) and stops at the first refusal (429/999); the
+  (`linkedin_max_pages`, `linkedin_max_details`, `linkedin_max_search_requests`) and waits when asked to slow down (429/999, honouring Retry-After; `linkedin_cooldown_s`, at most `linkedin_max_cooldowns` per search) and only then gives up; the
   others stay within their robots.txt.
-- **Never:** logins or session cookies, CAPTCHA solving, proxy rotation, or other anti-bot
-  circumvention. A board that blocks plain HTTP (Indeed) is reached through the user's alert
-  emails (`data/inbox/*.eml`, Gmail alerts) and saved postings instead; no headless browsers.
+- **Headless Chrome (user's decision, 2026-10-07):** a shortlisted posting still too thin to
+  check its requirements may be opened in the user's installed Chrome, headless, through
+  `sources/browser.BrowserFetcher` only: a fresh empty profile per page (signed out, never the
+  user's profile or cookies), robots.txt kept except for LinkedIn and Indeed postings (opened
+  slowly, `browser_delay_s`), at most `browser_max_pages` per search, Stop kills it. A
+  challenge or sign-in wall ends that host for the search (the user can paste the text).
+  Chrome CLI only: no Playwright or other new dependency without asking.
+- **Never:** logins or session cookies, CAPTCHA solving, proxy rotation, disguising the
+  browser's identity, or other anti-bot circumvention. Indeed search is still reached through
+  the user's alert emails (`data/inbox/*.eml`, Gmail alerts) and saved postings.
 - New source = new adapter in `src/jobs/sources/` implementing `fetch(SearchQuery) -> list[JobPosting]`,
   registered in `fetcher.build_sources` and listed in `fetcher.SOURCE_CATALOG` (label, category:
   job_boards / company / alerts; the UI's source panels are built from it), tested with

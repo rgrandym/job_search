@@ -79,6 +79,65 @@ def test_roles_have_their_own_model_and_effort() -> None:
     assert "effort" not in cfg.model_dump()  # derived per client, never stored
 
 
+def test_profile_uses_the_quality_model_unless_one_is_set() -> None:
+    cfg = LLMConfig(
+        provider="codex",
+        quality_model="luna",
+        screening_model="luna",
+        quality_effort="medium",
+        profile_effort="high",
+    )
+    assert (cfg.model_for("profile"), cfg.for_role("profile").effort) == ("luna", "medium")
+    cfg = cfg.model_copy(update={"profile_model": "sol"})
+    assert (cfg.model_for("profile"), cfg.for_role("profile").effort) == ("sol", "high")
+    assert (cfg.model_for("quality"), cfg.for_role("quality").effort) == ("luna", "medium")
+
+
+def test_profile_can_run_on_another_provider(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.services import workspace
+
+    ws = Workspace(settings)
+    ws.set_llm_config(
+        {"provider": "codex", "quality_model": "sol", "screening_model": "sol",
+         "profile_model": "claude-opus-5-5", "profile_provider": "claude_code"}
+    )  # fmt: skip
+    built: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        workspace,
+        "make_structured",
+        lambda cfg, role, *_: built.append((role, cfg.provider, cfg.model_for(role))),
+    )
+    ws.structured("profile")
+    ws.structured("screening")
+    assert built == [
+        ("profile", "claude_code", "claude-opus-5-5"),
+        ("screening", "codex", "sol"),
+    ]
+
+    signed_in = {"codex"}
+    monkeypatch.setattr(ws, "_cli_logged_in", lambda provider: provider in signed_in)
+    assert not ws.llm_ready()  # the profile's provider must be signed in too
+    signed_in.add("claude_code")
+    assert ws.llm_ready()
+
+    # Without a profile model the profile stays on the main provider and its quality model.
+    ws.set_llm_config({"profile_model": ""})
+    assert ws.llm.profile_provider_for() == "codex"
+
+
+def test_profile_provider_key_is_saved_for_that_provider(settings: Settings) -> None:
+    ws = Workspace(settings)
+    update = {"provider": "codex", "quality_model": "sol", "screening_model": "sol",
+              "profile_model": "claude-opus-5-5", "profile_provider": "anthropic"}  # fmt: skip
+    ws.set_llm_config(update, profile_api_key="sk-profile")
+    cfg = ws.provider_config("anthropic")
+    assert cfg.api_key is not None and cfg.api_key.get_secret_value() == "sk-profile"
+    assert ws.llm.api_key is None  # the Codex side still signs in through its CLI
+    assert Workspace(settings).saved_key("anthropic") == "sk-profile"  # survives a restart
+
+
 def test_configs_saved_before_the_rename_still_load(settings: Settings) -> None:
     legacy = {"provider": "codex", "orchestrator_model": "sol", "worker_model": "luna",
               "effort": "high"}  # fmt: skip

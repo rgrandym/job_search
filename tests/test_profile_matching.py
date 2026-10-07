@@ -32,6 +32,7 @@ from src.jobs.profile_memory import (
     family_of,
     family_terms,
     intent_text,
+    numbered_source,
     pivot_titles,
     profile_cv_text,
     summarize_profile,
@@ -111,6 +112,47 @@ def test_summary_prompt_uses_dated_text_and_intent(master_cv: MasterCV, tmp_path
     assert "[nimbus-1]" in prompt and "2021-03" in prompt
     bd = summary.role_families[1]
     assert bd.requested and bd.rejected is None and bd.evidence == ["nimbus-1", "lexa-1"]
+
+
+def test_source_document_lines_are_citable_evidence(master_cv: MasterCV, tmp_path: Any) -> None:
+    source = "Jane Doe\n\n  Publications  \nDoe J. Graph recommenders. Nature 2023.\n"
+    numbered, ids = numbered_source(source)
+    assert numbered.splitlines() == [
+        "[src-1] Jane Doe",
+        "[src-2] Publications",
+        "[src-3] Doe J. Graph recommenders. Nature 2023.",
+    ]
+    assert ids == {"src-1", "src-2", "src-3"}
+
+    consulting = RoleFamily(
+        name="Scientific consulting",
+        tier="adjacent",
+        titles=["Scientific Consultant"],
+        evidence=["[src-3]", "nimbus-1", "src-99"],
+        gap="no consulting role",
+    )
+    llm = FakeLLM({ProfileSummary: _summary(CORE, consulting)})
+    memory = ProfileMemory(tmp_path / "m.json")
+    summary, _ = summarize_profile(master_cv, None, llm, memory, source_text=source)
+    prompt = llm.calls[0][0]
+    assert "<source_document>\n[src-1] Jane Doe" in prompt and "<cv>" in prompt
+    fam = summary.role_families[1]
+    assert fam.evidence == ["src-3", "nimbus-1"] and fam.rejected is None  # src-99 doesn't exist
+    # Re-checks run without the document and keep the src ids verified at build time.
+    again, cached = summarize_profile(master_cv, None, llm, memory)
+    assert cached and again.role_families[1].evidence == ["src-3", "nimbus-1"]
+    # Without a document no src id is accepted.
+    plain, _ = summarize_profile(master_cv, None, llm, memory, refresh=True)
+    assert plain.role_families[1].evidence == ["nimbus-1"] and plain.role_families[1].rejected
+
+
+def test_summary_prompt_asks_for_capabilities_publications_and_adjacent_routes() -> None:
+    from src.jobs.profile_memory import SUMMARY_SYSTEM
+
+    for phrase in ("capabilities", "publications", "business development", "[src-N]", "gap"):
+        assert phrase in SUMMARY_SYSTEM
+    record = ProfileSummary.model_fields["publications"]
+    assert record.default is None  # profiles stored before the field still load
 
 
 def test_family_checks_require_evidence_and_a_gap(master_cv: MasterCV) -> None:
@@ -220,6 +262,15 @@ def test_generic_titles_match_and_attribute_to_their_family() -> None:
     assert not shares_role_words("Business Analyst", ["Business Development Manager"])
     assert family_of("Business Development Director", [CORE, BD]) == "Business development"
     assert family_of("Lead Machine Learning Engineer", [BD, CORE]) == "ML engineering"
+    cell = RoleFamily(name="iPSC R&D", tier="core", titles=["Principal Scientist iPSC"],
+                      domain_terms=["cell therapy"])  # fmt: skip
+    ops = RoleFamily(name="R&D operations", tier="adjacent", titles=["Scientific Operations Lead"],
+                     evidence=["nimbus-1", "lexa-1"], gap="no ops role")  # fmt: skip
+    # A job noun ("scientist") says nothing about the field; the other words decide.
+    assert family_of("Implementation Scientist", [cell, ops]) is None
+    assert family_of("Principal Scientist", [cell, ops]) == "iPSC R&D"
+    assert family_of("Senior Scientist, Cell Therapy Process", [cell, ops]) == "iPSC R&D"
+    assert family_of("Head of Scientific Operations", [cell, ops]) == "R&D operations"
 
 
 def test_search_plans_by_family_attributes_results_and_logs_yield(
@@ -370,6 +421,16 @@ def test_matcher_sees_intent_and_only_realistic_families(ws: Workspace) -> None:
 
 
 # ---------------------------------------------------------------- career intent store
+
+
+def test_profile_summary_is_built_by_the_profile_model(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    roles: list[str] = []
+    llm = FakeLLM({ProfileSummary: _summary(CORE, BD, SALES)})
+    monkeypatch.setattr(ws, "structured", lambda role="screening", *_: roles.append(role) or llm)
+    asyncio.run(search_service.get_summary(ws, ws.master_cv, SearchQuery(), True))
+    assert roles == ["profile"]
 
 
 def test_intent_patch_reports_changes_and_flags_stale_profiles(ws: Workspace) -> None:

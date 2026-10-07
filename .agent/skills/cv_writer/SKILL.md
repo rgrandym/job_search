@@ -193,6 +193,14 @@ the CV library, displays their text, permits edits, exports Word or plain text, 
 one letter or all letters with their saved exports. Older generated Word files in the root of
 `output/` are moved into those folders when the
 document libraries load; older download links continue to work.
+Uploaded CV files are stored byte-for-byte in `data/cvs/` on upload, with an identical copy in
+`output/cvs/` (the library lists that copy once; deleting the CV removes both). The app never
+modifies them. Opening a library CV only views it (`GET /api/cv/preview/{id}`: PDFs and text as
+stored; `.docx` files as a PDF that Microsoft Word renders from a copy in its sandbox, cached in
+`data/cvs/.preview/`) or opens its copy in `output/cvs/` in a desktop app (`POST /api/cv/open/{id}`, creating the copy
+if needed and reusing an existing same-name copy so earlier edits are kept; `?app=word` opens a
+PDF in Word as an editable copy). Saves therefore land in `output/cvs/`, where edited `.docx`
+files are listed as their own CVs. Viewing never parses the CV.
 
 ---
 

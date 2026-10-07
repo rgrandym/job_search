@@ -3,7 +3,7 @@ import { Loader2, Plus, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import type { LanguageLevel, SearchIntent } from "../lib/types";
-import { ChipInput, Field } from "./ui";
+import { AutoText, ChipInput, Field } from "./ui";
 
 const LIST_FIELDS = [
   ["target_areas", "Areas to explore", "e.g. business development, venture investment: each becomes an adjacent role family if your CV supports it"],
@@ -52,11 +52,11 @@ export function IntentEditor() {
         like to move into business development”. Profiles built before a change show “intent changed”; update them to use it.
       </p>
       <Field label="Direction">
-        <textarea
-          className="input min-h-14"
+        <AutoText
+          minRows={2}
           placeholder="Where you want your career to go"
           value={draft.direction}
-          onChange={(e) => patch({ direction: e.target.value })}
+          onChange={(direction) => patch({ direction })}
         />
       </Field>
       {LIST_FIELDS.map(([field, label, hint]) => (

@@ -178,6 +178,8 @@ export interface JobVerdict {
   /** Within 5 points of the threshold (after the second opinion, if any). */
   borderline: boolean;
   cap_reason: string | null;
+  /** False: too little posting text to check its requirements (fetch or paste it). */
+  requirements_checked: boolean;
   /** Fit with the career intent (never changes the score; "against" caps priority). */
   alignment?: Alignment;
   alignment_note?: string;
@@ -323,6 +325,8 @@ export interface LearnedPreference {
   label_ids: string[];
   family: RoleFamily | null;
   status: "pending" | "accepted" | "rejected";
+  /** Accepted automatically from new labels or applied / N/A reasons. */
+  auto: boolean;
   created_at: string;
   decided_at: string | null;
 }
@@ -464,6 +468,18 @@ export interface TailoredCVView {
   imported: boolean;
 }
 
+/** What the candidate's publications (and patents, grants, talks, awards) show employers. */
+export interface PublicationRecord {
+  count: number;
+  lead_author: number;
+  years: string;
+  themes: string[];
+  notable: string[];
+  other_outputs: string[];
+  signals: string[];
+  summary: string;
+}
+
 export interface ProfileSummary {
   headline: string;
   seniority: string;
@@ -475,6 +491,9 @@ export interface ProfileSummary {
   qualifications: string[];
   achievements: string[];
   transferable_strengths: string[];
+  /** Every capability the CV evidences (technical, delivery, leadership, commercial, communication). */
+  capabilities: string[];
+  publications?: PublicationRecord | null;
   target_roles: string[];
   stretch_roles: string[];
   not_a_fit: string[];
@@ -507,13 +526,43 @@ export interface ProgressEvent {
   status?: string;
   done?: number;
   total?: number;
+  /** "review" = the second opinions, a live row of their own after the first pass. */
+  phase?: string;
   at: number;
 }
 
 export type ModelUsageEvent = Extract<ChatEvent, { type: "model_usage" }>;
 
+/** Live progress of a profile build or a document being written (`GET /api/progress/{id}`). */
+export interface TaskProgress {
+  id: string;
+  title: string;
+  step: string;
+  done: number;
+  total: number;
+  started_at: number;
+  step_started_at: number;
+  updated_at: number;
+  /** The model call in flight, e.g. "CV tailoring (claude-opus-5-5)". */
+  waiting_on: string | null;
+  waiting_since: number | null;
+  completed: string[];
+  finished: boolean;
+  error: string | null;
+  /** Server clock at snapshot time (seconds), for elapsed times. */
+  now: number;
+}
+
+/** Sent by a search stream after a few quiet seconds: the server is alive and waiting on this. */
+export interface Heartbeat {
+  waiting_on: string | null;
+  waiting_s?: number;
+  at: number;
+}
+
 export type SearchStreamEvent =
   | ({ type: "search_progress" } & Omit<ProgressEvent, "at">)
+  | ({ type: "heartbeat" } & Omit<Heartbeat, "at">)
   | ModelUsageEvent
   | { type: "search_results"; outcome: SearchOutcome }
   | { type: "error"; message: string };
@@ -535,6 +584,8 @@ export interface ClaudeCodeUsage {
 export interface MatchReport {
   threshold: number;
   matches: MatchResult[];
+  /** Would match on what could be read, but the full posting (its requirements) was not read yet. */
+  to_check?: MatchResult[];
   below_threshold: MatchResult[];
   excluded: MatchResult[];
   /** Already applied for: set aside before screening, never ranked. */
@@ -582,20 +633,29 @@ export interface SearchOutcome {
   /** Shortlisted jobs not judged yet (stopped or failed batches): Continue judges them. */
   unscreened: number;
   history_id: string | null;
+  /** The progress lines, with seconds since the start (saved with the search). */
+  progress_log?: string[];
   /** Role families searched: name -> tier. */
   families?: Record<string, FamilyTier>;
 }
 
 export interface LLMView {
   provider: Provider;
-  /** Profile, CV and letters, second opinions, the assistant. */
+  /** CV and letters, second opinions, the assistant. */
   quality_model: string;
   /** First-pass job matching. */
   screening_model: string;
   quality_effort: Effort;
   screening_effort: Effort;
+  /** The profile summary; empty means the quality model (and its effort) builds it. */
+  profile_model: string;
+  profile_effort: Effort;
+  /** The profile model's own provider (null: `provider`). Used only with a profile model. */
+  profile_provider: Provider | null;
   key_set: boolean;
   ready: boolean;
+  /** Credentials available for the provider that builds the profile. */
+  profile_ready: boolean;
 }
 
 export interface CVAsset {

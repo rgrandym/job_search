@@ -19,6 +19,7 @@ import json
 import re
 from typing import Literal
 
+from src.core import progress
 from src.core.llm_provider import LLMProvider
 from src.cv.claims import overclaim
 from src.cv.models import (
@@ -266,14 +267,21 @@ def tailor(
     """End-to-end: JD text + Master CV -> guarded TailoredCV. With `review`, a second reader
     critiques the result and, if it finds issues, one revised plan replaces the first (both
     pass the same guards). `jd`: an analysis already made of this JD text (saves a call)."""
-    jd = jd or analyze_jd(jd_text, llm)
+    if jd is None:
+        progress.step("Analysing the job description")
+        jd = analyze_jd(jd_text, llm)
+    progress.step("Planning the tailored CV")
     plan = propose_plan(master, jd, jd_text, llm, guidance, emphasis, level)
+    progress.step("Checking every change against your CV")
     out = apply_plan(master, plan, jd)
     if not review:
         return out
+    progress.step("Reviewing the draft as a second reader")
     critique = critique_cv(master, out, jd, jd_text, llm)
     if not critique.has_issues():
+        progress.step("No revision needed")
         return out
+    progress.step("Revising the draft from the review")
     revised = revise_plan(master, jd, jd_text, plan, critique, llm, guidance, emphasis, level)
     return apply_plan(master, revised, jd).model_copy(update={"critique": critique.notes()})
 

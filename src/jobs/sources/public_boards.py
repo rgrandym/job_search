@@ -13,7 +13,9 @@ the search pipeline calls for the shortlist alone. Every board is rate-limited p
 
 LinkedIn is read without robots.txt (it disallows every crawler) but slowly: one request per
 `linkedin_delay_s`, at most `linkedin_max_pages` pages per term and `linkedin_max_details`
-postings opened per search, stopping at the first refusal (HTTP 429/999). The others are read
+postings opened per search, and at most `linkedin_max_search_requests` search pages in all.
+When LinkedIn asks to slow down (HTTP 429/999) it waits (Retry-After, else
+`linkedin_cooldown_s`) and resumes, at most `linkedin_max_cooldowns` times. The others are read
 within their robots.txt; Totaljobs disallows paging a radius search, so only page 1 is read.
 
 UNVERIFIED: LinkedIn's markup and its `f_WT` / `f_TPR` filters are mapped from its public pages
@@ -40,7 +42,9 @@ from src.jobs.sources.base import (
     html_to_text,
     infer_arrangement,
     parse_date,
+    pause,
     posting_from_jsonld,
+    slow_down_status,
 )
 from src.jobs.sources.job_boards import uk_only
 
@@ -96,10 +100,13 @@ class LinkedInSource:
         )
         self.errors: dict[str, str] = {}
         self._details = 0
+        self._searches = 0
+        self._cooldowns = 0
         self._refused = False
 
     def fetch(self, query: SearchQuery) -> list[JobPosting]:
-        self.errors, self._details, self._refused = {}, 0, False
+        self.errors, self._details, self._searches, self._refused = {}, 0, 0, False
+        self._cooldowns = 0
         jobs: dict[str, JobPosting] = {}
         per_search, cap = query.search_budget()
         pages = min(self.settings.linkedin_max_pages, -(-per_search // LINKEDIN_PAGE))
@@ -136,9 +143,12 @@ class LinkedInSource:
             params["f_WT"] = LINKEDIN_WORKPLACE[mode]
         found: list[JobPosting] = []
         for page in range(pages):
+            if self._searches >= self.settings.linkedin_max_search_requests:
+                break  # keep LinkedIn's patience for opening the shortlisted postings
+            self._searches += 1
             try:
-                body = self.http.get(LINKEDIN_SEARCH, params={**params, "start": page * 10}).text
-            except SourceError as exc:  # 429/999: LinkedIn wants us to slow down; stop here
+                body = self._get(LINKEDIN_SEARCH, params={**params, "start": page * 10})
+            except SourceError as exc:  # still refused after the waits: stop here
                 self.errors["search"] = f"LinkedIn stopped answering: {exc}"
                 self._refused = True
                 break
@@ -158,11 +168,26 @@ class LinkedInSource:
             return job
         self._details += 1
         try:
-            body = self.http.get(LINKEDIN_POSTING.format(id=job.id.split(":")[-1])).text
-        except SourceError:
-            self._refused = True
+            body = self._get(LINKEDIN_POSTING.format(id=job.id.split(":")[-1]))
+        except SourceError as exc:
+            if slow_down_status(exc) is not None or str(exc) == "stopped":
+                self._refused = True  # still refused after the waits
             raise
         return job.model_copy(update=linkedin_details(body, job))
+
+    def _get(self, url: str, **kwargs: Any) -> str:
+        """GET that waits when LinkedIn asks to slow down (429/999, honouring Retry-After) and
+        resumes, at most `linkedin_max_cooldowns` times per search; then the refusal stands."""
+        while True:
+            try:
+                return self.http.get(url, **kwargs).text
+            except SourceError as exc:
+                slow = slow_down_status(exc)
+                if slow is None or self._cooldowns >= self.settings.linkedin_max_cooldowns:
+                    raise
+                self._cooldowns += 1
+                wait = slow[1] if slow[1] is not None else self.settings.linkedin_cooldown_s
+                pause(min(wait, 120.0))
 
 
 def parse_linkedin_cards(page: str) -> list[JobPosting]:

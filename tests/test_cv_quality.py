@@ -691,3 +691,23 @@ def test_cover_letters_have_their_own_library_editor_and_exports(
     assert not (settings.output_dir / "cover_letters" / legacy.name).exists()
     assert not (settings.output_dir / "cover_letters" / legacy_edit.json()["filename"]).exists()
     assert older_cv.name in {path.name for path in (settings.output_dir / "cvs").glob("*.docx")}
+
+
+def test_word_text_includes_tables_in_document_order() -> None:
+    import io
+
+    from docx import Document
+
+    from src.services.cv_service import extract_text
+
+    doc = Document()
+    doc.add_paragraph("Jane Doe, Senior ML Engineer, with a long enough opening line here.")
+    table = doc.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "Publications"
+    table.cell(0, 1).text = "Doe J. Graph recommenders. Nature 2023."
+    doc.add_paragraph("References available on request, closing paragraph of the CV.")
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    lines = extract_text("cv.docx", buffer.getvalue()).splitlines()
+    assert lines[1] == "Publications | Doe J. Graph recommenders. Nature 2023."
+    assert lines[2].startswith("References")

@@ -8,6 +8,7 @@ Adzuna:     https://developer.adzuna.com/docs/search       (app ID and app key)
 from __future__ import annotations
 
 import math
+import time
 from typing import Any
 
 import httpx
@@ -27,6 +28,9 @@ REED_SEARCH = "https://www.reed.co.uk/api/1.0/search"
 REED_DETAILS = "https://www.reed.co.uk/api/1.0/jobs/{id}"
 CVL_SEARCH = "https://www.cv-library.co.uk/search-jobs-json"
 ADZUNA_SEARCH = "https://api.adzuna.com/v1/api/jobs/{country}/search/{page}"
+# Adzuna answers 5xx now and then under load: retry a page twice, then skip that search.
+ADZUNA_RETRIES = 2
+ADZUNA_RETRY_S = 2.0
 # Countries Adzuna's search API covers (https://developer.adzuna.com/overview).
 ADZUNA_COUNTRIES = {
     "gb", "us", "ca", "au", "nz", "de", "fr", "nl", "be", "ch", "at", "es", "it", "pl", "sg",
@@ -209,6 +213,19 @@ def _adzuna_error(exc: Exception) -> str:
     return f"Adzuna API request failed (HTTP {status})"
 
 
+class _AdzunaTransient(SourceError):
+    """A search that still failed after retries (5xx, network, unreadable): skip it."""
+
+
+def _adzuna_transient(exc: Exception) -> bool:
+    """Worth retrying: a server error, a network error or an unreadable body. Bad credentials,
+    the rate limit and a stopped search are not."""
+    cause = exc.__cause__
+    if isinstance(cause, httpx.HTTPStatusError):
+        return cause.response.status_code >= 500
+    return isinstance(exc, ValueError) or isinstance(cause, httpx.TransportError)
+
+
 class AdzunaSource:
     """Adzuna's official UK search API; descriptions are snippets only.
 
@@ -232,48 +249,74 @@ class AdzunaSource:
         if country not in ADZUNA_COUNTRIES:
             raise SourceError(f"Adzuna does not cover {query.country}")
         jobs: dict[str, JobPosting] = {}
-        per_search, cap = query.search_budget()
-        page_size = min(50, per_search)
+        failed: list[str] = []
         locations: list[str | None] = [*query.locations] or [None]
-        for term in query.search_terms():
-            for location in locations:
-                page = 1
-                while (page - 1) * page_size < per_search:
-                    params: dict[str, Any] = {
-                        "app_id": self._id,
-                        "app_key": self._key,
-                        "results_per_page": page_size,
-                        "what": term,
-                        "content-type": "application/json",
-                    }
-                    if location:
-                        params["where"] = location
-                        if query.distance_miles is not None:
-                            params["distance"] = math.ceil(query.distance_miles * 1.609344)
-                    if query.salary_min is not None:
-                        params["salary_min"] = query.salary_min
-                    if query.salary_max is not None:
-                        params["salary_max"] = query.salary_max
-                    if query.posted_within_days is not None:
-                        params["max_days_old"] = query.posted_within_days
-                    try:
-                        url = ADZUNA_SEARCH.format(country=country, page=page)
-                        data = self.http.get(url, params=params).json()
-                    except (SourceError, ValueError) as exc:
-                        # HttpFetcher errors may contain query parameters, including the app key.
-                        raise SourceError(_adzuna_error(exc)) from None
-                    results = data.get("results", [])
-                    for item in results:
-                        job = self._to_posting(item)
-                        job.within_search_area = bool(location) or query.country is not None
-                        jobs.setdefault(job.id, job)
-                    if not results or page * page_size >= data.get("count", 0):
-                        break
-                    page += 1
+        searches = [(term, loc) for term in query.search_terms() for loc in locations]
+        for term, location in searches:
+            try:
+                for job in self._search(country, term, location, query):
+                    jobs.setdefault(job.id, job)
+            except _AdzunaTransient as exc:
+                failed.append(str(exc))  # one bad search must not lose the others
+        if failed and len(failed) == len(searches):
+            raise SourceError(failed[0])
+        _, cap = query.search_budget()
         out = list(jobs.values())
         if query.remote_only:
             out = [job for job in out if job.work_arrangement == "remote"]
         return out[:cap]
+
+    def _search(
+        self, country: str, term: str, location: str | None, query: SearchQuery
+    ) -> list[JobPosting]:
+        """One term in one place, page by page up to the search budget."""
+        jobs: list[JobPosting] = []
+        per_search, _ = query.search_budget()
+        page_size = min(50, per_search)
+        page = 1
+        while (page - 1) * page_size < per_search:
+            params: dict[str, Any] = {
+                "app_id": self._id,
+                "app_key": self._key,
+                "results_per_page": page_size,
+                "what": term,
+                "content-type": "application/json",
+            }
+            if location:
+                params["where"] = location
+                if query.distance_miles is not None:
+                    params["distance"] = math.ceil(query.distance_miles * 1.609344)
+            if query.salary_min is not None:
+                params["salary_min"] = query.salary_min
+            if query.salary_max is not None:
+                params["salary_max"] = query.salary_max
+            if query.posted_within_days is not None:
+                params["max_days_old"] = query.posted_within_days
+            data = self._page(ADZUNA_SEARCH.format(country=country, page=page), params)
+            results = data.get("results", [])
+            for item in results:
+                job = self._to_posting(item)
+                job.within_search_area = bool(location) or query.country is not None
+                jobs.append(job)
+            if not results or page * page_size >= data.get("count", 0):
+                break
+            page += 1
+        return jobs
+
+    def _page(self, url: str, params: dict[str, Any]) -> dict[str, Any]:
+        """One results page, retried on transient failures."""
+        for attempt in range(ADZUNA_RETRIES + 1):
+            try:
+                data: dict[str, Any] = self.http.get(url, params=params).json()
+                return data
+            except (SourceError, ValueError) as exc:
+                # HttpFetcher errors may contain query parameters, including the app key.
+                if not _adzuna_transient(exc):
+                    raise SourceError(_adzuna_error(exc)) from None
+                if attempt == ADZUNA_RETRIES:
+                    raise _AdzunaTransient(_adzuna_error(exc)) from None
+                time.sleep(ADZUNA_RETRY_S * (attempt + 1))
+        raise AssertionError("unreachable")
 
     def _to_posting(self, item: dict[str, Any]) -> JobPosting:
         text = html_to_text(str(item.get("description") or ""))

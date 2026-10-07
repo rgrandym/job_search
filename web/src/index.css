@@ -17,6 +17,12 @@
   --good: #34d399;
   --warn: #fbbf24;
   --bad: #f87171;
+  --cv-paper: #ffffff;
+  --cv-ink: #1f2937;
+  --cv-rule: #1f3864;
+  --cv-hint: #64748b;
+  --cv-hover: #eef3fb;
+  --cv-desk: #1c2029;
   color-scheme: dark;
 }
 [data-theme="light"] {
@@ -32,6 +38,12 @@
   --good: #059669;
   --warn: #b45309;
   --bad: #dc2626;
+  --cv-paper: #ffffff;
+  --cv-ink: #1f2937;
+  --cv-rule: #1f3864;
+  --cv-hint: #64748b;
+  --cv-hover: #eef3fb;
+  --cv-desk: #e3e6eb;
   color-scheme: light;
 }
 
@@ -68,3 +80,28 @@ body { background: var(--bg); color: var(--text-primary); font-size: 13px; }
 .prose-chat pre { max-width: 100%; overflow-x: auto; }
 .prose-chat th, .prose-chat td { border: 1px solid var(--border); padding: 2px 6px; text-align: left; }
 .prose-chat h1, .prose-chat h2, .prose-chat h3 { font-weight: 600; margin: 0.5em 0 0.25em; }
+
+/* The parsed CV is edited on an A4 page with the margins and typography of a Word CV. */
+.cv-desk { background: var(--cv-desk); }
+.cv-paper { position: relative; box-sizing: border-box; padding: 72px 76px; background: var(--cv-paper); color: var(--cv-ink);
+  font-family: Calibri, Carlito, "Segoe UI", Arial, sans-serif; font-size: 10.5pt; line-height: 1.35;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25), 0 6px 24px rgba(0, 0, 0, 0.18); color-scheme: light; }
+.cv-page-break { position: absolute; left: 0; right: 0; height: 0; border-top: 1px dashed var(--cv-hint); pointer-events: none; }
+.cv-page-break span { position: absolute; right: 8px; top: 2px; color: var(--cv-hint); font-size: 9px; }
+.cv-line { display: block; min-width: 0; resize: none; overflow: hidden; border: 1px solid transparent; border-radius: 2px;
+  background: transparent; color: inherit; font: inherit; line-height: inherit; padding: 0 3px; outline: none; }
+.cv-line:hover { background: var(--cv-hover); }
+.cv-line:focus { border-color: var(--accent); background: var(--cv-paper); }
+.cv-line::placeholder { color: var(--cv-hint); font-style: italic; }
+.cv-heading { margin-bottom: 4px; border-bottom: 1px solid var(--cv-rule); padding-bottom: 1px; color: var(--cv-rule);
+  font-size: 12pt; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+.cv-section-title { display: flex; align-items: baseline; gap: 12px; }
+.cv-add { display: inline-flex; align-items: center; gap: 3px; padding: 1px 4px; color: var(--cv-hint); font-size: 11px; opacity: 0.55; }
+.cv-paper:hover .cv-add { opacity: 1; }
+.cv-add:hover, .cv-delete:hover { color: var(--accent); }
+/* Row controls appear only where the pointer or caret is, so the page reads as a document. */
+.cv-delete { flex-shrink: 0; padding: 3px; color: var(--cv-hint); opacity: 0; }
+*:hover > .cv-delete, *:focus-within > .cv-delete, .cv-delete:focus-visible { opacity: 1; }
+.cv-evidence { margin-top: 1px; color: var(--cv-hint); font-size: 10px; }
+.cv-evidence summary { cursor: pointer; width: max-content; opacity: 0.6; }
+.cv-evidence[open] summary, li:hover .cv-evidence summary { opacity: 1; }

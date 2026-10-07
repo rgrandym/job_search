@@ -47,9 +47,13 @@ def _models(ws: Workspace, outcome: SearchOutcome) -> str | None:
     if not outcome.report.screened:
         return None
     llm = ws.llm
+    profile = ""
+    if llm.profile_model:
+        via = "" if llm.profile_provider_for() == llm.provider else f"{llm.profile_provider_for()} "
+        profile = f" · profile {via}{llm.profile_model} ({llm.profile_effort})"
     return (
         f"{llm.provider} · screening {llm.screening_model} ({llm.screening_effort}) "
-        f"· quality {llm.quality_model} ({llm.quality_effort})"
+        f"· quality {llm.quality_model} ({llm.quality_effort}){profile}"
     )
 
 
@@ -141,12 +145,23 @@ def open_entry(ws: Workspace, entry_id: str) -> tuple[SearchRequest, SearchOutco
     req = SearchRequest.model_validate(entry["request"])
     outcome = SearchOutcome.model_validate(entry["outcome"])
     outcome.history_id = entry_id
+    _move_unchecked(outcome.report)
     # Entries saved before this was recorded (or with failed batches) can still be continued.
     outcome.unscreened = count_unscreened(ws, req, outcome.report)
     tracker.refresh(ws, outcome.report)  # statuses and notes may have changed since
     ws.last_query, ws.last_report = req.query, outcome.report
     ws.last_models = entry.get("models")
     return req, outcome
+
+
+def _move_unchecked(report: MatchReport) -> None:
+    """Entries saved before `to_check` existed list matches judged without the full posting
+    among the real ones: move them there, so they read as unchecked."""
+    unread = [r for r in report.matches if r.verdict and not r.verdict.requirements_checked]
+    if unread:
+        moved = {r.job.id for r in unread}
+        report.matches = [r for r in report.matches if r.job.id not in moved]
+        report.to_check = [*report.to_check, *unread]
 
 
 def screened_reports(
@@ -177,6 +192,32 @@ def update(ws: Workspace, entry_id: str, outcome: SearchOutcome) -> None:
             entry["models"] = _models(ws, outcome) or entry.get("models")
             _log_yield(ws, entry_id, str(entry.get("created_at", "")), outcome)
     _save(ws, entries)
+
+
+def remove_job(ws: Workspace, entry_id: str, job_id: str) -> bool:
+    """Drop one posting from a past search's results (the user cleaning up the list)."""
+    entries = _entries(ws)
+    entry = next((e for e in entries if e.get("id") == entry_id), None)
+    if entry is None:
+        return False
+    report = MatchReport.model_validate(entry["outcome"]["report"])
+    if not drop_job(report, job_id):
+        return False
+    entry["outcome"]["report"] = report.model_dump(mode="json")
+    entry["matches"] = len(report.matches)
+    _save(ws, entries)
+    return True
+
+
+def drop_job(report: MatchReport, job_id: str) -> bool:
+    """Remove a posting from every list of `report`; True if it was there."""
+    found = False
+    for name in ("matches", "to_check", "below_threshold", "excluded", "applied", "dismissed"):
+        results: list[MatchResult] = getattr(report, name)
+        kept = [r for r in results if r.job.id != job_id]
+        found |= len(kept) != len(results)
+        setattr(report, name, kept)
+    return found
 
 
 def delete_entry(ws: Workspace, entry_id: str) -> bool:

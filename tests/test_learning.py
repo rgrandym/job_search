@@ -174,3 +174,64 @@ def test_comparison_can_apply_your_learned_preferences() -> None:
         )
     )
     assert prompts and rule in prompts[0]
+
+
+def test_a_no_label_sets_the_job_aside_in_later_searches(
+    ws: Workspace, master_cv: MasterCV
+) -> None:
+    from src.services import search_service
+
+    _labelled(ws, master_cv)
+    again = [
+        JobPosting(id="n1-again", title="Postdoctoral Researcher", company="Acme Bio"),
+        JobPosting(id="fresh", title="Head of Partnerships", company="Beta"),
+    ]
+    keep, applied, dismissed = asyncio.run(search_service._set_aside(ws, again, _quiet))
+    assert [j.id for j in keep] == ["fresh"] and applied == []
+    assert dismissed[0].exclusion_reasons == ["you labelled it no: too junior"]
+
+
+async def _quiet(kind: str, payload: dict[str, object]) -> None:
+    return None
+
+
+def test_new_reasons_are_learned_once_and_go_straight_into_the_profile(
+    ws: Workspace, master_cv: MasterCV
+) -> None:
+    _labelled(ws, master_cv)
+    ruled_out = JobPosting(id="t1", title="Clinical Research Associate", company="Gamma")
+    tracker.set_status(ws, ruled_out, "na", reason="site monitoring travel, not my field")
+    entry = tracker.find(tracker.load(ws), ruled_out)
+    assert entry is not None
+    floor = DraftPreference(
+        kind="not_a_fit",
+        text="Clinical monitoring roles with heavy site travel",
+        label_ids=[entry.id],
+    )
+    fake = FakeLLM({DraftPreferences: DraftPreferences(proposals=[floor])})
+
+    learned = learning.learn_new(ws, fake)  # type: ignore[arg-type]
+    assert learned is not None and [p.text for p in learned] == [floor.text]
+    assert learned[0].status == "accepted" and learned[0].auto
+    assert 'ruled out (N/A): site monitoring travel' in fake.calls[0][0]
+    summary = learning.learned_for(ws, SUMMARY, master_cv)
+    assert floor.text in summary.not_a_fit  # every later search's profile carries it
+
+    assert learning.learn_new(ws, fake) is None  # nothing new: no model call
+    assert len(fake.calls) == 1
+    tracker.set_status(ws, ruled_out, "na", reason="site monitoring travel; no lab work")
+    assert learning.learn_new(ws, fake) is not None  # a changed reason is read again
+
+
+def test_a_job_can_be_deleted_from_the_results_and_its_search(
+    ws: Workspace, master_cv: MasterCV
+) -> None:
+    from src.services import history, search_service
+
+    _labelled(ws, master_cv)
+    entry_id = history.list_history(ws)[0].id
+    assert search_service.remove_result(ws, "n2", entry_id)
+    assert "n2" not in {r.job.id for r in ws.last_report.all_results()}  # type: ignore[union-attr]
+    _, outcome = history.open_entry(ws, entry_id)
+    assert "n2" not in {r.job.id for r in outcome.report.all_results()}
+    assert not search_service.remove_result(ws, "n2", entry_id)

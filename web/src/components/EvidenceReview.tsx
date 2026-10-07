@@ -3,7 +3,7 @@ import { Check, FileUp, Loader2, X } from "lucide-react";
 import { useRef, useState } from "react";
 import { api } from "../lib/api";
 import type { QueuedEvidence } from "../lib/types";
-import { Field } from "./ui";
+import { AutoText, Field } from "./ui";
 
 const KIND_LABEL: Record<QueuedEvidence["kind"], string> = {
   skill: "Skill",
@@ -57,8 +57,8 @@ export function EvidenceReview() {
         </button>
       </div>
       <Field label="Or paste text">
-        <input className="input mb-1" placeholder="Where it comes from (e.g. portfolio site)" value={source} onChange={(e) => setSource(e.target.value)} />
-        <textarea className="input min-h-20" placeholder="Paste the text here" value={text} onChange={(e) => setText(e.target.value)} />
+        <AutoText singleLine className="mb-1" placeholder="Where it comes from (e.g. portfolio site)" value={source} onChange={setSource} />
+        <AutoText minRows={4} placeholder="Paste the text here" value={text} onChange={setText} />
       </Field>
       <div className="flex justify-end">
         <button className="btn-primary" disabled={reading || text.trim().length < 40} onClick={() => paste.mutate()}>
@@ -108,7 +108,7 @@ function EvidenceItem({ item, onDone }: { item: QueuedEvidence; onDone: () => vo
         <span style={{ color: CONFIDENCE_COLOR[item.confidence] }}>{item.confidence} confidence</span>
         <span className="ml-auto text-faint">{item.source}</span>
       </div>
-      <input className="input" value={text} onChange={(e) => setText(e.target.value)} />
+      <AutoText value={text} onChange={setText} />
       <p className="text-[11px] italic text-faint">“{item.quote}”</p>
       {decide.error && <p className="text-bad">{(decide.error as Error).message}</p>}
       <div className="flex justify-end gap-1">

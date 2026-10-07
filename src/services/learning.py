@@ -19,6 +19,12 @@ Code decides (`_vet`): every proposal cites labelled jobs pointing its way (excl
 gap never names a skill the profile shows, nothing repeats an existing entry or a proposal
 you rejected, and an adjacent family passes the same CV-evidence checks as any other.
 
+Evidence is your labels with their notes, plus the reasons and notes on jobs you applied for
+(read as "yes") or marked N/A (read as "no"). Each search first learns from evidence it has not
+read yet (`learn_new`): proposals that pass the checks are accepted at once, marked `auto`, and
+you can remove any of them (removed ones are never proposed again). "Suggest profile updates"
+still proposes from all the evidence for you to review.
+
 Accepted preferences are kept per CV in `data/learned_preferences.json` (personal) and applied
 to whichever profile summary a search uses (`apply_learned`), so they survive profile rebuilds
 and hold for every role family. Changing them changes the matcher's input, so remembered
@@ -27,6 +33,7 @@ verdicts are judged again.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from datetime import UTC, datetime
@@ -37,10 +44,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from src.core.llm_provider import LLMProvider
 from src.cv.models import MasterCV
-from src.jobs.models import ProfileSummary, RoleFamily, SearchIntent
+from src.jobs.models import JobPosting, ProfileSummary, RoleFamily, SearchIntent, SearchQuery
 from src.jobs.profile_memory import check_families, intent_text, profile_cv_text
 from src.services import intent as intent_service
-from src.services import labels
+from src.services import labels, tracker
 from src.services.workspace import Workspace
 
 Kind = Literal[
@@ -115,6 +122,7 @@ class LearnedPreference(BaseModel):
     label_ids: list[str] = Field(default_factory=list)
     family: RoleFamily | None = None
     status: Literal["pending", "accepted", "rejected"] = "pending"
+    auto: bool = Field(False, description="Accepted automatically from new labels or reasons")
     created_at: str
     decided_at: str | None = None
 
@@ -284,25 +292,67 @@ def _family_problem(d: DraftPreference, summary: ProfileSummary, cv: MasterCV | 
     return checked.role_families[0].rejected
 
 
-def suggest(ws: Workspace, llm: LLMProvider) -> LearningState:
-    """Ask the quality model for preferences from your labels; keep what passes the checks
-    as proposals to review. Labels with a note or where the matcher disagreed are sent."""
+def _tracker_evidence(ws: Workspace, labelled: set[str]) -> list[labels.LabelledJob]:
+    """Applied (a "yes") and N/A (a "no") jobs whose reason or note says why, as labels.
+    Jobs you also labelled are left to their label."""
+    out = []
+    for entry in tracker.load(ws).values():
+        why = "; ".join(t for t in (entry.reason, entry.note) if t.strip())
+        if entry.status not in ("applied", "na") or not why:
+            continue
+        job = entry.application_result.job if entry.application_result else JobPosting(
+            id=entry.job_id or entry.id, title=entry.title, company=entry.company,
+            location=entry.location, url=entry.url, source=entry.source,
+        )  # fmt: skip
+        if job.id in labelled or entry.id in labelled:
+            continue
+        out.append(
+            labels.LabelledJob(
+                job_id=entry.id,
+                label="yes" if entry.status == "applied" else "no",
+                note=f"{'applied' if entry.status == 'applied' else 'ruled out (N/A)'}: {why}",
+                labelled_at=entry.applied_at or entry.last_seen,
+                job=job,
+                query=SearchQuery(),
+                threshold=labels.SCREENING_DEFAULT,
+            )
+        )
+    return out
+
+
+def _evidence_items(ws: Workspace) -> tuple[list[labels.LabelledJob], labels.LabelStore]:
+    """Labels with a note or where the matcher disagreed, and applied / N/A jobs with a reason."""
     store = labels.load(ws)
     items = [
         x
         for x in store.labels
         if x.note or any(v.match != (x.label == "yes") for v in x.verdicts.values())
     ]
-    if not items:
-        raise ValueError("Label some jobs (ideally with a note on why) before asking for this")
+    labelled = {
+        i for x in store.labels for i in (*x.ids, tracker.role_id(x.job.title, x.job.company))
+    }
+    return [*items, *_tracker_evidence(ws, labelled)], store
+
+
+def _base_summary(ws: Workspace, store: labels.LabelStore) -> ProfileSummary:
+    """The profile the evidence is read against: the newest labelled search's, else the
+    selected CV's most recent stored profile."""
     newest = next((x for x in store.labels if x.profile_key in store.profiles), None)
-    if newest is None or newest.profile_key is None:
-        raise ValueError("Your labels carry no profile summary yet: label jobs from a search")
+    if newest is not None and newest.profile_key is not None:
+        return store.profiles[newest.profile_key]
+    records = ws.memory.records(_owner(ws)) if ws.active_cv_id else []
+    if not records:
+        raise ValueError("No profile summary yet: run a search first")
+    return records[-1].summary
+
+
+def _propose(
+    ws: Workspace, llm: LLMProvider, items: list[labels.LabelledJob], store: labels.LabelStore
+) -> tuple[list[DraftPreference], list[str], list[LearnedPreference]]:
+    """The quality model's proposals from `items`, vetted by code: (kept, set aside, known)."""
     cv = ws.master_cv
     known = load(ws)
-    summary = apply_learned(
-        store.profiles[newest.profile_key], known, cv, intent_service.get_intent(ws)
-    )
+    summary = apply_learned(_base_summary(ws, store), known, cv, intent_service.get_intent(ws))
     decided = "\n".join(f"- [{p.status}] {p.kind}: {p.text}" for p in known) or "none"
     prompt = (
         f"<profile_summary>\n{summary.model_dump_json()}\n</profile_summary>\n"
@@ -313,12 +363,63 @@ def suggest(ws: Workspace, llm: LLMProvider) -> LearningState:
     )
     out = llm.generate(system=SYSTEM, prompt=prompt, output_model=DraftPreferences)
     kept, aside = _vet(out.proposals, {x.job_id: x for x in items}, summary, known, cv)
+    return kept, aside, known
+
+
+def suggest(ws: Workspace, llm: LLMProvider) -> LearningState:
+    """Ask the quality model for preferences from your labels and reasons; keep what passes
+    the checks as proposals to review."""
+    items, store = _evidence_items(ws)
+    if not items:
+        raise ValueError("Label some jobs (ideally with a note on why) before asking for this")
+    kept, aside, known = _propose(ws, llm, items, store)
     now = datetime.now(UTC).isoformat(timespec="seconds")
     new = [
         LearnedPreference(id=uuid.uuid4().hex[:10], created_at=now, **d.model_dump()) for d in kept
     ]
     _save(ws, [*known, *new])
     return state(ws, aside)
+
+
+def _fingerprint(x: labels.LabelledJob) -> str:
+    return hashlib.sha1(f"{x.job_id}|{x.label}|{x.note}".encode()).hexdigest()[:16]
+
+
+def _read_path(ws: Workspace) -> Path:
+    return ws.settings.data_dir / "learned_from.json"
+
+
+def _read(ws: Workspace) -> dict[str, list[str]]:
+    try:
+        raw = json.loads(_read_path(ws).read_text(encoding="utf-8"))
+        return {str(k): [str(f) for f in v] for k, v in raw.items()}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def learn_new(ws: Workspace, llm: LLMProvider) -> list[LearnedPreference] | None:
+    """Learn from labels and reasons not read yet (a note or reason says why): proposals that
+    pass the checks go straight into the profile. None when there was nothing new to read."""
+    items, store = _evidence_items(ws)
+    seen = set(_read(ws).get(_owner(ws), []))
+    fresh = [x for x in items if x.note.strip() and _fingerprint(x) not in seen]
+    if not fresh:
+        return None
+    kept, _, known = _propose(ws, llm, items, store)
+    now = datetime.now(UTC).isoformat(timespec="seconds")
+    new = [
+        LearnedPreference(
+            id=uuid.uuid4().hex[:10], created_at=now, decided_at=now, status="accepted",
+            auto=True, **d.model_dump(),
+        )
+        for d in kept
+    ]  # fmt: skip
+    for pref in new:
+        _on_accept(ws, pref)
+    _save(ws, [*known, *new])
+    read = _read(ws) | {_owner(ws): sorted(seen | {_fingerprint(x) for x in items if x.note})}
+    _read_path(ws).write_text(json.dumps(read, indent=1), encoding="utf-8")
+    return new
 
 
 # ---------------------------------------------------------------- your decisions
@@ -335,12 +436,19 @@ def decide(ws: Workspace, pref_id: str, accept: bool, text: str | None = None) -
     pref.status, pref.decided_at = ("accepted" if accept else "rejected"), now
     if accept and text and text.strip() and text.strip() != pref.text:
         pref.proposed, pref.text = pref.text, text.strip()
-    if accept and pref.kind == "adjacent_family" and pref.family:
+    if accept:
+        _on_accept(ws, pref)
+    _save(ws, items)
+    return state(ws)
+
+
+def _on_accept(ws: Workspace, pref: LearnedPreference) -> None:
+    """An accepted adjacent family joins the career intent's target areas, so widened searches
+    include it."""
+    if pref.kind == "adjacent_family" and pref.family:
         areas = intent_service.get_intent(ws).target_areas
         if pref.family.name not in areas:
             intent_service.patch_intent(ws, {"target_areas": [*areas, pref.family.name]})
-    _save(ws, items)
-    return state(ws)
 
 
 def remove(ws: Workspace, pref_id: str) -> LearningState:

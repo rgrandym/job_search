@@ -50,7 +50,8 @@ each with its own effort, are chosen in Settings:
 
 | Role | Used for | Calls |
 | --- | --- | --- |
-| **quality** | profile summary, CV parsing, tailoring plan + review, cover letters, evidence extraction, second opinions on matches and near the threshold, the assistant | rare, accuracy-critical |
+| **profile** | profile summary and role families (optional; blank = the quality model and its effort; may use its own provider, `profile_provider`) | once per CV and role family |
+| **quality** | CV parsing, tailoring plan + review, cover letters, evidence extraction, second opinions on matches and near the threshold, the assistant | rare, accuracy-critical |
 | **screening** | the job_matcher's first pass (batches of 3) | hundreds per search |
 
 ## Buttons do the work; one assistant edits records
@@ -84,8 +85,10 @@ UI filters ─▶ SearchQuery          career intent (services/intent, per CV)
               run before capture when companies are unchecked)
               · LinkedIn public search · Totaljobs · jobs.ac.uk · NHS Jobs
               · LinkedIn/Indeed alert emails & saved postings · demo           → JobPosting[]
-1b set aside  services/tracker: roles already applied for (12-month look-back) or marked N/A
-              leave here, before any scoring or model call → report.applied / .dismissed
+1b set aside  services/tracker: roles already applied for (12-month look-back) or marked N/A,
+              and services/labels: postings you labelled "no" (same id, link or role; the note
+              is the reason) leave here, before any scoring or model call
+              → report.applied / .dismissed
 2 pre-filter  scorer.hard_exclusions (closed, arrangement, location, salary floor, certs,
               undeclared essential languages; seniority only when the user sets a level range)
               + eligibility flags (language level, right to work, clearance, licence)
@@ -93,9 +96,12 @@ UI filters ─▶ SearchQuery          career intent (services/intent, per CV)
               every role-relevant posting + 10 others (ceiling 250), one per employer+title
 3 enrich      full descriptions for snippet-only shortlisted postings (Reed, LinkedIn,
               jobs.ac.uk, NHS Jobs, Totaljobs)
-4 summary     ProfileSummary (quality model)  ◀── ProfileMemory (data/profile_summaries.json)
-              from the dated CV + career intent; role families (core / progression /
-              adjacent) checked by code (CV evidence ids and gap; fit is the matcher's);
+4 summary     ProfileSummary (profile model)  ◀── ProfileMemory (data/profile_summaries.json)
+              from the original CV document ([src-N] lines, publications included) +
+              the dated CV extract + career intent; capabilities and publication record;
+              role families (core / progression / adjacent) checked by code (CV or
+              document evidence ids and gap; fit is the matcher's); readable copies in
+              output/profiles/;
               with empty titles the boards search the families (budget 60/20/20, adjacent
               only when requested or `widen`); results are tagged with their family and
               per-family yield logged (data/family_yield.json, "not landing" after 3 searches)
@@ -146,5 +152,6 @@ document ─▶ enrichment.propose (LLM; quotes checked against the document) �
 - Pydantic models are the source of truth. Regenerate JSON schemas with `export-schema`.
   `web/src/lib/types.ts` mirrors them.
 - Public job pages are fine (personal tool): no logins, no anti-bot circumvention, rate-limited,
-  full postings only for the shortlist. See "Job Sources" in CLAUDE.md.
+  full postings only for the shortlist; headless, signed-out Chrome only through
+  `sources/browser.py`. See "Job Sources" in CLAUDE.md.
 - Ask before adding dependencies (pip or npm). Don't commit unless asked.

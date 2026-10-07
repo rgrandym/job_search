@@ -1,8 +1,9 @@
 """Your own call on jobs ("would apply" / "maybe" / "no"): a labelled set to measure the models.
 
-Stored in `data/job_labels.json` (git-ignored, personal data). A label never changes a search:
-applied / N/A in `services.tracker` decide what searches set aside; labels only record what
-you would have chosen, so the job_matcher's verdicts can be checked against it.
+Stored in `data/job_labels.json` (git-ignored, personal data). Labels record what you would
+have chosen, so the job_matcher's verdicts can be checked against it. A "no" also sets the
+posting aside in later searches (`said_no`), like N/A in `services.tracker`; its note, with the
+reasons on applied and N/A jobs, feeds the profile through `services.learning`.
 
 One label per posting: the same job on another board or in a later search (same id, same
 link, or the same title at the same employer, as the tracker matches roles) shares the label.
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime
 from itertools import combinations
 from pathlib import Path
@@ -185,6 +187,13 @@ class _Index:
         )
 
 
+def said_no(ws: Workspace) -> Callable[[JobPosting], LabelledJob | None]:
+    """Finds a posting's "no" label (same id, link, or role), for searches to set it aside."""
+    store = load(ws)
+    index = _Index(LabelStore(labels=[x for x in store.labels if x.label == "no"]))
+    return index.find
+
+
 def _remember(
     item: LabelledJob, job_id: str, models: str | None, verdict: JobVerdict | None
 ) -> bool:
@@ -211,7 +220,7 @@ def _attach(store: LabelStore, report: MatchReport, models: str | None) -> int:
     if not store.labels or models is None:
         return 0
     index, added = _Index(store), 0
-    for r in [*report.matches, *report.below_threshold]:
+    for r in report.scored():
         item = index.find(r.job) if r.verdict else None
         if item is not None and _remember(item, r.job.id, models, r.verdict):
             added += 1

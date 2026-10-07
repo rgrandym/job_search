@@ -9,22 +9,26 @@ import { cn } from "../lib/utils";
 import { useSearch } from "../stores/searchStore";
 import { JobCard } from "./JobCard";
 import { CoverLettersPanel } from "./CoverLettersPanel";
-import { ProgressLog } from "./ProgressLog";
+import { ProgressLog, SearchStatus } from "./ProgressLog";
 import { SavedJobs } from "./SavedJobs";
 import { AppliedJobs } from "./AppliedJobs";
 import { TailoredCVPanel } from "./TailoredCVPanel";
+import { ProgressBar, TaskProgress, useTaskId } from "./TaskProgress";
 import { Empty } from "./ui";
 
-type Tab = "matches" | "below_threshold" | "excluded" | "dismissed";
+type Tab = "matches" | "to_check" | "below_threshold" | "excluded" | "dismissed";
 
 const TAB_LABEL: Record<Tab, string> = {
   matches: "Matches",
+  to_check: "To check",
   below_threshold: "Not selected",
   excluded: "Excluded",
-  dismissed: "N/A",
+  dismissed: "N/A & no",
 };
 const TAB_HINT: Partial<Record<Tab, string>> = {
-  dismissed: "Jobs you marked N/A: set aside before screening",
+  to_check:
+    "Would match on the title and snippet, but the full posting could not be read yet, so its requirements were not checked. Fetch it, or paste the description",
+  dismissed: "Jobs you marked N/A or labelled no: set aside before screening, with your reason",
 };
 
 const SOURCE_NAMES: Record<string, string> = {
@@ -182,14 +186,16 @@ function ImportOlderCV() {
 function DocumentJob({ jobId, title }: { jobId: string; title: string }) {
   const [open, setOpen] = useState(false);
   const qc = useQueryClient();
+  const letterTask = useTaskId();
   const letter = useMutation({
-    mutationFn: (documentId?: string) => api.coverLetter(jobId, "classic", undefined, documentId),
+    mutationFn: (documentId?: string) => api.coverLetter(jobId, "classic", undefined, documentId, letterTask.next()),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["cover-letters"] }),
   });
   return (
     <div className="rounded-md border border-border bg-panel p-3 text-[12px]">
       <button className="font-medium text-fg hover:text-accent" onClick={() => setOpen(!open)}>{title}</button>
       {open && <TailoredCVPanel jobId={jobId} hasCv={false} letterPending={letter.isPending} onLetter={(id) => letter.mutate(id)} />}
+      {letter.isPending && <TaskProgress id={letterTask.id} className="mt-2" />}
       {letter.data && <a className="mt-2 block text-accent hover:underline" href={letter.data.download_url}><Download size={11} /> Download cover letter</a>}
       {letter.error && <p className="mt-2 text-bad">{(letter.error as Error).message}</p>}
     </div>
@@ -211,6 +217,8 @@ function SelectionBar({ savedIds, saved, hasCv }: { savedIds: Map<string, string
   const [template, setTemplate] = useState("classic");
   const [prepared, setPrepared] = useState<Prepared[]>([]);
   const [working, setWorking] = useState<string | null>(null);
+  const [workingIndex, setWorkingIndex] = useState(0);
+  const docTask = useTaskId();
   const report = outcome?.report;
   const results: MatchResult[] = report
     ? [...report.matches, ...report.below_threshold, ...report.excluded, ...(report.dismissed ?? [])]
@@ -237,13 +245,14 @@ function SelectionBar({ savedIds, saved, hasCv }: { savedIds: Map<string, string
   // job-description analysis), and a failure on one job does not stop the others.
   const prepare = async () => {
     const out: Prepared[] = [];
-    for (const jobId of activeSelected) {
+    for (const [index, jobId] of activeSelected.entries()) {
       const item: Prepared = { jobId, title: titles.get(jobId) ?? jobId };
       setWorking(item.title);
+      setWorkingIndex(index);
       try {
-        const tailored = await api.tailor(jobId, template, selectedResults.get(jobId));
+        const tailored = await api.tailor(jobId, template, selectedResults.get(jobId), "auto", "auto", docTask.next());
         item.cv = tailored.download_url;
-        item.letter = (await api.coverLetter(jobId, template, selectedResults.get(jobId), tailored.document_id)).download_url;
+        item.letter = (await api.coverLetter(jobId, template, selectedResults.get(jobId), tailored.document_id, docTask.next())).download_url;
       } catch (e) {
         item.error = (e as Error).message;
       }
@@ -293,7 +302,13 @@ function SelectionBar({ savedIds, saved, hasCv }: { savedIds: Map<string, string
           </button>
         </div>
       )}
-      {working && <p className="text-muted">Preparing documents for {working}…</p>}
+      {working && (
+        <div className="space-y-1.5 py-1">
+          <p className="text-muted">Job {workingIndex + 1} of {activeSelected.length}: preparing documents for {working}</p>
+          <ProgressBar fraction={workingIndex / Math.max(activeSelected.length, 1)} />
+          <TaskProgress id={docTask.id} />
+        </div>
+      )}
       {prepared.length > 0 && (
         <div className="space-y-0.5">
           {prepared.map((p) => (
@@ -325,8 +340,13 @@ function SelectionBar({ savedIds, saved, hasCv }: { savedIds: Map<string, string
 }
 
 function SearchResults({ hasCv, savedAt, tracked }: { hasCv: boolean; savedAt: Map<string, string>; tracked: TrackedJob[] }) {
-  const { outcome, loading, progress, error, log, openedFrom, set, runId, selected, toggleSelected } = useSearch();
+  const { outcome, loading, progress, error, log, beat, startedAt, openedFrom, set, runId, selected, toggleSelected, removeJob } =
+    useSearch();
   const runner = useSearchRunner();
+  const removeResult = useMutation({
+    mutationFn: (jobId: string) => api.removeResult(jobId, outcome?.history_id ?? null),
+    onSuccess: (_, jobId) => removeJob(jobId),
+  });
   const stopButton = loading && (
     <button
       className="flex shrink-0 items-center gap-1 text-bad hover:underline disabled:opacity-50"
@@ -349,6 +369,7 @@ function SearchResults({ hasCv, savedAt, tracked }: { hasCv: boolean; savedAt: M
                 <Loader2 size={14} className="animate-spin text-accent" /> Search in progress
                 <span className="ml-auto text-[12px]">{stopButton}</span>
               </p>
+              <SearchStatus log={log} startedAt={startedAt} beat={beat} />
               <ProgressLog log={log} running />
             </div>
           ) : (
@@ -372,8 +393,12 @@ function SearchResults({ hasCv, savedAt, tracked }: { hasCv: boolean; savedAt: M
   }
 
   const rep = outcome.report;
+  const unchecked = [...rep.matches, ...(rep.to_check ?? []), ...rep.below_threshold].filter(
+    (r) => r.verdict && !r.verdict.requirements_checked,
+  ).length;
   const counts: Record<Tab, number> = {
     matches: rep.matches.length,
+    to_check: rep.to_check?.length ?? 0,
     below_threshold: rep.below_threshold.length,
     excluded: rep.excluded.length,
     dismissed: rep.dismissed?.length ?? 0,
@@ -384,6 +409,7 @@ function SearchResults({ hasCv, savedAt, tracked }: { hasCv: boolean; savedAt: M
   );
   const items = (rep[tab] ?? []).filter((r) => !isApplied(r));
   counts.matches = rep.matches.filter((r) => !isApplied(r)).length;
+  counts.to_check = (rep.to_check ?? []).filter((r) => !isApplied(r)).length;
   counts.below_threshold = rep.below_threshold.filter((r) => !isApplied(r)).length;
   counts.excluded = rep.excluded.filter((r) => !isApplied(r)).length;
   counts.dismissed = (rep.dismissed ?? []).filter((r) => !isApplied(r)).length;
@@ -494,6 +520,15 @@ function SearchResults({ hasCv, savedAt, tracked }: { hasCv: boolean; savedAt: M
                 ? `${outcome.unscreened} shortlisted job${outcome.unscreened === 1 ? "" : "s"} not judged yet.`
                 : "Everything shortlisted was judged."}
             </span>
+            {unchecked > 0 && outcome.history_id && !loading && (
+              <button
+                className="btn-ghost py-1 text-[12px]"
+                title="Open the full postings whose requirements could not be read, and judge them again"
+                onClick={() => void runner.recheck(outcome.history_id!)}
+              >
+                Check {unchecked} posting{unchecked === 1 ? "" : "s"} without text
+              </button>
+            )}
             {outcome.unscreened > 0 && outcome.history_id && (
               <button className="btn-primary ml-auto py-1 text-[12px]" onClick={() => void runner.resume(outcome.history_id!)}>
                 <Play size={12} /> Continue
@@ -558,9 +593,18 @@ function SearchResults({ hasCv, savedAt, tracked }: { hasCv: boolean; savedAt: M
               selected={selected.includes(r.job.id)}
               onSelect={() => toggleSelected(r.job.id)}
               savedAt={savedAt.get(r.job.id)}
+              onRemove={() => removeResult.mutate(r.job.id)}
+              onRecheck={
+                outcome.history_id && !loading
+                  ? (description) => void runner.recheck(outcome.history_id!, [r.job.id], description)
+                  : undefined
+              }
+              removeLabel="Delete"
+              removeTitle="Delete from this list (its status, note and label are kept)"
             />
           ))
         )}
+        {removeResult.error && <p className="text-[12px] text-bad">{(removeResult.error as Error).message}</p>}
       </div>
     </div>
   );
