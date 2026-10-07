@@ -144,8 +144,18 @@ class Workspace:
             cfg = self.provider_config(cfg.profile_provider_for())
         return make_structured(cfg, role, usage_sink, purpose)
 
-    def chat(self, role: Role) -> ChatModel:
-        return make_chat(self.llm, role)
+    def chat(
+        self,
+        role: Role,
+        model_override: str | None = None,
+        provider_override: LLMProviderName | None = None,
+    ) -> ChatModel:
+        """Use a configured role or a selected model with its provider's credentials."""
+        cfg = self.provider_config(provider_override) if provider_override else self.llm
+        if model_override:
+            field = "screening_model" if role == "screening" else "quality_model"
+            cfg = cfg.model_copy(update={field: model_override})
+        return make_chat(cfg, role)
 
     # ---------------------------------------------------------------- CV
 
@@ -179,8 +189,12 @@ class Workspace:
         if job is not None:
             return MatchResult(job=job)
         return next(
-            (entry.application_result for entry in tracker.load(self).values()
-             if entry.application_result is not None and entry.application_result.job.id == job_id),
+            (
+                entry.application_result
+                for entry in tracker.load(self).values()
+                if entry.application_result is not None
+                and entry.application_result.job.id == job_id
+            ),
             None,
         )
 

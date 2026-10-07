@@ -347,10 +347,107 @@ def test_assistant_updates_search_preferences(ws: Workspace, monkeypatch: Any) -
     assert "cv_updated" in events and not any(m.is_error for m in messages if m.role == "tool")
 
 
+def test_assistant_edits_selected_profile(ws: Workspace, monkeypatch: Any) -> None:
+    ws.memory.put("master", "any", SUMMARY, cv_fp="older-cv")
+    script = {
+        "assistant": [
+            _call("get_context"),
+            _call(
+                "update_profile",
+                key="master:any",
+                patch={"target_roles": [*SUMMARY.target_roles, "ML Platform Lead"]},
+                reason="add ML Platform Lead",
+            ),
+            ChatMessage(role="assistant", content="Updated the profile."),
+        ]
+    }
+    monkeypatch.setattr(ws, "chat", lambda role: ScriptedChat(script))
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    async def emit(kind: str, payload: dict[str, Any]) -> None:
+        events.append((kind, payload))
+
+    messages = [ChatMessage(role="user", content="Add ML Platform Lead to this profile")]
+    asyncio.run(run_agent(ASSISTANT, messages, AgentContext(ws=ws, emit=emit)))
+    assert "master:any" in messages[2].content
+    assert ws.memory.record("master:any").summary.target_roles[-1] == "ML Platform Lead"
+    assert any(kind == "profile_updated" for kind, _ in events)
+
+
+def test_assistant_cannot_edit_another_cvs_profile(ws: Workspace, monkeypatch: Any) -> None:
+    ws.memory.put("other-cv", "any", SUMMARY, cv_fp="other")
+    script = {
+        "assistant": [
+            _call(
+                "update_profile",
+                key="other-cv:any",
+                patch={"headline": "Changed"},
+                reason="change headline",
+            ),
+            ChatMessage(role="assistant", content="Could not edit that profile."),
+        ]
+    }
+    monkeypatch.setattr(ws, "chat", lambda role: ScriptedChat(script))
+
+    async def emit(kind: str, payload: dict[str, Any]) -> None:
+        return None
+
+    messages = [ChatMessage(role="user", content="Edit another CV")]
+    asyncio.run(run_agent(ASSISTANT, messages, AgentContext(ws=ws, emit=emit)))
+    assert messages[2].is_error
+    assert ws.memory.record("other-cv:any").summary.headline == SUMMARY.headline
+
+
+def test_assistant_searches_then_saves_a_result(ws: Workspace, monkeypatch: Any) -> None:
+    script = {
+        "assistant": [
+            _call("search_jobs"),
+            _call("save_jobs", job_ids=["job-strong"]),
+            ChatMessage(role="assistant", content="I saved the strongest result."),
+        ]
+    }
+    monkeypatch.setattr(ws, "chat", lambda role: ScriptedChat(script))
+    events: list[str] = []
+
+    async def emit(kind: str, payload: dict[str, Any]) -> None:
+        events.append(kind)
+
+    context = AgentContext(ws=ws, emit=emit, query=SearchQuery(sources=["demo"]), threshold=70)
+    messages = [ChatMessage(role="user", content="Search and save the best result")]
+    asyncio.run(run_agent(ASSISTANT, messages, context))
+    assert "search_results" in events and "saved_updated" in events
+    assert ws.saved_jobs()[0].result.job.id == "job-strong"
+
+
+def test_assistant_changes_configured_model(ws: Workspace, monkeypatch: Any) -> None:
+    from src.core import llm as llm_module
+    from src.core.llm.catalog import ModelInfo
+
+    monkeypatch.setattr(
+        llm_module,
+        "available_models",
+        lambda cfg: [ModelInfo(id="test-quality", name="Test quality")],
+    )
+    script = {
+        "assistant": [
+            _call("change_app_models", quality_model="test-quality"),
+            ChatMessage(role="assistant", content="The quality model is set."),
+        ]
+    }
+    monkeypatch.setattr(ws, "chat", lambda role: ScriptedChat(script))
+
+    async def emit(kind: str, payload: dict[str, Any]) -> None:
+        return None
+
+    messages = [ChatMessage(role="user", content="Use test-quality for app quality calls")]
+    asyncio.run(run_agent(ASSISTANT, messages, AgentContext(ws=ws, emit=emit)))
+    assert ws.llm.quality_model == "test-quality"
+
+
 def test_tool_errors_are_returned_to_the_model(ws: Workspace, monkeypatch: Any) -> None:
     script = {
         "assistant": [
-            _call("search_jobs"),  # searching is the Search button, not an assistant tool
+            _call("unsupported_action"),
             ChatMessage(role="assistant", content="ok"),
         ]
     }
@@ -777,6 +874,163 @@ def test_ws_chat_streams_events(client: TestClient, ws: Workspace, monkeypatch: 
     assert seen[-1]["type"] == "done"
     [session] = chat.SESSIONS.values()
     assert "<ui_context>" in session.messages[0].content and len(session.messages) == 2
+
+
+def test_ws_chat_uses_selected_model_and_reports_it(
+    client: TestClient, ws: Workspace, monkeypatch: Any
+) -> None:
+    roles: list[str] = []
+    script = {"assistant": [ChatMessage(role="assistant", content="Done.")]}
+
+    def selected_chat(role: str) -> ScriptedChat:
+        roles.append(role)
+        return ScriptedChat(script)
+
+    monkeypatch.setattr(ws, "chat", selected_chat)
+    chat.SESSIONS.clear()
+    with client.websocket_connect("/api/ws/chat") as conn:
+        conn.receive_json()
+        conn.send_json({"type": "user_message", "text": "hi", "chat_role": "screening"})
+        seen = []
+        while not seen or seen[-1]["type"] not in {"done", "error"}:
+            seen.append(conn.receive_json())
+    assert roles == ["screening"]
+    assert any(
+        event["type"] == "model_usage" and event["model"] == ws.llm.screening_model
+        for event in seen
+    )
+
+
+def test_ws_chat_uses_an_available_custom_model(
+    client: TestClient, ws: Workspace, monkeypatch: Any
+) -> None:
+    from src.core.llm.catalog import ModelInfo
+    from src.web import app as webapp
+
+    monkeypatch.setattr(
+        webapp,
+        "available_models",
+        lambda cfg: [ModelInfo(id="chat-model", name="Chat model", tools=True)],
+    )
+    selected: list[tuple[str, str | None]] = []
+    script = {"assistant": [ChatMessage(role="assistant", content="Done.")]}
+
+    def selected_chat(role: str, model: str | None = None) -> ScriptedChat:
+        selected.append((role, model))
+        return ScriptedChat(script)
+
+    monkeypatch.setattr(ws, "chat", selected_chat)
+    chat.SESSIONS.clear()
+    with client.websocket_connect("/api/ws/chat") as conn:
+        conn.receive_json()
+        conn.send_json({"type": "user_message", "text": "hi", "chat_model": "chat-model"})
+        seen = []
+        while not seen or seen[-1]["type"] not in {"done", "error"}:
+            seen.append(conn.receive_json())
+    assert selected == [("quality", "chat-model")]
+    assert any(event["type"] == "model_usage" and event["model"] == "chat-model" for event in seen)
+
+
+def test_ws_chat_can_use_connected_claude_code_without_switching_search_provider(
+    client: TestClient, ws: Workspace, monkeypatch: Any
+) -> None:
+    from src.core.llm.catalog import ModelInfo
+    from src.web import app as webapp
+
+    monkeypatch.setattr(ws, "provider_ready", lambda provider: provider == "claude_code")
+    monkeypatch.setattr(
+        webapp,
+        "available_models",
+        lambda cfg: [ModelInfo(id="claude-sonnet-5-5", name="Claude Sonnet", tools=True)]
+        if cfg.provider == "claude_code"
+        else [],
+    )
+    selected: list[tuple[str, str | None, str | None]] = []
+
+    def selected_chat(role: str, model: str | None, provider: str | None) -> ScriptedChat:
+        selected.append((role, model, provider))
+        return ScriptedChat({"assistant": [ChatMessage(role="assistant", content="Done.")]})
+
+    monkeypatch.setattr(ws, "chat", selected_chat)
+    assert client.get("/api/llm/chat-providers").json()["claude_code"] is True
+    chat.SESSIONS.clear()
+    with client.websocket_connect("/api/ws/chat") as conn:
+        conn.receive_json()
+        conn.send_json(
+            {
+                "type": "user_message",
+                "text": "hi",
+                "chat_provider": "claude_code",
+                "chat_model": "claude-sonnet-5-5",
+            }
+        )
+        seen = []
+        while not seen or seen[-1]["type"] not in {"done", "error"}:
+            seen.append(conn.receive_json())
+    assert selected == [("quality", "claude-sonnet-5-5", "claude_code")]
+    assert any(
+        event["type"] == "model_usage" and event["provider"] == "claude_code"
+        for event in seen
+    )
+
+
+def test_ws_chat_rejects_unconnected_claude_code(
+    client: TestClient, ws: Workspace, monkeypatch: Any
+) -> None:
+    monkeypatch.setattr(ws, "provider_ready", lambda provider: False)
+    chat.SESSIONS.clear()
+    with client.websocket_connect("/api/ws/chat") as conn:
+        conn.receive_json()
+        conn.send_json(
+            {
+                "type": "user_message",
+                "text": "hi",
+                "chat_provider": "claude_code",
+                "chat_model": "claude-sonnet-5-5",
+            }
+        )
+        event = conn.receive_json()
+    assert event["type"] == "error"
+    assert "Connect" in event["message"]
+
+
+def test_ws_chat_remembers_previous_turn_after_restart(
+    client: TestClient, ws: Workspace, monkeypatch: Any
+) -> None:
+    script = {
+        "assistant": [
+            ChatMessage(role="assistant", content="The first answer."),
+            ChatMessage(role="assistant", content="I remember the first answer."),
+        ]
+    }
+    seen_messages: list[list[str]] = []
+
+    class RememberingChat(ScriptedChat):
+        async def chat(
+            self, *, system: str, messages: list[ChatMessage], tools: list[ToolSpec]
+        ) -> ChatResponse:
+            seen_messages.append([item.content for item in messages])
+            return await super().chat(system=system, messages=messages, tools=tools)
+
+    monkeypatch.setattr(ws, "chat", lambda role: RememberingChat(script))
+    chat.SESSIONS.clear()
+    with client.websocket_connect("/api/ws/chat") as conn:
+        session_id = conn.receive_json()["session_id"]
+        conn.send_json({"type": "user_message", "text": "My first question"})
+        while conn.receive_json()["type"] != "done":
+            pass
+    chat.SESSIONS.clear()  # same as restarting the backend process
+    with client.websocket_connect(f"/api/ws/chat?session={session_id}") as conn:
+        history = conn.receive_json()["history"]
+        assert history == [
+            {"role": "user", "text": "My first question"},
+            {"role": "assistant", "text": "The first answer."},
+        ]
+        conn.send_json({"type": "user_message", "text": "What did I ask?"})
+        while conn.receive_json()["type"] != "done":
+            pass
+    assert "My first question" in seen_messages[-1][0]
+    assert "The first answer." in seen_messages[-1][1]
 
 
 def test_search_stream_reports_each_stage_then_results(client: TestClient) -> None:

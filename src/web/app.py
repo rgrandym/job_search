@@ -318,6 +318,16 @@ def llm_models(provider: LLMProviderName) -> list[ModelInfo]:
         raise HTTPException(502, f"Could not list {provider} models: {exc}") from exc
 
 
+@app.get("/api/llm/chat-providers")
+def chat_providers() -> dict[str, bool]:
+    """Credential availability for providers offered in the assistant picker."""
+    ws = get_workspace()
+    return {
+        provider: ws.provider_ready(provider)
+        for provider in {ws.llm.provider, "claude_code"}
+    }
+
+
 @app.get("/api/codex/status")
 def get_codex_status() -> dict[str, Any]:
     return codex_status()
@@ -612,7 +622,12 @@ def _stream(work: Callable[[Any, Any], Awaitable[Any]]) -> StreamingResponse:
         await queue.put({"type": kind, **payload})
 
     def usage(u: ModelUsage) -> None:  # called from worker threads
-        item = {"type": "model_usage", "agent": "search", **u.model_dump()}
+        item = {
+            "type": "model_usage",
+            "agent": "search",
+            "provider": get_workspace().llm.provider,
+            **u.model_dump(),
+        }
         loop.call_soon_threadsafe(queue.put_nowait, item)
 
     task_id = uuid.uuid4().hex
@@ -689,7 +704,12 @@ async def recheck_stream(body: RecheckRequest) -> StreamingResponse:
     checked, and judge them again."""
     return _stream(
         lambda emit, usage: search_service.recheck_postings(
-            get_workspace(), body.history_id, body.job_ids, body.description, emit, usage,
+            get_workspace(),
+            body.history_id,
+            body.job_ids,
+            body.description,
+            emit,
+            usage,
             body.run_id,
         )  # fmt: skip
     )
@@ -1189,8 +1209,10 @@ def download(name: str) -> FileResponse:
 async def chat_ws(websocket: WebSocket) -> None:
     await websocket.accept()
     ws = get_workspace()
-    session = chat.get_session(websocket.query_params.get("session"))
-    await websocket.send_json({"type": "session", "session_id": session.id})
+    session = chat.get_session(websocket.query_params.get("session"), ws)
+    await websocket.send_json(
+        {"type": "session", "session_id": session.id, "history": chat.visible_history(session)}
+    )
     run: asyncio.Task[None] | None = None
 
     async def emit(kind: str, payload: dict[str, Any]) -> None:
@@ -1203,14 +1225,54 @@ async def chat_ws(websocket: WebSocket) -> None:
             if kind == "cancel":
                 chat.cancel(session)
             elif kind == "reset":
-                session.messages.clear()
+                chat.clear_session(ws, session)
             elif kind == "user_message":
                 if run and not run.done():
                     await emit("error", {"message": "A run is already in progress"})
                     continue
-                if not ws.llm_ready():
-                    await emit("error", {"message": "Configure an LLM provider first (Settings)"})
+                chat_role = msg.get("chat_role", "quality")
+                if not isinstance(chat_role, str) or chat_role not in {"quality", "screening"}:
+                    await emit("error", {"message": "Choose a configured chat model"})
                     continue
+                selected_role: Literal["quality", "screening"] = (
+                    "screening" if chat_role == "screening" else "quality"
+                )
+                requested_provider = msg.get("chat_provider")
+                if requested_provider is not None and requested_provider != "claude_code":
+                    await emit("error", {"message": "Choose an available chat provider"})
+                    continue
+                selected_provider: LLMProviderName = requested_provider or ws.llm.provider
+                if not (
+                    ws.provider_ready(selected_provider)
+                    if requested_provider is not None
+                    else ws.llm_ready()
+                ):
+                    await emit(
+                        "error", {"message": "Connect the selected chat provider in Settings"}
+                    )
+                    continue
+                chat_model = msg.get("chat_model")
+                if requested_provider is not None and chat_model is None:
+                    await emit("error", {"message": "Choose an available chat model"})
+                    continue
+                if chat_model is not None:
+                    if not isinstance(chat_model, str) or not chat_model.strip():
+                        await emit("error", {"message": "Choose an available chat model"})
+                        continue
+                    try:
+                        catalogue = await asyncio.to_thread(
+                            available_models, ws.provider_config(selected_provider)
+                        )
+                        model_info = next(
+                            (item for item in catalogue if item.id == chat_model),
+                            None,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - catalogue errors go to the chat
+                        await emit("error", {"message": f"Could not check chat models: {exc}"})
+                        continue
+                    if model_info is None or model_info.tools is not True:
+                        await emit("error", {"message": "That model does not support app actions"})
+                        continue
                 query = SearchQuery.model_validate(msg.get("filters") or {})
                 run = asyncio.create_task(
                     chat.handle_user_message(
@@ -1220,6 +1282,13 @@ async def chat_ws(websocket: WebSocket) -> None:
                         query,
                         bool(msg.get("use_cv", True)),
                         emit,
+                        selected_role,
+                        chat_model,
+                        requested_provider,
+                        bool(msg.get("smart", True)),
+                        float(msg.get("threshold", 60)),
+                        bool(msg.get("widen", False)),
+                        msg.get("profile_key"),
                     )
                 )
     except WebSocketDisconnect:

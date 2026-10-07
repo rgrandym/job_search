@@ -102,12 +102,12 @@ data/examples/ committed fixtures · data/* and output/ are git-ignored (persona
 7. **Layering:** `tools` ← `core` ← `cv` ← `jobs` ← `services` ← `agents` ← `web`. `tools/` is pure. No upward imports.
 8. **Matching contract.** Changes to exclusions, pre-filter weights, the summary or matcher prompts,
    or thresholds must update the code, `.agent/skills/job_search/SKILL.md`, the agent configs and the tests **together**.
-9. **Buttons first, one assistant.** Search, screening, tailoring, cover letters, saving and
-   tracking are buttons calling `src/services/`; no agent sits in those paths. The assistant
-   (`src/agents/`) only updates records the user describes (career intent, preferences, proposed
-   CV facts). Add one of its tools with `@tool(name, description, ArgsModel)` in
-   `src/agents/tools.py` (thin wrapper over a service) and list it in `definitions.py`. Frontend
-   types in `web/src/lib/types.ts` mirror the backend models. Update both together.
+9. **Buttons and one assistant share services.** Search, screening, tailoring, cover letters,
+   saving and tracking remain implemented in `src/services/`. Buttons call them directly;
+   the assistant (`src/agents/`) uses thin tools over those same services. New assistant
+   actions belong in `actions.py`, `actions_more.py` or `tools.py` and are registered in
+   `definitions.py`. New CV facts still go through the evidence review queue. Frontend types
+   in `web/src/lib/types.ts` mirror backend events and models. Update both together.
 
 ## No-Fabrication Contract (MANDATORY)
 

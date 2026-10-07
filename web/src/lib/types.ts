@@ -733,13 +733,14 @@ export interface AppState {
 
 /** Events streamed over /api/ws/chat. */
 export type ChatEvent =
-  | { type: "session"; session_id: string }
+  | { type: "session"; session_id: string; history: { role: "user" | "assistant"; text: string }[] }
   | { type: "agent_status"; agent: string; depth: number; status: string }
   | {
       type: "model_usage";
       agent: string;
       depth: number;
       model: string;
+      provider?: Provider;
       input_tokens: number;
       output_tokens: number;
       estimated: boolean;
@@ -749,7 +750,22 @@ export type ChatEvent =
   | { type: "tool_call"; agent: string; depth: number; id: string; tool: string; args: Record<string, unknown> }
   | { type: "tool_result"; agent: string; depth: number; id: string; tool: string; ok: boolean; preview: string }
   | { type: "cv_updated"; reason: string }
+  | { type: "profile_updated"; key: string; reason: string }
   | { type: "intent_updated"; intent: SearchIntent; changes: string[] }
   | { type: "evidence_proposed"; count: number }
+  | { type: "search_progress"; stage: string; message: string }
+  | { type: "search_filters_updated"; query: SearchQuery }
+  | { type: "search_results"; outcome: SearchOutcome }
+  | { type: "saved_updated"; count: number }
+  | { type: "tracking_updated"; job_id: string; tracking: JobTracking }
+  | { type: "tracker_updated" }
+  | { type: "label_updated"; job_id: string; label: "yes" | "maybe" | "no" | null }
+  | { type: "documents_updated"; job_id?: string }
+  | { type: "cv_selected"; id: string }
+  | { type: "learning_updated" }
+  | { type: "companies_updated" }
+  | { type: "history_updated" }
+  | { type: "result_removed"; job_id: string }
+  | { type: "models_updated" }
   | { type: "done"; tokens: { input: number; output: number }; cancelled?: boolean }
   | { type: "error"; message: string };

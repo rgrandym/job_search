@@ -1,10 +1,10 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bot, Loader2, RefreshCw, RotateCcw, Send, Square } from "lucide-react";
+import { Bot, Check, ChevronDown, Loader2, RefreshCw, RotateCcw, Send, Square } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api } from "../lib/api";
-import type { ClaudeCodeUsage, ClaudeLimitWindow, CodexUsage, LLMView, ModelInfo, UsageWindow } from "../lib/types";
+import type { ClaudeCodeUsage, ClaudeLimitWindow, CodexUsage, LLMView, ModelInfo, Provider, UsageWindow } from "../lib/types";
 import { cn } from "../lib/utils";
 import { useChat, type ChatItem, type SessionModelUsage } from "../stores/chatStore";
 import { useSearch } from "../stores/searchStore";
@@ -117,11 +117,17 @@ function ClaudeAccount({ usage, loading, error, refresh }: { usage?: ClaudeCodeU
   );
 }
 
-function UsagePanel({ llm }: { llm: LLMView }) {
+function UsagePanel({ llm, chatProvider }: { llm: LLMView; chatProvider: Provider | null }) {
   const chat = useChat();
   const models = useQuery({
     queryKey: ["models", llm.provider],
     queryFn: () => api.models(llm.provider),
+    staleTime: 5 * 60_000,
+  });
+  const claudeModels = useQuery({
+    queryKey: ["models", "claude_code"],
+    queryFn: () => api.models("claude_code"),
+    enabled: llm.provider !== "claude_code",
     staleTime: 5 * 60_000,
   });
   const account = useQuery({
@@ -133,18 +139,20 @@ function UsagePanel({ llm }: { llm: LLMView }) {
   const claude = useQuery({
     queryKey: ["claude-code-usage"],
     queryFn: api.claudeCodeUsage,
-    enabled: llm.provider === "claude_code",
+    enabled: llm.provider === "claude_code" || chatProvider === "claude_code" || Object.values(chat.modelUsage).some((usage) => usage.provider === "claude_code"),
     refetchInterval: 15_000,
   });
   const catalog = new Map((models.data ?? []).map((model) => [model.id, model]));
+  const claudeCatalog = new Map((llm.provider === "claude_code" ? models.data ?? [] : claudeModels.data ?? []).map((model) => [model.id, model]));
+  const modelFor = (usage: SessionModelUsage) => usage.provider === "claude_code" ? claudeCatalog.get(usage.model) : catalog.get(usage.model);
   const session = Object.values(chat.modelUsage);
   const cost = session.reduce((total, usage) => {
-    const model = catalog.get(usage.model);
+    const model = modelFor(usage);
     if (model?.input_price == null || model.output_price == null) return total;
     return total + (usage.input * model.input_price + usage.output * model.output_price) / 1_000_000;
   }, 0);
   const costKnown = session.length > 0 && session.every((usage) => {
-    const model = catalog.get(usage.model);
+    const model = modelFor(usage);
     return model?.input_price != null && model.output_price != null;
   });
 
@@ -156,12 +164,12 @@ function UsagePanel({ llm }: { llm: LLMView }) {
           <ModelPurpose
             label={`Quality · ${llm.quality_effort}`}
             model={llm.quality_model}
-            purpose="Profile summary, CV and cover letters, second opinions, this assistant"
+            purpose="CV and cover letters, second opinions, assistant default"
           />
-          <ModelPurpose label={`Screening · ${llm.screening_effort}`} model={llm.screening_model} purpose="First-pass job matching" />
+          <ModelPurpose label={`Screening · ${llm.screening_effort}`} model={llm.screening_model} purpose="First-pass job matching, or chat when selected" />
           <p className="text-faint">Provider: {llm.provider}</p>
         </div>
-        {llm.provider === "claude_code" && (
+        {(llm.provider === "claude_code" || chatProvider === "claude_code" || session.some((usage) => usage.provider === "claude_code")) && (
           <ClaudeAccount usage={claude.data} loading={claude.isPending} error={claude.error as Error | null} refresh={() => claude.refetch()} />
         )}
         {llm.provider === "codex" && (
@@ -169,13 +177,13 @@ function UsagePanel({ llm }: { llm: LLMView }) {
         )}
         <div className="space-y-1.5">
           <div className="flex justify-between">
-            <span className="font-medium text-fg">This session (searches + agent)</span>
-            <span>{costKnown ? `$${cost.toFixed(4)}` : llm.provider === "codex" ? "ChatGPT plan" : llm.provider === "claude_code" ? "Claude plan" : "cost unavailable"}</span>
+            <span className="font-medium text-fg">This tab (searches + chat)</span>
+            <span>{costKnown ? `$${cost.toFixed(4)}` : "cost unavailable / plan usage"}</span>
           </div>
           {session.length === 0 ? (
             <p className="text-faint">Usage appears after the first model turn.</p>
           ) : (
-            session.map((usage) => <ModelSession key={usage.model} usage={usage} model={catalog.get(usage.model)} />)
+            session.map((usage) => <ModelSession key={`${usage.provider ?? "current"}:${usage.model}`} usage={usage} model={modelFor(usage)} />)
           )}
           {llm.provider === "codex" && <p className="text-faint">Codex CLI token counts are estimates; account-limit percentages above are reported by OpenAI.</p>}
         </div>
@@ -214,7 +222,7 @@ function ModelSession({ usage, model }: { usage: SessionModelUsage; model?: Mode
   const remaining = model?.context_length == null ? null : Math.max(0, model.context_length - usage.latestContext);
   return (
     <div className="rounded-md bg-surface p-2">
-      <div className="flex justify-between"><span className="font-medium text-fg">{usage.model}</span><span>{usage.estimated && "≈"}{tokens(usage.input + usage.output)} tokens</span></div>
+      <div className="flex justify-between"><span className="font-medium text-fg">{usage.model}{usage.provider === "claude_code" ? " · Claude Code" : ""}</span><span>{usage.estimated && "≈"}{tokens(usage.input + usage.output)} tokens</span></div>
       <p className="text-faint">{tokens(usage.input)} input · {tokens(usage.output)} output{remaining != null ? ` · ${tokens(remaining)} latest context left` : ""}</p>
       <p className="text-faint">{usage.agents.join(", ")} · {usage.purposes.join(", ")}</p>
     </div>
@@ -222,23 +230,71 @@ function ModelSession({ usage, model }: { usage: SessionModelUsage; model?: Mode
 }
 
 const EXAMPLES = [
-  "I'd like to move into business development",
+  "Search for roles that fit my current profile",
+  "Save the first two matches and tailor a CV for the best one",
   "Add Cambridge to my locations; I won't relocate",
-  "I also led a team of 6 at my last job",
 ];
 
-/** The assistant: plain-language updates to the career intent, preferences and CV facts. */
+/** The assistant: plain-language updates to profiles, intent, preferences and CV facts. */
 export function AgentPanel({ ready, llm, hasCv }: { ready: boolean; llm?: LLMView; hasCv: boolean }) {
   const chat = useChat();
-  const { query, useCv } = useSearch();
+  const { query, useCv, smart, threshold, widen, profileKey } = useSearch();
   const qc = useQueryClient();
   const running = chat.running;
   // A finished turn may have changed the intent, the CV's preferences or proposed CV facts.
   useEffect(() => {
     if (running) return;
-    for (const key of ["intent", "profiles", "evidence", "state"]) void qc.invalidateQueries({ queryKey: [key] });
+    for (const key of ["intent", "profiles", "evidence", "state", "history", "saved", "tracker", "labels", "learning", "tailored-cvs", "cover-letters", "company-boards", "codex-usage", "claude-code-usage"]) void qc.invalidateQueries({ queryKey: [key] });
   }, [running, qc]);
   const [draft, setDraft] = useState("");
+  const [chatChoice, setChatChoice] = useState("quality");
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const pickerRef = useRef<HTMLDivElement>(null);
+  const pickerButtonRef = useRef<HTMLButtonElement>(null);
+  const chatModels = useQuery({
+    queryKey: ["models", llm?.provider],
+    queryFn: () => api.models(llm!.provider),
+    enabled: !!llm,
+    staleTime: 5 * 60_000,
+  });
+  const claudeModels = useQuery({
+    queryKey: ["models", "claude_code"],
+    queryFn: () => api.models("claude_code"),
+    enabled: !!llm && llm.provider !== "claude_code",
+    staleTime: 5 * 60_000,
+  });
+  const chatProviders = useQuery({
+    queryKey: ["chat-providers", llm?.provider],
+    queryFn: api.chatProviders,
+    enabled: !!llm,
+    refetchInterval: 30_000,
+  });
+  const claudeSelected = chatChoice.startsWith("claude-code:");
+  const chatReady = claudeSelected ? chatProviders.data?.claude_code === true : ready;
+  const otherModels = chatModels.data?.filter((model) => model.tools === true && model.id !== llm?.quality_model && model.id !== llm?.screening_model) ?? [];
+  const extraClaudeModels = llm?.provider === "claude_code" ? [] : claudeModels.data?.filter((model) => model.tools === true) ?? [];
+  const selectedModel = chatChoice === "quality" ? `Quality · ${llm?.quality_model}`
+    : chatChoice === "screening" ? `Screening · ${llm?.screening_model}`
+      : claudeSelected ? `Claude Code · ${extraClaudeModels.find((model) => `claude-code:${model.id}` === chatChoice)?.name ?? chatChoice.slice(12)}`
+        : `${llm?.provider === "claude_code" ? "Claude Code · " : ""}${otherModels.find((model) => `model:${model.id}` === chatChoice)?.name ?? chatChoice}`;
+  useEffect(() => {
+    if (!pickerOpen) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!pickerRef.current?.contains(event.target as Node)) setPickerOpen(false);
+    };
+    const closeEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPickerOpen(false);
+        pickerButtonRef.current?.focus();
+      }
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeEscape);
+    };
+  }, [pickerOpen]);
   const endRef = useRef<HTMLDivElement>(null);
   const connect = chat.connect;
 
@@ -252,8 +308,11 @@ export function AgentPanel({ ready, llm, hasCv }: { ready: boolean; llm?: LLMVie
   }, [chat.items.length, chat.status]);
 
   const submit = (text = draft) => {
-    if (!text.trim() || chat.running) return;
-    chat.send(text.trim(), query, useCv);
+    if (!text.trim() || chat.running || !chatReady) return;
+    const chatRole = chatChoice === "screening" ? "screening" : "quality";
+    const chatModel = claudeSelected ? chatChoice.slice("claude-code:".length) : chatChoice.startsWith("model:") ? chatChoice.slice(6) : null;
+    const chatProvider = claudeSelected ? "claude_code" : null;
+    chat.send(text.trim(), query, useCv, chatRole, chatModel, chatProvider, { smart, threshold, widen, profileKey });
     setDraft("");
   };
 
@@ -269,24 +328,23 @@ export function AgentPanel({ ready, llm, hasCv }: { ready: boolean; llm?: LLMVie
           {chat.tokens.input + chat.tokens.output > 0 && (
             <span>{((chat.tokens.input + chat.tokens.output) / 1000).toFixed(1)}k tok</span>
           )}
-          <button title="New conversation" className="hover:text-fg" onClick={chat.reset}>
+          <button title="New conversation" className="hover:text-fg disabled:opacity-50" disabled={chat.running} onClick={chat.reset}>
             <RotateCcw size={13} />
           </button>
         </div>
       </header>
 
-      {llm && <UsagePanel llm={llm} />}
+      {llm && <UsagePanel llm={llm} chatProvider={claudeSelected ? "claude_code" : null} />}
 
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto overflow-x-hidden p-3 scroll-thin [overflow-wrap:anywhere]">
         {chat.items.length === 0 ? (
-          <Empty title="Tell me what to update">
+          <Empty title="What would you like to do?">
             <p className="mb-2">
-              The buttons do the work: <b>Search</b> finds and screens jobs; each job has <b>Tailor CV</b> and{" "}
-              <b>Cover letter</b>. Here you can say, in your own words, what should change in your records: your career
-              direction, search preferences, or a fact your CV is missing (you approve it before it is added).
+              I can search, save and track jobs, create CVs and cover letters, and update your profiles and preferences.
+              New CV facts wait for your review before they are added.
             </p>
-            {!ready ? (
-              <p className="text-warn">Configure an LLM provider in Settings to start.</p>
+            {!chatReady ? (
+              <p className="text-warn">Connect the selected chat provider in Settings to start.</p>
             ) : !hasCv ? (
               <p>Select or upload a CV on the left first.</p>
             ) : (
@@ -334,12 +392,48 @@ export function AgentPanel({ ready, llm, hasCv }: { ready: boolean; llm?: LLMVie
       </div>
 
       <div className="shrink-0 border-t border-border p-2.5">
+        {llm && <div ref={pickerRef} className="relative mb-2">
+          <span className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-faint">Chat model</span>
+          <button
+            ref={pickerButtonRef}
+            type="button"
+            aria-label="Choose chat model"
+            aria-expanded={pickerOpen}
+            aria-controls="chat-model-options"
+            disabled={running}
+            onClick={() => setPickerOpen((open) => !open)}
+            className={cn("flex w-full items-center justify-between gap-2 rounded-md border bg-surface px-2.5 py-1.5 text-left text-[12px] text-fg transition-colors hover:border-accent focus:outline-none focus:border-accent disabled:opacity-50", pickerOpen ? "border-accent" : "border-border")}
+          >
+            <span className="min-w-0 truncate">{selectedModel}</span>
+            <ChevronDown size={13} className={cn("shrink-0 text-faint transition-transform", pickerOpen && "rotate-180")} />
+          </button>
+          {pickerOpen && <div id="chat-model-options" className="absolute bottom-full left-0 z-50 mb-1.5 max-h-[46vh] w-full overflow-y-auto rounded-lg border border-border bg-panel p-1.5 shadow-2xl scroll-thin">
+            <p className="px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-faint">Configured models</p>
+            {([
+              { value: "quality", name: llm.quality_model, detail: `Quality · ${llm.quality_effort}` },
+              { value: "screening", name: llm.screening_model, detail: `Screening · ${llm.screening_effort}` },
+            ]).map((option) => <button key={option.value} type="button" aria-current={chatChoice === option.value ? "true" : undefined} onClick={() => { setChatChoice(option.value); setPickerOpen(false); }} className={cn("flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left hover:bg-surface focus:bg-surface focus:outline-none", chatChoice === option.value && "bg-accent-bg")}>
+              <span className="min-w-0"><span className="block truncate text-[12px] text-fg">{option.name}</span><span className="block text-[10px] text-faint">{option.detail}</span></span>
+              {chatChoice === option.value && <Check size={13} className="shrink-0 text-accent" />}
+            </button>)}
+            {otherModels.length > 0 && <><p className="mt-1 border-t border-border px-2 pt-2 pb-1 text-[10px] font-medium uppercase tracking-wide text-faint">{llm.provider === "claude_code" ? "More Claude Code models" : "Other available models"}</p>
+              {otherModels.map((model) => <button key={model.id} type="button" onClick={() => { setChatChoice(`model:${model.id}`); setPickerOpen(false); }} className={cn("flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-[12px] text-fg hover:bg-surface focus:bg-surface focus:outline-none", chatChoice === `model:${model.id}` && "bg-accent-bg")}>
+                <span className="truncate">{model.name}</span>{chatChoice === `model:${model.id}` && <Check size={13} className="shrink-0 text-accent" />}
+              </button>)}
+            </>}
+            {extraClaudeModels.length > 0 && <><p className="mt-1 border-t border-border px-2 pt-2 pb-1 text-[10px] font-medium uppercase tracking-wide text-faint">Claude Code · {chatProviders.data?.claude_code ? "Connected" : "Connect in Settings"}</p>
+              {extraClaudeModels.map((model) => <button key={model.id} type="button" onClick={() => { setChatChoice(`claude-code:${model.id}`); setPickerOpen(false); }} className={cn("flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-[12px] text-fg hover:bg-surface focus:bg-surface focus:outline-none", chatChoice === `claude-code:${model.id}` && "bg-accent-bg")}>
+                <span className="truncate">{model.name}</span>{chatChoice === `claude-code:${model.id}` && <Check size={13} className="shrink-0 text-accent" />}
+              </button>)}
+            </>}
+          </div>}
+        </div>}
         <div className="flex items-end gap-2">
           <textarea
             className="input min-h-[38px] resize-none"
             rows={2}
-            placeholder={ready ? "e.g. avoid roles with heavy travel…" : "Configure an LLM in Settings"}
-            disabled={!ready}
+            placeholder={chatReady ? "e.g. avoid roles with heavy travel…" : "Connect the selected chat provider in Settings"}
+            disabled={!chatReady}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
@@ -354,7 +448,7 @@ export function AgentPanel({ ready, llm, hasCv }: { ready: boolean; llm?: LLMVie
               <Square size={14} />
             </button>
           ) : (
-            <button className="btn-primary h-[38px]" title="Send" disabled={!ready || !draft.trim()} onClick={() => submit()}>
+            <button className="btn-primary h-[38px]" title="Send" disabled={!chatReady || !draft.trim()} onClick={() => submit()}>
               <Send size={14} />
             </button>
           )}

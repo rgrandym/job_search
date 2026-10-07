@@ -144,6 +144,7 @@ export const api = {
     request<CompanyBoardsStatus>(`/api/companies/discover?mode=${mode}`, { method: "POST" }),
   gmailStatus: () => request<{ configured: boolean; connected: boolean; account: string | null }>("/api/gmail/status"),
   models: (provider: Provider) => request<ModelInfo[]>(`/api/llm/models?provider=${provider}`),
+  chatProviders: () => request<Record<Provider, boolean>>("/api/llm/chat-providers"),
   updateLLM: (body: {
     provider: Provider;
     quality_model: string;

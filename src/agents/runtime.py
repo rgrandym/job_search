@@ -17,8 +17,10 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from src.agents.registry import TOOLS, AgentDefinition
-from src.core.llm import ChatMessage, LLMError, ModelUsage, ToolCall, UsageSink
+from src.core.config import LLMProviderName
+from src.core.llm import ChatMessage, LLMError, ModelUsage, Role, ToolCall, UsageSink
 from src.jobs.models import SearchQuery
+from src.jobs.sources.base import SourceError
 from src.services.workspace import Workspace
 
 Emit = Callable[[str, dict[str, Any]], Awaitable[None]]
@@ -35,7 +37,15 @@ class AgentContext:
     emit: Emit
     query: SearchQuery = field(default_factory=SearchQuery)
     use_cv: bool = True
+    chat_role: Role = "quality"
+    chat_model: str | None = None
+    chat_provider: LLMProviderName | None = None
+    smart: bool = True
+    threshold: float = 60
+    widen: bool = False
+    profile_key: str | None = None
     cancelled: bool = False
+    active_search_id: str | None = None
     tokens: dict[str, int] = field(default_factory=lambda: {"input": 0, "output": 0})
     _usage_futures: list[Future[None]] = field(default_factory=list, repr=False)
     _usage_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -47,7 +57,12 @@ class AgentContext:
         async def emit_usage(usage: ModelUsage) -> None:
             await self.emit(
                 "model_usage",
-                {"agent": agent, "depth": depth, **usage.model_dump()},
+                {
+                    "agent": agent,
+                    "depth": depth,
+                    "provider": self.ws.llm.provider,
+                    **usage.model_dump(),
+                },
             )
 
         def record(usage: ModelUsage) -> None:
@@ -71,7 +86,12 @@ async def run_agent(
     defn: AgentDefinition, messages: list[ChatMessage], ctx: AgentContext, depth: int = 0
 ) -> str:
     """Run `defn` on `messages` (mutated in place) until it answers without tool calls."""
-    model = ctx.ws.chat(defn.role)
+    if ctx.chat_provider:
+        model = ctx.ws.chat(ctx.chat_role, ctx.chat_model, ctx.chat_provider)
+    elif ctx.chat_model:
+        model = ctx.ws.chat(ctx.chat_role, ctx.chat_model)
+    else:
+        model = ctx.ws.chat(ctx.chat_role)
     for _ in range(defn.max_turns):
         if ctx.cancelled:
             raise Cancelled
@@ -86,7 +106,8 @@ async def run_agent(
             {
                 "agent": defn.name,
                 "depth": depth,
-                "model": ctx.ws.llm.model_for(defn.role),
+                "model": ctx.chat_model or ctx.ws.llm.model_for(ctx.chat_role),
+                "provider": ctx.chat_provider or ctx.ws.llm.provider,
                 "input_tokens": resp.input_tokens,
                 "output_tokens": resp.output_tokens,
                 "estimated": resp.usage_estimated,
@@ -107,9 +128,14 @@ async def run_agent(
             )
         if not msg.tool_calls:
             return msg.content
-        results = await asyncio.gather(*(_run_tool(c, defn, ctx, depth) for c in msg.tool_calls))
+        results = [await _run_tool(call, defn, ctx, depth) for call in msg.tool_calls]
         messages.extend(results)
-    return f"[{defn.name}] stopped after {defn.max_turns} turns without a final answer."
+    answer = "I reached the limit for this request. Please tell me which step to continue."
+    messages.append(ChatMessage(role="assistant", content=answer))
+    await ctx.emit(
+        "agent_message", {"agent": defn.name, "depth": depth, "text": answer, "final": True}
+    )
+    return answer
 
 
 async def _run_tool(
@@ -133,7 +159,7 @@ async def _run_tool(
         result: Any = await t.fn(t.args_model.model_validate(call.arguments), ctx)
     except Cancelled:
         raise
-    except (ValidationError, ValueError, KeyError, LLMError) as exc:
+    except (ValidationError, ValueError, KeyError, LLMError, OSError, SourceError) as exc:
         result, is_error = f"Error: {exc}", True
     text = result if isinstance(result, str) else _to_json(result)
     await ctx.flush_usage()

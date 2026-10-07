@@ -14,7 +14,7 @@ charge separately or apply usage limits.
    and saved postings), and company career sites, then keep only the ones that truly match your
    profile (AI screening against a remembered profile summary).
 4. **Web app**: buttons for searching, screening, tailoring, cover letters, saving and tracking
-   jobs, plus a small assistant for plain-language updates to your preferences and career intent.
+   jobs, plus an assistant that can operate searches, documents and records in plain language.
    Runs on Claude (API key or Claude Code through a Pro/Max plan), Codex through a ChatGPT plan,
    or the OpenAI API. The OpenRouter option is not yet ready for general use.
 
@@ -36,6 +36,8 @@ It opens http://localhost:5173. Running it again restarts both servers cleanly; 
    provider (e.g. Sol + Luna, or Sonnet + Haiku); check a change on your own past verdicts with
    `python -m src.services.model_compare --screening-model <id> --sample 40` (it calls the
    model for every sampled posting).
+   The assistant's chat picker also offers your signed-in Claude Code models, even when
+   another provider is selected for searches. Chat tokens appear in the existing usage panel.
 2. **Upload your CV** (PDF, DOCX, MD, TXT). It is stored unchanged and parsed when a CV-powered action needs it.
    Click **Build profile from selected CV** to review and edit the profile before searching.
 3. Choose **sources, country, cities, radius, and date posted**, then **Search**. The quality model

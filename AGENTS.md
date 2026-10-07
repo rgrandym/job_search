@@ -30,8 +30,8 @@ A three-pane web UI (`web/`) over a FastAPI backend (`src/web/app.py`):
 **left**: CV library/upload (click a CV to review and edit its parsed facts) and search filters (titles, keywords, location, radius, salary, arrangement,
 sources, threshold, smart-match toggle). **centre**: ranked results with AI fit scores, reasons,
 gaps, and tailor-to-.docx. **right**: the assistant over `/api/ws/chat`
-(plain-language updates to the career intent, preferences and proposed CV facts). Searching is
-the sidebar's Search button (direct pipeline, stoppable). **centre** also
+(plain-language actions through the same services as the buttons). Searching is available
+from the sidebar's Search button or assistant (direct pipeline, stoppable). **centre** also
 has a **Saved** tab: jobs ticked and saved from a search (`services/saved.py`,
 `data/saved_jobs.json`), kept until removed, with Applied / outcome status read live from
 the tracker. Ticked jobs can be saved, or get a tailored CV + cover letter each from the
@@ -51,18 +51,21 @@ each with its own effort, are chosen in Settings:
 | Role | Used for | Calls |
 | --- | --- | --- |
 | **profile** | profile summary and role families (optional; blank = the quality model and its effort; may use its own provider, `profile_provider`) | once per CV and role family |
-| **quality** | CV parsing, tailoring plan + review, cover letters, evidence extraction, second opinions on matches and near the threshold, the assistant | rare, accuracy-critical |
+| **quality** | CV parsing, tailoring plan + review, cover letters, evidence extraction, second opinions on matches and near the threshold, the assistant's default | rare, accuracy-critical |
 | **screening** | the job_matcher's first pass (batches of 3) | hundreds per search |
 
-## Buttons do the work; one assistant edits records
+## Buttons and assistant share services
 
-Search, screening, tailoring, cover letters, saving and tracking are buttons that call
-`src/services/` directly: no agent sits in those paths. The **assistant** (right panel,
-`src/agents/`) is a single agent that turns what the user says into updates of their records:
+Search, screening, tailoring, cover letters, saving and tracking call `src/services/`
+directly from buttons or from the single assistant (`src/agents/`). The assistant can
+select the configured quality or screening model, another tool-capable model from the
+current provider's catalogue, or a connected Claude Code model per turn. Its completed conversation
+turns are saved under `data/chat_sessions/`; its model calls appear in live usage.
 
 | Tool | Does |
 | --- | --- |
-| `get_context` | the selected CV's roles (ids), search preferences, career intent |
+| `get_context` | selected CV, saved profiles, search results, saved jobs, preferences and intent |
+| `actions.py` / `actions_more.py` tools | search and results, jobs, documents, review queues, profiles, tracker, companies and history via services |
 | `update_search_intent` | merge patch of the career intent |
 | `update_preferences` | merge patch of the CV's search preferences |
 | `propose_cv_facts` | the user's words -> evidence review queue; the user accepts each fact |
