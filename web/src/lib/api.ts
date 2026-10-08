@@ -185,9 +185,10 @@ export const api = {
     request<{ download_url: string; roles: number }>(tracked("/api/cv/general", progressId), { method: "POST" }),
   taskProgress: (taskId: string) => request<TaskProgress>(`/api/progress/${encodeURIComponent(taskId)}`),
   cvSourceUrl: (assetId: string) => `/api/cv/source/${encodeURIComponent(assetId)}`,
+  cvRevision: (assetId: string) => request<{ revision: string }>(`/api/cv/revision/${encodeURIComponent(assetId)}`),
   /** The CV as the browser can show it (Word files arrive as Word's own PDF rendering). */
   cvPreview: async (assetId: string) =>
-    (await checked(`/api/cv/preview/${encodeURIComponent(assetId)}`)).blob(),
+    (await checked(`/api/cv/preview/${encodeURIComponent(assetId)}`, { cache: "no-store" })).blob(),
   openCVSource: (assetId: string, app: "default" | "word" = "default") =>
     request<{ opened: boolean }>(`/api/cv/open/${encodeURIComponent(assetId)}?app=${app}`, { method: "POST" }),
   profileSummary: (query: SearchQuery, use_cv: boolean, refresh = false, progressId?: string) =>

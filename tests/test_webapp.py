@@ -615,6 +615,85 @@ def test_api_file_download_is_confined(client: TestClient) -> None:
     assert client.get("/api/files/..%2F.env").status_code == 404
 
 
+def test_cv_revision_follows_changes_to_output_document(
+    client: TestClient, ws: Workspace
+) -> None:
+    from docx import Document
+
+    path = ws.output_dir / "cvs" / "updated.docx"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = Document()
+    doc.add_paragraph("First version")
+    doc.save(str(path))
+    url = "/api/cv/revision/generated:updated.docx"
+    first = client.get(url)
+    assert first.status_code == 200
+    doc.add_paragraph("A later edit in the output folder")
+    doc.save(str(path))
+    assert client.get(url).json()["revision"] != first.json()["revision"]
+
+
+def test_repaired_output_cv_replaces_missing_selected_document(ws: Workspace) -> None:
+    from src.services import cv_service
+
+    directory = ws.output_dir / "cvs"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "other.docx").write_bytes(b"other")
+    (directory / "tailored_format_repaired.docx").write_bytes(b"repaired")
+    ws.active_cv_id = "generated:tailored.docx"
+
+    assets = cv_service.list_cvs(ws)
+    assert ws.active_cv_id == "generated:tailored_format_repaired.docx"
+    selected = next(item for item in assets if item.selected)
+    assert selected.filename == "tailored_format_repaired.docx"
+
+
+def test_saved_tailored_cv_download_repairs_viewer_indent_drift(
+    client: TestClient, ws: Workspace, master_cv: MasterCV
+) -> None:
+    from docx import Document
+    from docx.shared import Pt
+
+    from src.cv.models import JDAnalysis, TailoredCV
+    from src.services import tailored_documents
+
+    original = ws.settings.data_dir / "cvs" / "original.docx"
+    original.parent.mkdir(parents=True, exist_ok=True)
+    doc = Document()
+    for index in range(30):
+        paragraph = doc.add_paragraph(f"Line {index}")
+        paragraph.paragraph_format.left_indent = Pt(0)
+        paragraph.paragraph_format.first_line_indent = Pt(0)
+    doc.save(str(original))
+    saved = ws.output_dir / "cvs" / "tailored.docx"
+    saved.parent.mkdir(parents=True, exist_ok=True)
+    damaged = Document(str(original))
+    for paragraph in damaged.paragraphs:
+        paragraph.paragraph_format.first_line_indent = None
+    damaged.save(str(saved))
+    tailored_documents.create(
+        ws,
+        "job-1",
+        master_cv,
+        JDAnalysis(job_title="Test"),
+        TailoredCV(cv=master_cv, target_title="Test", keyword_coverage=0),
+        "original",
+        saved,
+        original_file=original,
+    )
+
+    response = client.get("/api/files/cvs/tailored.docx")
+    assert response.status_code == 200
+    assert all(p.paragraph_format.first_line_indent == 0 for p in Document(str(saved)).paragraphs)
+    assert all(p.text.startswith("Line ") for p in Document(str(saved)).paragraphs)
+    damaged = Document(str(saved))
+    for paragraph in damaged.paragraphs:
+        paragraph.paragraph_format.first_line_indent = None
+    damaged.save(str(saved))
+    assert client.get("/api/cv/revision/generated:tailored.docx").status_code == 200
+    assert all(p.paragraph_format.first_line_indent == 0 for p in Document(str(saved)).paragraphs)
+
+
 def test_api_cv_upload_accepts_multipart_file(
     client: TestClient,
     ws: Workspace,
@@ -1456,6 +1535,41 @@ def test_applied_and_na_jobs_are_set_aside_before_screening(ws: Workspace) -> No
     assert applied.tracking and applied.tracking.status == "applied"
     assert applied.tracking.note == "via ATS"
     assert not rep.matches  # an applied role never takes a ranked place
+
+
+def test_clearing_applied_restores_job_to_open_search(ws: Workspace) -> None:
+    from src.services import history, tracker
+
+    req = SearchRequest(query=SearchQuery(sources=["demo"]), smart=True, threshold=70)
+    first = asyncio.run(run_search(ws, req))
+    assert first.history_id is not None
+    job = ws.job("job-strong")
+    assert job is not None
+    tracker.set_status(ws, job, "applied", stage="screening")
+    aside = asyncio.run(run_search(ws, req))
+    assert aside.history_id is not None
+    assert [result.job.id for result in aside.report.applied] == [job.id]
+
+    entry = tracker.find(tracker.load(ws), job)
+    assert entry is not None
+    tracker.edit_entry(ws, entry.id, "open", None)
+    cleared = tracker.load(ws)[entry.id]
+    assert cleared.status == "seen" and cleared.applied_at is None
+    assert cleared.stage is None and cleared.stages == []
+
+    _, reopened = history.open_entry(ws, aside.history_id)
+    assert not reopened.report.applied
+    restored = next(result for result in reopened.report.below_threshold if result.job.id == job.id)
+    assert restored.tracking and restored.tracking.status == "open"
+    assert not restored.excluded and not restored.exclusion_reasons
+    assert restored.verdict is None  # it was set aside before screening
+
+    _, earlier = history.open_entry(ws, first.history_id)
+    assert any(result.job.id == job.id for result in earlier.report.matches)
+
+    next_search = asyncio.run(run_search(ws, req)).report
+    assert not next_search.applied
+    assert any(result.job.id == job.id for result in next_search.scored())
 
 
 def test_tracker_matches_roles_not_employers_and_ages_out(ws: Workspace) -> None:

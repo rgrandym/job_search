@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 import re
+import shutil
 import uuid
 from collections.abc import Sequence
 from datetime import date
@@ -247,6 +248,50 @@ def write_like_original(
     out.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(out))
     return notes
+
+
+def restore_normalized_indents(original: Path, edited: Path) -> bool:
+    """Undo a DOCX editor's mass indent normalization without changing edited wording.
+
+    Some viewers discard explicit zero first-line indents and add direct left indents when
+    saving. Restore only that distinctive, document-wide change, and only when the source
+    and edited files still have matching paragraph positions, styles and alignments.
+    """
+    source = Document(str(original)).paragraphs
+    document = Document(str(edited))
+    current = document.paragraphs
+    if len(source) != len(current):
+        return False
+    drift: list[tuple[Paragraph, Paragraph]] = []
+    for before, after in zip(source, current, strict=True):
+        old_style = before.style.name if before.style is not None else ""
+        new_style = after.style.name if after.style is not None else ""
+        if old_style != new_style or before.alignment != after.alignment:
+            return False
+        old, new = before.paragraph_format, after.paragraph_format
+        left_changed = old.left_indent != new.left_indent
+        first_changed = old.first_line_indent != new.first_line_indent
+        if left_changed and not (old.left_indent is None and new.left_indent is not None):
+            return False
+        if first_changed and not (old.first_line_indent == 0 and new.first_line_indent is None):
+            return False
+        if left_changed or first_changed:
+            drift.append((before, after))
+    if len(drift) < max(8, len(source) // 3):
+        return False
+    for before, after in drift:
+        after.paragraph_format.left_indent = before.paragraph_format.left_indent
+        after.paragraph_format.first_line_indent = before.paragraph_format.first_line_indent
+    backup = edited.with_name(f".{edited.name}.before-indent-repair")
+    if not backup.exists():
+        shutil.copy2(edited, backup)
+    temporary = edited.with_name(f".{edited.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        document.save(str(temporary))
+        temporary.replace(edited)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return True
 
 
 def _replace(

@@ -10,9 +10,16 @@ export function CVDocument({ asset }: { asset: CVAsset }) {
   const name = asset.filename.toLowerCase();
   const pdf = name.endsWith(".pdf");
   const word = name.endsWith(".docx");
+  const revision = useQuery({
+    queryKey: ["cv-revision", asset.id],
+    queryFn: () => api.cvRevision(asset.id),
+    refetchInterval: 5_000,
+    refetchOnWindowFocus: "always",
+  });
   const preview = useQuery({
-    queryKey: ["cv-preview", asset.id],
+    queryKey: ["cv-preview", asset.id, revision.data?.revision],
     queryFn: () => api.cvPreview(asset.id),
+    enabled: !!revision.data,
     staleTime: Infinity,
     retry: false,
   });
@@ -44,12 +51,12 @@ export function CVDocument({ asset }: { asset: CVAsset }) {
         {open.data && !open.data.opened && <a className="text-accent hover:underline" href={api.cvSourceUrl(asset.id)} download>No app found. Download the file</a>}
         {open.error && <span role="alert" className="text-bad">{open.error.message}</span>}
       </div>
-      {preview.isPending ? (
+      {revision.error || preview.error ? (
+        <div className="cv-desk flex flex-1 items-center justify-center p-8 text-center text-[12px] text-bad">{(revision.error ?? preview.error)?.message}</div>
+      ) : revision.isPending || preview.isPending ? (
         <div className="cv-desk flex flex-1 items-center justify-center gap-2 text-[12px] text-muted">
           <Loader2 size={14} className="animate-spin" /> {word ? "Word is preparing the page view…" : "Loading…"}
         </div>
-      ) : preview.error ? (
-        <div className="cv-desk flex flex-1 items-center justify-center p-8 text-center text-[12px] text-bad">{preview.error.message}</div>
       ) : url ? (
         <iframe title={asset.filename} src={url} className="cv-desk min-h-0 w-full flex-1 border-0" />
       ) : null}

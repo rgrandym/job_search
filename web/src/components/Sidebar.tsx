@@ -66,6 +66,13 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles, enabled: !!state?.cv_files.selected });
   useEffect(() => { setExpandedProfileKey(null); setEditingProfile(false); }, [state?.cv_files.selected]);
   useEffect(() => {
+    if (editingCV && state && !state.cv_files.available.some((item) => item.id === editingCV.id)) {
+      const replacementName = editingCV.filename.replace(/\.docx$/i, "_format_repaired.docx");
+      const replacement = state.cv_files.available.find((item) => item.filename === replacementName);
+      setEditingCV(replacement ?? null); // follow a repaired output file while its viewer is open
+    }
+  }, [editingCV, state]);
+  useEffect(() => {
     if (!gmailWaiting || !gmailConnected) return;
     setGmailWaiting(false);
     void qc.invalidateQueries({ queryKey: ["state"] }); // Gmail now appears as a source

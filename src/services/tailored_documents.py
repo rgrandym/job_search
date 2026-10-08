@@ -9,7 +9,7 @@ from pathlib import Path
 
 from src.cv.ats import check_docx
 from src.cv.docx_exporter import TEMPLATES, export_docx
-from src.cv.docx_original import write_like_original
+from src.cv.docx_original import restore_normalized_indents, write_like_original
 from src.cv.models import (
     JDAnalysis,
     MasterCV,
@@ -95,6 +95,19 @@ def list_all(ws: Workspace) -> list[TailoredDocument]:
         TailoredDocument.model_validate_json(path.read_text()) for path in directory.glob("*.json")
     ]
     return sorted(documents, key=lambda d: d.updated_at, reverse=True)
+
+
+def ensure_original_layout(ws: Workspace, path: Path) -> bool:
+    """Repair a saved viewer rewrite when the original CV's indents can be matched safely."""
+    if path.suffix.lower() != ".docx" or not path.is_file():
+        return False
+    document = next((d for d in list_all(ws) if d.filename == path.name), None)
+    if document is None or document.template != ORIGINAL or not document.original_file:
+        return False
+    original = Path(document.original_file)
+    if not original.is_file() or original.resolve() == path.resolve():
+        return False
+    return restore_normalized_indents(original, path)
 
 
 def delete_for_file(ws: Workspace, filename: str) -> None:

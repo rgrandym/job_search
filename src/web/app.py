@@ -474,6 +474,15 @@ async def cv_preview(asset_id: str) -> FileResponse:
     return FileResponse(path, filename=path.name, content_disposition_type="inline")
 
 
+@app.get("/api/cv/revision/{asset_id:path}")
+def cv_revision(asset_id: str) -> dict[str, str]:
+    """Let the open CV viewer notice a Word save without re-rendering unchanged files."""
+    try:
+        return {"revision": cv_service.preview_revision(get_workspace(), asset_id)}
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
 @app.post("/api/cv/open/{asset_id:path}")
 async def open_cv_source(
     asset_id: str, app: Literal["default", "word"] = "default"
@@ -1224,6 +1233,8 @@ def download_grouped(folder: str, name: str) -> FileResponse:
     path = (out / name).resolve()
     if path.parent != out or not path.is_file():
         raise HTTPException(404, "File not found")
+    if folder == "cvs":
+        tailored_documents.ensure_original_layout(get_workspace(), path)
     return FileResponse(path, filename=path.name)
 
 
@@ -1238,6 +1249,8 @@ def download(name: str) -> FileResponse:
         path = (out / folder / name).resolve()
         if path.parent != out / folder or not path.is_file():
             raise HTTPException(404, "File not found")
+    if path.parent == out / "cvs":
+        tailored_documents.ensure_original_layout(get_workspace(), path)
     return FileResponse(path, filename=path.name)
 
 

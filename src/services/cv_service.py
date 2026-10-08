@@ -147,7 +147,15 @@ def list_cvs(ws: Workspace) -> list[CVAsset]:
         )
     available_ids = {item.id for item in assets}
     if ws.active_cv_id not in available_ids:
-        default = uploaded[0] if len(uploaded) == 1 else assets[0] if len(assets) == 1 else None
+        replaced = None
+        if ws.active_cv_id and ws.active_cv_id.startswith("generated:"):
+            old_name = Path(ws.active_cv_id.removeprefix("generated:")).name
+            if old_name.lower().endswith(".docx"):
+                repaired_name = f"{Path(old_name).stem}_format_repaired.docx"
+                replaced = next((item for item in assets if item.filename == repaired_name), None)
+        default = replaced or (
+            uploaded[0] if len(uploaded) == 1 else assets[0] if len(assets) == 1 else None
+        )
         ws.active_cv_id = default.id if default else None
         if ws.active_cv_id == "master":
             ws.master_cv = mgr.load(ws.settings.master_cv_path)
@@ -290,6 +298,14 @@ def preview_file(ws: Workspace, asset_id: str) -> Path:
     if preview is None:
         raise ValueError("Microsoft Word is needed to show this Word file; use Open in Word")
     return preview
+
+
+def preview_revision(ws: Workspace, asset_id: str) -> str:
+    """Change key for the actual output file shown by the CV viewer."""
+    sync_copies(ws)
+    path = working_copy(ws, asset_id)
+    stat = path.stat()
+    return f"{stat.st_mtime_ns}-{stat.st_size}"
 
 
 def save_selected_cv(ws: Workspace, cv: MasterCV) -> None:
@@ -575,6 +591,8 @@ def _source_path(ws: Workspace, asset_id: str) -> Path:
             or "cover_letter" in path.stem.lower()
         ):
             raise ValueError("CV source file is unavailable")
+        if path.parent == (ws.output_dir / "cvs").resolve():
+            tailored_documents.ensure_original_layout(ws, path)
         return path
     asset = _asset(ws, asset_id)
     path = _asset_dir(ws) / asset.filename

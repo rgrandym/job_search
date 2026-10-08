@@ -125,7 +125,7 @@ If Google reports `redirect_uri_mismatch`, compare the exact URI in step 5 with 
 4. Open **Profiles → Career intent** to record roles or sectors you want to explore, work you prefer or avoid, and eligibility. Click **Save intent**. Career intent describes what you want; it is not proof of experience. If the profile says **intent changed** or **CV changed**, review it and click **Update** to rebuild from the current information. **Pin for searches** forces a chosen stored profile to be used; a newly built general profile is pinned by the build button.
 5. To add a genuine fact missing from the CV, use **Profiles → Add evidence**: upload a supporting document or paste its text, then review each proposed fact and click **Add to CV** only when correct. You can also describe a fact to the right-hand assistant; it proposes facts for your approval. Accepted facts update the structured CV. Update the profile afterwards if you want the new evidence reflected there.
 
-To correct an original CV file, edit it in Word or your text editor and upload the corrected version, then select it. It becomes another CV in the library. **Export CV** makes a general Word copy of the selected CV for manual review. Editing a downloaded Word copy does not automatically change the app's stored CV; upload the corrected file if you want to use it as a new source CV. Do not delete an older CV until you are sure you no longer need its associated profiles.
+To edit the selected CV, click it in the library and use **Open in Word**. Changes saved to its working file in `output/cvs/` appear in the app viewer. To use a corrected document as a new source CV for matching, upload it and select it. **Export CV** makes a general Word copy for manual review; a copy downloaded elsewhere does not sync back to the app. Do not delete an older CV until you are sure you no longer need its associated profiles.
 
 ## 5. Choose job sources and company sites
 
@@ -220,6 +220,7 @@ Deleting a saved job keeps its status, note and any application record. If that 
 1. On the job's card (in results or in **Saved**), set the status to **Applied**. You can add a note and later record the outcome stage (for example an interview).
 2. The job moves to the **Applied** tab, which is your record of applications. It leaves **Saved**, and later searches set it aside for the look-back period.
 3. For an application made outside the app, open **Applications & sources** at the bottom of the left panel, fill in the title and company, and click **Add application**. It appears in the **Applied** tab.
+4. If you marked a job Applied by mistake, click **Move to search** in the **Applied** tab. It returns to an open search when that search contained the job; otherwise it can appear in a future search. An entry added manually has **Clear Applied** instead.
 
 ### Keep every list in step
 
@@ -252,7 +253,7 @@ The report is kept with the tailored CV. When you come back later, reload the pa
 3. Click **Write cover letter** and download it. The letter draws achievements from the CV and motivation from your saved career intent.
 4. To edit it in the app, open the **Cover letters** tab, change the greeting, paragraphs or closing, click **Save edits**, then export to Word or text.
 
-To revise a saved tailored CV in the app, use **Review and edit CV** in that job's document panel, then **Save reviewed CV**. Edits made to downloaded Word files are not synced back into the app.
+To revise a saved tailored CV in the app, use **Review and edit CV** in that job's document panel, then **Save reviewed CV**. Edits saved directly to its file in `output/cvs/` update the document shown in the app. Copies downloaded to another folder do not sync back.
 
 To prepare several jobs at once, tick them and choose **Tailor CV + cover letter** in the top bar, then review each document separately. Saved jobs from older searches can still be used.
 

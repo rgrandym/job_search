@@ -9,10 +9,12 @@ from typing import Any
 
 import pytest
 from docx import Document
+from docx.shared import Pt
 from pydantic import ValidationError
 
 from src.cv import master_cv_manager as mgr
 from src.cv.docx_exporter import TEMPLATES, export_docx, fmt_date
+from src.cv.docx_original import restore_normalized_indents
 from src.cv.models import (
     CVCritique,
     JDAnalysis,
@@ -325,6 +327,44 @@ def test_fmt_date() -> None:
 
 
 # ---------------------------------------------------------------- the original's design
+
+
+def test_restore_viewer_indent_drift_keeps_edited_wording(tmp_path: Path) -> None:
+    original = tmp_path / "original.docx"
+    edited = tmp_path / "tailored.docx"
+    doc = Document()
+    doc.styles["Normal"].paragraph_format.left_indent = Pt(10)
+    doc.styles["Normal"].paragraph_format.first_line_indent = Pt(-10)
+    for index in range(30):
+        paragraph = doc.add_paragraph(f"Line {index}")
+        if index % 2:
+            paragraph.paragraph_format.first_line_indent = Pt(-9)
+        else:
+            paragraph.paragraph_format.left_indent = Pt(0)
+            paragraph.paragraph_format.first_line_indent = Pt(0)
+    doc.save(str(original))
+    damaged = Document(str(original))
+    damaged.paragraphs[4].runs[0].text = "Edited line four"
+    for index, paragraph in enumerate(damaged.paragraphs):
+        if index % 2:
+            paragraph.paragraph_format.left_indent = Pt(15)
+        else:
+            paragraph.paragraph_format.first_line_indent = None
+    damaged.save(str(edited))
+
+    assert restore_normalized_indents(original, edited)
+    repaired = Document(str(edited))
+    source = Document(str(original))
+    assert repaired.paragraphs[4].text == "Edited line four"
+    assert all(
+        (before.paragraph_format.left_indent, before.paragraph_format.first_line_indent)
+        == (after.paragraph_format.left_indent, after.paragraph_format.first_line_indent)
+        for before, after in zip(source.paragraphs, repaired.paragraphs, strict=True)
+    )
+    assert not restore_normalized_indents(original, edited)
+    repaired.paragraphs[0].paragraph_format.left_indent = Pt(3)
+    repaired.save(str(edited))
+    assert not restore_normalized_indents(original, edited)  # a deliberate local edit stays
 
 
 def _original_cv(master: MasterCV, path: Path) -> Path:

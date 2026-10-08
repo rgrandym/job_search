@@ -256,6 +256,18 @@ def refresh(ws: Workspace, report: MatchReport) -> None:
         elif status in ("applied", "na"):
             status = "open"
         result.tracking = _tracking(entry, status, entries, result.job)
+    # Jobs applied to before this search were set aside without screening. Once the
+    # application is cleared, show them in results again without inventing a verdict.
+    restored = [
+        result for result in report.applied
+        if result.tracking is not None and result.tracking.status == "open"
+    ]
+    if restored:
+        report.applied = [result for result in report.applied if result not in restored]
+        for result in restored:
+            result.excluded = False
+            result.exclusion_reasons = []
+        report.below_threshold.extend(restored)
 
 
 def tracking_for(ws: Workspace, job: JobPosting) -> JobTracking | None:
@@ -301,6 +313,9 @@ def set_status(
         entry.applied_at = today.isoformat()
     elif stored != "applied":
         entry.applied_at = None
+        if entry.status == "applied":
+            entry.stage = None
+            entry.stages = []
     entry.status = stored
     if stored == "applied" and (newly_applied or entry.application_result is None):
         result = ws.result(job.id)

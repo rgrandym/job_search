@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, Loader2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2, RotateCcw } from "lucide-react";
 import { Fragment, useState } from "react";
 import { api } from "../lib/api";
 import type { MatchResult, OutcomeStage, TrackedJob } from "../lib/types";
@@ -63,6 +63,14 @@ export function AppliedJobs({ query }: { query: UseQueryResult<TrackedJob[]> }) 
     mutationFn: ({ id, stage }: { id: string; stage: OutcomeStage }) => api.editTracked(id, undefined, undefined, { stage }),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["tracker"] }),
   });
+  const restore = useMutation({
+    meta: { syncLists: true },
+    mutationFn: (id: string) => api.editTracked(id, "open"),
+    onSuccess: (_, id) => {
+      if (expandedId === id) setExpandedId(null);
+      void qc.invalidateQueries({ queryKey: ["tracker"] });
+    },
+  });
   if (query.isPending) return <Empty title="Loading applications…" />;
   if (query.isError) return <Empty title="Could not load applications">{(query.error as Error).message}</Empty>;
   const items = (query.data ?? []).filter((entry) => entry.status === "applied");
@@ -71,7 +79,8 @@ export function AppliedJobs({ query }: { query: UseQueryResult<TrackedJob[]> }) 
     <div className="h-full overflow-auto scroll-thin p-4">
       <div className="overflow-x-auto rounded-lg border border-border bg-panel">
         {response.isError && <p role="alert" className="px-3 py-2 text-[12px] text-bad">Could not save response: {(response.error as Error).message}</p>}
-        <table className="w-full min-w-[820px] border-collapse text-left text-[12px]">
+        {restore.isError && <p role="alert" className="px-3 py-2 text-[12px] text-bad">Could not move job to search results: {(restore.error as Error).message}</p>}
+        <table className="w-full min-w-[900px] border-collapse text-left text-[12px]">
           <thead className="bg-surface text-[11px] text-muted">
             <tr>
               <th scope="col" className="px-3 py-2 font-medium">Role</th>
@@ -80,11 +89,13 @@ export function AppliedJobs({ query }: { query: UseQueryResult<TrackedJob[]> }) 
               <th scope="col" className="whitespace-nowrap px-3 py-2 font-medium">Applied</th>
               <th scope="col" className="px-3 py-2 font-medium">Response</th>
               <th scope="col" className="whitespace-nowrap px-3 py-2 font-medium">Closed</th>
+              <th scope="col" className="px-3 py-2 font-medium">Action</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
             {items.map((entry) => {
               const expanded = expandedId === entry.id;
+              const fromSearch = entry.source !== "manual" && !!entry.job_id;
               return (
                 <Fragment key={entry.id}>
                   <tr className={expanded ? "bg-accent-bg" : "hover:bg-surface"}>
@@ -122,10 +133,24 @@ export function AppliedJobs({ query }: { query: UseQueryResult<TrackedJob[]> }) 
                       </div>
                     </td>
                     <td className="whitespace-nowrap px-3 py-2 text-muted">{displayDate(closureDate(entry))}</td>
+                    <td className="whitespace-nowrap px-3 py-2">
+                      <button
+                        type="button"
+                        className="btn-ghost py-1 text-[11px]"
+                        title={fromSearch
+                          ? "Clear Applied and return this job to search results"
+                          : "Clear Applied so this role can appear in future searches"}
+                        disabled={restore.isPending || response.isPending}
+                        onClick={() => restore.mutate(entry.id)}
+                      >
+                        {restore.isPending && restore.variables === entry.id ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />}
+                        {fromSearch ? "Move to search" : "Clear Applied"}
+                      </button>
+                    </td>
                   </tr>
                   {expanded && (
                     <tr>
-                      <td colSpan={6} className="bg-bg p-3">
+                      <td colSpan={7} className="bg-bg p-3">
                         <JobCard result={applicationResult(entry)} canTailor={false} labelable={false} />
                         <p className="mt-1 px-2 text-[11px] text-faint">
                           Applied {displayDate(entry.applied_at)}

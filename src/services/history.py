@@ -147,9 +147,9 @@ def open_entry(ws: Workspace, entry_id: str) -> tuple[SearchRequest, SearchOutco
     outcome = SearchOutcome.model_validate(entry["outcome"])
     outcome.history_id = entry_id
     _move_unchecked(outcome.report)
+    tracker.refresh(ws, outcome.report)  # statuses and notes may have changed since
     # Entries saved before this was recorded (or with failed batches) can still be continued.
     outcome.unscreened = count_unscreened(ws, req, outcome.report)
-    tracker.refresh(ws, outcome.report)  # statuses and notes may have changed since
     ws.last_query, ws.last_report = req.query, outcome.report
     ws.last_models = entry.get("models")
     return req, outcome

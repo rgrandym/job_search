@@ -50,8 +50,8 @@ function Handle() {
 }
 
 export default function App() {
-  // Refetch on focus so CVs saved from Word appear in the library on return.
-  const state = useQuery({ queryKey: ["state"], queryFn: api.state, refetchOnWindowFocus: true });
+  // Output files can change outside the browser; keep the CV library current.
+  const state = useQuery({ queryKey: ["state"], queryFn: api.state, refetchOnWindowFocus: true, refetchInterval: 15_000 });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [summaryProfileKey, setSummaryProfileKey] = useState<string | null>(null);
