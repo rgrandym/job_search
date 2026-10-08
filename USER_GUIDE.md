@@ -133,14 +133,47 @@ In the left **Search** panel, **Sources** has three rows: **Job boards**, **Comp
 
 Some job boards need credentials in `.env`: Reed (`JOBSEARCH_REED_API_KEY`), CV-Library (`JOBSEARCH_CV_LIBRARY_API_KEY`), and Adzuna (`JOBSEARCH_ADZUNA_APP_ID` plus `JOBSEARCH_ADZUNA_APP_KEY`). Other public sources in the picker need no API key. A link to **Search Indeed UK live** opens Indeed in a browser; it does not import those live results. Indeed alerts delivered to Gmail are the import route.
 
-### Focus on companies you care about
+### Company career sites: what the app already covers
 
-1. Click **Sources → Company career sites**. The **Your companies** section shows employers you added yourself. Enter a company name and its main website, careers page, or public ATS board link, then click **Add**. The app checks for a readable job feed immediately; this may take up to a minute. If it cannot find one, try the direct careers or ATS URL shown on the company's public site. The company remains in your list across directory updates.
-2. The app also discovers public job boards for a UK life-science company directory. Click **Find job boards now** or include company sites in a search to start the first discovery pass. It can take about ten minutes. Later, **Update job boards** checks unchecked companies and results older than 30 days.
-3. Under the same modal, use **Filter companies** to find a company or board. Switch an irrelevant board off for future searches. **Shown off** turns off just the filtered boards; **All off** turns off every listed board; **All on** restores them. These switches affect search selection, not the directory data.
-4. For an employer in **Your companies**, click the **×** beside its name to remove your manually added entry. For a directory company you do not want, switch its board off instead; directory discovery may find it again after an update. If several employers share one ATS board, that board switch affects the shared feed.
+Many employers publish jobs only on their own careers site. The app reads those sites directly, so you see jobs that never reach the job boards. It finds them in three ways:
 
-Public career sites do not always expose a readable feed, and a source may be blocked or have no relevant jobs. The results panel reports which sources ran, were skipped, or failed. The app only opens full job pages for shortlisted postings where supported; it does not sign in to boards or bypass their blocks.
+- **Built-in employers.** About 55 large UK life-science employers are included and ready to search: big pharma (for example AstraZeneca, GSK, Pfizer, MSD, Novartis, Takeda, Bayer, Boehringer Ingelheim, UCB), CROs (IQVIA, ICON, Parexel, Labcorp, Charles River), and tools, diagnostics and genomics companies (Thermo Fisher, Danaher and Abcam, Agilent, Illumina, Oxford Nanopore, Lonza). You do not need to add these.
+- **The company directory.** The app checks a UK life-science directory (about 1,000 companies) and finds each company's job board where it has one.
+- **Your companies.** Any employer you add yourself (see the steps below).
+
+Some company sites cannot be read: a few block automated reading (Eli Lilly, for example), and some only show jobs after scripts run in a browser (Novo Nordisk, Alnylam). Their jobs still reach you through LinkedIn, the job boards and your Gmail alerts.
+
+On a group's shared careers site, each job keeps its own brand. For example, Danaher's board lists jobs from Abcam, Cytiva and Leica, and each card shows the right company, so your cover letter names the right employer.
+
+### Add a company you care about, step by step
+
+1. In the left **Search** panel, click **Sources → Company career sites**.
+2. Under **Your companies**, type the **company name**, then paste a link into **Website or careers page link**. The best link, in order:
+   - the page that lists the company's open jobs (often reached from **Careers → Search jobs**), or
+   - the company's careers page, or
+   - its main website.
+3. Click **Add** and wait. The app looks for a readable job list, which can take up to a minute. When it succeeds, the company appears under **Your companies** and is searched from now on.
+4. If the app says **No readable job list found**, the message says why. What to do:
+
+   | The message says | What it means | What to do |
+   | --- | --- | --- |
+   | *this is a recruitment agency's talent community* | The link is a sign-up page run by a recruiter, not the company's job list. | Go to the company's own careers page and use its **Search jobs** link instead. |
+   | *its jobs are on Avature / Taleo / Eightfold / Salesforce / an older SAP SuccessFactors site, which the app cannot read yet* | The company uses a job system the app does not support. | Nothing to fix on your side. Rely on job boards and alerts for this company. |
+   | *the site refuses automated reading (403)* | The website blocks programs like this app. | Open one of the company's job postings in your browser, find the job list it belongs to (the address often contains `myworkdayjobs.com`, `greenhouse.io`, `lever.co`, `jobs.jobvite.com` or `oraclecloud.com`), and paste that address instead. |
+   | *careers pages have no readable job feed* or *no careers link on the homepage* | The app could not find a job list from the link you gave. | Try the page that lists the company's jobs, as in step 2. |
+
+5. To remove a company you added, click the **×** beside its name.
+
+**Built-in tip:** if you type the name of a built-in employer (for example *Lonza*), the app uses its known job board, whatever link you paste.
+
+### Find directory job boards and switch boards off
+
+1. The first time you search with **Company career sites** on, the app checks the directory (about ten minutes, only once). You can also start it with **Find job boards now**. **Stop** keeps what was found; the next search continues where it stopped.
+2. Later, **Update job boards** re-checks companies not checked yet and results older than 30 days.
+3. To leave out boards you do not want, open **Sources → Company career sites**, use **Filter companies** to find them and switch them off. **Shown off** turns off just the filtered boards, **All off** turns off every listed board and **All on** restores them. These switches only affect which boards are searched.
+4. A directory company cannot be removed, because the next update would find it again. Switch its board off instead. If several employers share one board, the switch affects all of them.
+
+Public career sites do not always have a readable job list, and a site may be blocked or have no relevant jobs. The results panel reports which sources ran, were skipped or failed. The app reads public pages only within each site's published rules (`robots.txt`). It never signs in to a site or gets around a block.
 
 ## 6. Run a useful search
 
@@ -148,20 +181,84 @@ Public career sites do not always expose a readable feed, and a source may be bl
 2. Start with a focused **Country**, one or two **Cities**, a sensible **Radius**, and a **Date posted** window such as *Last week*. Leave Country or Cities broad if you are open to remote or relocation roles. Undated saved postings are kept.
 3. Choose the sources you want. For a quick first run, turn off company career sites until their boards have been found, and select a small number of sources. For a wider run, add more sources and **Widen to adjacent roles** if you genuinely want nearby career paths. With no titles entered in the current UI, job boards use roles from the selected CV profile.
 4. Set **Match threshold**. The default is **60**. Raising it narrows the displayed matches; lowering it includes more possibilities. The AI job matcher still decides whether a job is a real match. Roles below the threshold and hard exclusions have their own tabs.
-5. Click **Search**. Watch the source counts and progress. **Stop** keeps work completed so far. If some shortlisted jobs remain unscreened, click **Continue** in the results panel. A completed search appears in **Search history** so you can reopen it.
-6. In **Results**, inspect **Matches**, **Not selected**, and **Excluded**. Open a job card's **Details** to see fit reasons, gaps and flags, then **View on** the source site to verify the posting before applying. Mark **Your call** as *Would apply*, *Maybe*, or *No* to build a private set of examples for comparing model setups; it does not change that search.
+5. Click **Search**. Watch the source counts and progress. **Stop** keeps work completed so far. If some shortlisted jobs remain unscreened, click **Continue** in the results panel. A completed search appears under **Recent searches** so you can reopen it.
+6. In **Search results**, look at **Matches**, **To check**, **Not selected** and **Excluded**. Open a job card's **Details** for fit reasons, gaps and flags. Check the job on the original site with **View on…** before applying. You can mark each job *Would apply*, *Maybe* or *No* under **Your call**. This builds a private set of examples for comparing model setups and does not change that search.
+
+### Read the whole job description
+
+The job card's **Details** show the first lines of the posting. Click **Show full description** to read all of it, including responsibilities and requirements, and **Show less** to fold it again.
+
+When a site only gave a short snippet, the app opens the full posting itself before judging the job. Jobs whose full text could still not be read are listed under **To check**. For those:
+
+1. Click **View on…** to open the posting in your browser and copy its whole text.
+2. On the job card, click **Paste description**, paste the text and click **Judge with this description**.
+
+### The app remembers where you were
+
+- **Reloading the page, or opening the app in another tab, brings back the last search you had open**, with its results. If you never opened one, the newest search is shown.
+- Click **Clear results** (or **Clear filters and results**) when you want a clean screen. The app then stops reopening a search until you run or open another one. The search itself stays under **Recent searches**.
+- To go back to an older search, click it under **Recent searches**. The app keeps your last 10 searches.
+- On a small screen, the app also remembers which panel you had open (search, results or assistant).
 
 **Make runs more efficient:** build and correct the profile once before searching; reuse a selected CV and unchanged profile so the app can reuse summaries and past job verdicts. Start with a recent date window and relevant sources. Avoid repeated first-time company discovery during time-sensitive searches; let it finish once. Use a lighter screening model if its results are good enough, and reserve a stronger quality model for CV reading, second opinions, and writing. Changing the profile, intent, or model may cause jobs to be judged again. The app's usage panel shows model usage and, where available, plan limits. Do not run `model_compare` casually: it re-screens labelled jobs and uses model calls.
 
 ## 7. Save jobs, track applications, and write documents
 
-1. Tick promising jobs in Results and click **Save** in the selection bar. Find them later in the **Saved** tab, even after a new search. You can add a personal note to a job, mark it **Open**, **Applied**, or **N/A**, and record application outcomes. Applied jobs go to the **Applied** view and are set aside in later searches for the look-back period.
-2. On a job card, choose a Word layout (*Classic*, *Modern*, or *Compact*) and optional evidence emphasis, then click **Tailor CV**. Download the `.docx` and read every claim. The app uses evidence from the selected CV and reports rejected changes, missing keywords and ATS warnings. A missing requirement should be addressed truthfully, never filled with an invented fact.
-3. For a cover letter, open **Cover letter / review CV** on the card. Choose the selected CV or a saved tailored CV as its source, then click **Write cover letter**. If you import an older Word CV for that job, review and save its extracted text first. The letter draws achievements from the CV and motivation from your saved career intent.
-4. To revise a saved tailored CV in the app, use **Review and edit CV** in that job's document panel, then **Save reviewed CV**. To revise a letter, open the **Cover letters** tab, edit its greeting, paragraphs or closing, click **Save edits**, then export Word or text. You can also edit downloaded Word files manually; those local edits do not sync back into the app.
-5. To prepare several jobs, tick them and choose **Tailor CV + cover letter** in the selection bar. Review each downloaded document separately. Saved jobs from older searches can still be used for document writing.
+The results panel has tabs for **Search results**, **Saved**, **Applied**, **Documents** and **Cover letters**.
 
-The right-hand **Assistant** can update your career intent or search preferences from plain-language instructions and propose new CV facts for approval. Searching and writing documents are performed by their buttons, so you can see exactly which action starts model work.
+### Save jobs and remove them, step by step
+
+1. In **Search results**, tick the box at the left of each job you want to keep.
+2. Click **Save** in the bar that appears at the top. The jobs appear under **Saved** and stay there across new searches.
+3. To remove one saved job, open **Saved** and click the red **Delete** button at the top right of its card.
+4. To remove several, tick them in **Saved** and click **Remove N from saved** in the top bar.
+
+Deleting a saved job keeps its status, note and any application record.
+
+### Record an application, step by step
+
+1. On the job's card (in results or in **Saved**), set the status to **Applied**. You can add a note and later record the outcome stage (for example an interview).
+2. The job moves to the **Applied** tab, which is your record of applications. It leaves **Saved**, and later searches set it aside for the look-back period.
+3. For an application made outside the app, open **Applications & sources** at the bottom of the left panel, fill in the title and company, and click **Add application**. It appears in the **Applied** tab.
+
+### Keep every list in step
+
+The app keeps all its lists consistent automatically:
+
+- **Applying, saving or marking a job N/A anywhere** (a job card, **Applications & sources**, the **Applied** tab or the assistant) updates **Saved**, **Applied**, **Recent searches** and the results on screen.
+- **Deleting a job from the search results** (the red **Delete** in its card's action row) removes it from the results, from **Saved**, and from every search under **Recent searches**, so it does not come back when you reopen an older search.
+- **The Applied register is never changed by deleting a job from a list.** Your applications, their stages and notes are always kept.
+- **Other open tabs of the app update immediately.** A tab that was in the background also refreshes as soon as you return to it.
+
+### Tailor your CV to a job, step by step
+
+1. Open the job's card. Under the job, choose the options (the defaults suit most jobs):
+   - **Design:** *same as my CV* keeps your Word CV's own layout, fonts and sections. *Classic*, *Modern* or *Compact* use a new layout instead.
+   - **Length:** *automatic* keeps every line unless the job is clearly more junior than your experience. *Keep full length* never trims, and *Junior role (trim)* shortens it.
+   - **Emphasis** (*Leadership* or *Hands-on / wet lab*) and **Level** (*More senior* or *More junior emphasis*) change what leads the CV. They never change your actual titles or experience.
+2. Click **Tailor CV** and wait for the progress steps to finish.
+3. Click **Download .docx** and read every line before you send it.
+   - The CV keeps your own headline. Up to four job-specific headline suggestions are written under it, for you to delete the ones you do not want. You can also pick one in the app, which saves a new version with only that headline.
+   - Nothing is removed (unless you chose a trim). The most relevant lines lead each role and section, and the rest follow.
+   - The app only rephrases and reorders what your CV already says. It never adds facts, numbers or skills you do not have.
+4. Read the **Report** under the job. It shows the keyword coverage before and after, job keywords not found word for word, the review of the first draft, changes that were rejected and why, and any ATS warnings. A missing requirement should be handled truthfully, never by inventing a fact. If you do have that experience, add it to your CV first (see section 4).
+
+The report is kept with the tailored CV. When you come back later, reload the page or open the job in another tab, the card shows it again with the date it was tailored.
+
+### Write a cover letter, step by step
+
+1. On the job's card, click **Cover letter / review CV**.
+2. Choose the source: your selected CV or a saved tailored CV for this job. If you import an older Word CV for the job, review and save its text first.
+3. Click **Write cover letter** and download it. The letter draws achievements from the CV and motivation from your saved career intent.
+4. To edit it in the app, open the **Cover letters** tab, change the greeting, paragraphs or closing, click **Save edits**, then export to Word or text.
+
+To revise a saved tailored CV in the app, use **Review and edit CV** in that job's document panel, then **Save reviewed CV**. Edits made to downloaded Word files are not synced back into the app.
+
+To prepare several jobs at once, tick them and choose **Tailor CV + cover letter** in the top bar, then review each document separately. Saved jobs from older searches can still be used.
+
+### The assistant
+
+The right-hand **Assistant** does things for you from plain-language requests. For example, it can run or refine a search, save, track or remove jobs, tailor a CV or write a letter, edit your profile, career intent or a saved document, and add a company. It changes only what you ask for. New facts about your experience are always proposed for your approval before they reach your CV. Every list updates when the assistant finishes.
 
 ## 8. If something does not work
 
@@ -174,6 +271,11 @@ The right-hand **Assistant** can update your career intent or search preferences
 | **Gmail source unavailable** | Check the three `JOBSEARCH_GMAIL_*` values in `.env`, restart, then connect or reconnect under **Job alerts**. Keep a CV selected and Smart match on. |
 | **Google redirect error** | The authorised redirect URI must be exactly `http://localhost:8000/api/gmail/callback`, unless you deliberately changed the backend redirect setting in `.env`. |
 | **Plan sign-in fails** | Confirm the CLI is installed on the app's computer and signed in with the intended **plan** account. Use the API provider choice only when you intend API billing. |
+| **Job description looks cut off** | Open **Details** and click **Show full description**. If the source only gave a snippet, use **Paste description** on the card (section 6). |
+| **A company cannot be added** | Read the reason in the message and follow the table in section 5. The job-list link from one of the company's postings usually works. |
+| **A list looks out of date** | Lists update by themselves after every change. If one still looks wrong, reload the page; your last search reopens. |
+| **The last search did not reopen** | You may have clicked **Clear results**, or the search was deleted or pushed out of the last 10. Open one from **Recent searches**. |
+| **The tailoring report is missing** | The report belongs to CVs tailored in the app. A Word CV imported for a job has no report. |
 
 ### Official setup references
 
