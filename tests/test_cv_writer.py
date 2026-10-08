@@ -88,6 +88,7 @@ def test_upload_stores_without_llm_then_imports_on_demand(
     llm = FakeLLM({MasterCV: master_cv})
     monkeypatch.setattr(ws, "structured", lambda role="worker", *_: llm)
     monkeypatch.setattr(ws, "llm_ready", lambda: True)
+    monkeypatch.setattr(ws, "role_ready", lambda role: True)
     raw = ("Alex Example\nSenior engineer\n" + "Built reliable systems.\n" * 8).encode()
 
     asset = cv_service.store_cv(ws, "resume.txt", raw)

@@ -39,7 +39,7 @@ The app stores your CVs, model settings, Gmail tokens, saved jobs, and generated
 
 ## 2. Choose how the app uses AI
 
-Open **Settings** with the gear icon at the top right. The app needs a **quality model** and a **screening model**. The quality model reads CVs, builds profiles, reviews borderline matches, writes documents, and powers the assistant. The screening model judges the first pass of many jobs, so it usually accounts for more calls. Choose both models in Settings, leave **Effort** at *medium* to begin where offered, and click **Save**.
+Open **Settings** with the gear icon at the top right. A search uses the **quality model** and **screening model** you choose there. The quality model reads a CV when needed, builds a search summary if no saved profile fits, and reviews borderline matches. The screening model judges the first pass of many jobs, so it usually accounts for more calls. Profile building, CV writing and cover letters can each use a separate model and provider; their limits do not stop a Codex search. Leave **Effort** at *medium* to begin where offered, and click **Save**.
 
 | Settings choice | What you need | How usage is charged or limited |
 | --- | --- | --- |
@@ -120,7 +120,7 @@ If Google reports `redirect_uri_mismatch`, compare the exact URI in step 5 with 
 ## 4. Prepare and edit your CV profile
 
 1. In the left **Profile** panel, drop a CV into the upload box or browse for a **PDF, DOCX, MD, or TXT** file up to **10 MB**. Upload stores the original file unchanged. Click its name under **Available CVs** to select it; you can keep several versions.
-2. Click **Build profile from selected CV** under **Available profiles**. The quality model reads the CV on this first CV-powered action and builds a general profile. The profile opens for editing. If it already exists, the button opens **Edit general profile** instead of charging for a rebuild.
+2. Click **Build profile from selected CV** under **Available profiles**. The profile model (or quality model if you left Profile blank) reads the CV and builds a general profile. The profile opens for editing. If it already exists, the button opens **Edit general profile** instead of charging for a rebuild.
 3. Check the headline, seniority, experience, skills and evidence, target roles, role families, and **Not a fit** list. Correct errors and click **Save profile**. A profile describes what the CV supports; do not add untrue qualifications or achievements.
 4. Open **Profiles → Career intent** to record roles or sectors you want to explore, work you prefer or avoid, and eligibility. Click **Save intent**. Career intent describes what you want; it is not proof of experience. If the profile says **intent changed** or **CV changed**, review it and click **Update** to rebuild from the current information. **Pin for searches** forces a chosen stored profile to be used; a newly built general profile is pinned by the build button.
 5. To add a genuine fact missing from the CV, use **Profiles → Add evidence**: upload a supporting document or paste its text, then review each proposed fact and click **Add to CV** only when correct. You can also describe a fact to the right-hand assistant; it proposes facts for your approval. Accepted facts update the structured CV. Update the profile afterwards if you want the new evidence reflected there.
@@ -267,7 +267,7 @@ The right-hand **Assistant** does things for you from plain-language requests. F
 | --- | --- |
 | **Backend unreachable** | Keep `bash scripts/dev.sh` running; open `http://localhost:5173`; inspect `.run/logs/`. |
 | **No AI scores / pre-filter only** | Select a CV, enable **Match against my CV** and **Smart match**, then check Settings shows both models and a working key or CLI sign-in. |
-| **No profiles yet** | Click **Build profile from selected CV**. If it fails, check the quality model and provider credentials in Settings. |
+| **No profiles yet** | Click **Build profile from selected CV**. If it fails, check the profile model and its provider credentials in Settings. |
 | **No jobs** | Open the source report and notices; widen the date or location, enable relevant sources, and inspect excluded jobs. A newly added company may have no public feed. |
 | **Gmail source unavailable** | Check the three `JOBSEARCH_GMAIL_*` values in `.env`, restart, then connect or reconnect under **Job alerts**. Keep a CV selected and Smart match on. |
 | **Google redirect error** | The authorised redirect URI must be exactly `http://localhost:8000/api/gmail/callback`, unless you deliberately changed the backend redirect setting in `.env`. |

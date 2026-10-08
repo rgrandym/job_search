@@ -12,7 +12,8 @@ from src.core.config import LLMProviderName, Settings
 
 # quality: rare, accuracy-critical work (CV parsing and tailoring, cover letters, second
 # opinions, the assistant). screening: the job_matcher's first pass, hundreds of calls per
-# search. profile: the profile summary, which every verdict is judged against. cv: tailored
+# search. profile: explicit profile creation and updates; searches reuse saved profiles or
+# build a needed summary with the quality model. cv: tailored
 # CVs. letter: cover letters. These three use the quality model unless their own model is set
 # (a letter falls back to the CV model first), and each may use another provider.
 Role = Literal["quality", "screening", "profile", "cv", "letter"]

@@ -232,7 +232,7 @@ class ProfileKeyArgs(BaseModel):
 
 @tool("refresh_profile", "Rebuild a saved profile from the current CV and intent.", ProfileKeyArgs)
 async def refresh_profile(args: ProfileKeyArgs, ctx: AgentContext) -> dict[str, Any]:
-    cv = await cv_service.ensure_selected_cv(ctx.ws, ctx.usage_sink("assistant"))
+    cv = await cv_service.ensure_selected_cv(ctx.ws, ctx.usage_sink("assistant"), role="profile")
     record = await search_service.refresh_profile(ctx.ws, cv, args.key, ctx.usage_sink("assistant"))
     await ctx.emit("profile_updated", {"key": record.key, "reason": "rebuilt from the CV"})
     return {"key": record.key, "headline": record.summary.headline}

@@ -51,10 +51,10 @@ another provider than search and matching (e.g. Opus through Claude Code while C
 
 | Role | Used for | Calls |
 | --- | --- | --- |
-| **profile** | profile summary and role families (optional; blank = the quality model and its effort; may use its own provider, `profile_provider`) | once per CV and role family |
+| **profile** | explicit profile building and updates (optional; blank = the quality model and its effort; may use its own provider, `profile_provider`) | when requested |
 | **cv** | tailored CVs: JD analysis, plan, review and revision (optional; blank = the quality model; `cv_provider`) | per tailored CV |
 | **letter** | cover letters (optional; blank = the CV model, else the quality model; `letter_provider`) | per letter |
-| **quality** | CV parsing, evidence extraction, second opinions on matches and near the threshold, the assistant's default, and writing tasks without their own model | rare, accuracy-critical |
+| **quality** | CV parsing for search, search-time summary on a cache miss, evidence extraction, second opinions on matches and near the threshold, the assistant's default, and writing tasks without their own model | rare, accuracy-critical |
 | **screening** | the job_matcher's first pass (batches of 3) | hundreds per search |
 
 ## Buttons and assistant share services
@@ -113,7 +113,7 @@ UI filters ─▶ SearchQuery          career intent (services/intent, per CV)
               every role-relevant posting + 10 others (ceiling 250), one per employer+title
 3 enrich      full descriptions for snippet-only shortlisted postings (Reed, LinkedIn,
               jobs.ac.uk, NHS Jobs, Totaljobs)
-4 summary     ProfileSummary (profile model)  ◀── ProfileMemory (data/profile_summaries.json)
+4 summary     ProfileSummary (saved profile or search quality model)  ◀── ProfileMemory (data/profile_summaries.json)
               from the original CV document ([src-N] lines, publications included) +
               the dated CV extract + career intent; capabilities and publication record;
               role families (core / progression / adjacent) checked by code (CV or

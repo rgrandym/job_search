@@ -5,7 +5,7 @@
   "description": "Semantic screening: judges each shortlisted posting against the profile summary (realistic role families only) and the career intent, and returns a verdict.",
   "model_role": "screening (first pass); quality (second opinions on every match and near the threshold)",
   "input": [
-    "ProfileSummary built from the original CV document and its structured extract (capabilities, publication record, role families with CV or [src-N] document evidence; families code rejected are removed), with the preferences the user accepted from their labels (services.learning)",
+    "Saved ProfileSummary, or one built with the search quality model from the original CV document and its structured extract (capabilities, publication record, role families with CV or [src-N] document evidence; families code rejected are removed), with the preferences the user accepted from their labels (services.learning)",
     "career intent (optional)",
     "candidate base + search constraints (job-level exclusions only when the user sets a minimum or maximum)",
     "posting digests (batch of 3, or 1 for a second opinion); long descriptions keep their requirements section (3000 chars)"

@@ -8,7 +8,9 @@
 **LLMs:** Claude (Anthropic SDK), OpenAI or OpenRouter (Chat Completions), selected in the UI. Separate
 quality model (CV reading, second opinions, assistant), screening model (job matching) and optional
 profile, CV writing and cover letter models (blank = quality model; a blank letter model uses the
-CV model; each may use another provider, so writing is independent of search), each with its own effort. All model access goes through `src/core/llm/`.
+CV model; each may use another provider, so writing is independent of search). Searches use
+the quality model if they need a new summary; the profile model builds or updates profiles
+when requested. Each model has its own effort. All model access goes through `src/core/llm/`.
 **Scope (user preference):** keep it simple. No audit or trace infrastructure. Effort goes into
 search quality and profile matching.
 

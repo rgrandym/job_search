@@ -9,9 +9,9 @@ Pipeline (`src/services/search_service.py::run_search`, shared by the UI, the AP
 
 ```
 filters ─▶ 1 capture ─▶ 1b set aside ─▶ 2 pre-filter ─▶ 3 enrich ─▶ 4 profile summary ─▶ 5 job_matcher ─▶ ranked true matches
-           sources      applied / N/A /  deterministic    full text    profile model,       semantic verdict
-                        labelled no      (hard rules)     for short-   remembered per       per posting
-                                                          list         CV + role family
+           sources      applied / N/A /  deterministic    full text    saved or built      semantic verdict
+                        labelled no      (hard rules)     for short-   with quality;        per posting
+                                                          list         remembered by CV
 ```
 
 **Matching philosophy.** Keyword overlap is not a match. The deterministic scorer only removes
@@ -24,7 +24,7 @@ senior recruiter against an evidence-based **profile summary** of the candidate.
 | --- | --- |
 | `src/jobs/sources/` | One adapter per source (§1) |
 | `src/jobs/scorer.py`, `matcher.py` | Hard exclusions + pre-filter score (§2) |
-| `src/jobs/profile_memory.py` | Profile summary (profile model), role families, memory (§4) |
+| `src/jobs/profile_memory.py` | Profile summary (saved or search quality model), role families, memory (§4) |
 | `src/services/intent.py` | The user's career intent, per CV (§4) |
 | `src/services/calibration.py` | Read-only outcome review (§1b) |
 | `src/jobs/screener.py` | job_matcher: batch semantic screening (§5) |
@@ -244,8 +244,9 @@ and its progress log (`SearchOutcome.progress_log`: every progress line with sec
 start; a Continue or a recheck adds its lines), so a run can be reviewed afterwards, in
 `data/search_history.json`, newest first, capped at 10. `GET /api/history`, `GET
 /api/history/{id}` (reopens it as the current report, so its jobs can be tailored again),
-`DELETE /api/history/{id}` and `DELETE /api/history`. Each entry records `models` (provider,
-matcher, profile model, effort) when the job_matcher ran, so runs can be compared.
+`DELETE /api/history/{id}` and `DELETE /api/history`. Each entry records `models` (search
+provider, screening and quality models and efforts, whether the profile was saved or built)
+when the job_matcher ran, so runs can be compared.
 
 **Source yield** (`history.source_yield`, `GET /api/sources/yield`): every search (and every
 Continue, replacing its row) logs, per source, the unique postings it supplied and the true
@@ -291,14 +292,14 @@ reads the posting again with a fresh LinkedIn client (or takes the pasted text, 
 characters), judges only those jobs, keeps every other verdict and updates the search's
 history entry in place (shared with Continue: `_rejudge`).
 
-## 4. Career intent, profile summary and role families (profile model, remembered)
+## 4. Career intent, profile summary and role families (saved or search quality model)
 
-The summary is built by the **profile** model role (`LLMConfig.profile_model` /
-`profile_effort`, Settings > Profile model). Left blank, it is the quality model at the quality
-effort, so a stronger model can build the profile while a lighter one does the rest. With a
-profile model set, `profile_provider` may name another provider (e.g. Opus through Claude Code
-while Codex screens); it uses that provider's own key or CLI sign-in, and the app is only
-ready when both providers are.
+Search reuses the stored summary for the selected CV and role family. If none exists, search
+builds one with its **quality** model, alongside the screening model on the same search
+provider. Explicit **Build profile** and **Update profile** actions use the **profile** model
+role (`LLMConfig.profile_model` / `profile_effort`, Settings > Profile model). Left blank,
+that role uses the quality model. A separate `profile_provider` can therefore be unavailable
+without stopping a search on another provider.
 
 **Career intent** (`SearchIntent`, `services/intent.py`, `data/search_intent.json`, one per CV;
 `GET/PUT /api/intent`; the Profiles dialog's "Career intent" tab; the assistant's

@@ -15,7 +15,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict
 
 from src.core import progress
-from src.core.llm import UsageSink
+from src.core.llm import Role, UsageSink
 from src.core.llm_provider import LLMProvider
 from src.cv import master_cv_manager as mgr
 from src.cv.ats import check_docx
@@ -223,7 +223,11 @@ def cached_selected_cv(ws: Workspace) -> MasterCV | None:
     return _parsed_cv(ws, ws.active_cv_id)
 
 
-async def ensure_selected_cv(ws: Workspace, usage_sink: UsageSink | None = None) -> MasterCV:
+async def ensure_selected_cv(
+    ws: Workspace,
+    usage_sink: UsageSink | None = None,
+    role: Role = "quality",
+) -> MasterCV:
     """Return the selected parsed CV, parsing its source once when necessary."""
     asset_id = ws.active_cv_id
     if asset_id is None:
@@ -236,8 +240,8 @@ async def ensure_selected_cv(ws: Workspace, usage_sink: UsageSink | None = None)
     if parsed is not None:
         ws.master_cv = parsed
         return parsed
-    if not ws.llm_ready():
-        raise ValueError("Connect an LLM in Settings to build a profile from this CV")
+    if not ws.role_ready(role):
+        raise ValueError(f"Connect the {role} model in Settings to read this CV")
     asset = next((item for item in list_cvs(ws) if item.id == asset_id), None)
     if asset is None:
         raise ValueError("The selected CV is unavailable")
@@ -248,6 +252,7 @@ async def ensure_selected_cv(ws: Workspace, usage_sink: UsageSink | None = None)
         await asyncio.to_thread(source.read_bytes),
         save=False,
         usage_sink=usage_sink,
+        role=role,
     )
     mgr.save(cv, _parsed_path(ws, asset_id))
     ws.master_cv = cv
@@ -344,6 +349,7 @@ async def import_cv(
     data: bytes,
     save: bool = True,
     usage_sink: UsageSink | None = None,
+    role: Role = "quality",
 ) -> MasterCV:
     """Parse an uploaded CV into a Master CV with the LLM; optionally make it the active CV."""
     if not data:
@@ -354,7 +360,7 @@ async def import_cv(
     cv = await asyncio.to_thread(
         mgr.from_text,
         text,
-        ws.structured("quality", usage_sink, "CV parsing"),
+        ws.structured(role, usage_sink, "CV parsing"),
     )
     if save:  # summaries are keyed by CV content, so a new CV naturally gets new ones
         save_selected_cv(ws, cv)
@@ -635,7 +641,7 @@ async def tailor_to_job(
     reviewed and revised), export it to .docx and check what an ATS reads from the file.
     `template` "original" (the default) writes it in the CV's own Word design."""
     progress.step("Reading your CV", total=9)
-    master_cv = await ensure_selected_cv(ws, usage_sink)
+    master_cv = await ensure_selected_cv(ws, usage_sink, role="cv")
     original = original_docx(ws)
     if original is not None:  # tailor from every line as written in the Word file
         master_cv = await asyncio.to_thread(align_to_document, original, master_cv)
@@ -779,6 +785,7 @@ async def attach_existing_cv(
         await asyncio.to_thread(source.read_bytes),
         save=False,
         usage_sink=usage_sink,
+        role="letter",
     )
     jd = JDAnalysis(job_title=job.title, company=job.company)
     tailored = apply_plan(parsed, TailoringPlan(), jd)
@@ -808,7 +815,7 @@ async def export_general_cv(
     """Export every role from the selected CV as an editable, general Word CV (by default in
     the CV's own Word design)."""
     progress.step("Reading your CV", total=2)
-    cv = await ensure_selected_cv(ws, usage_sink)
+    cv = await ensure_selected_cv(ws, usage_sink, role="cv")
     progress.step("Exporting to Word")
     name = re.sub(r"[^A-Za-z0-9]+", "_", cv.basics.name).strip("_") or "Candidate"
     path = _new_output_path(ws, f"{name}_General_CV")
@@ -832,7 +839,9 @@ async def write_cover_letter(
     if document is not None and not document.reviewed:
         raise ValueError("Review and save the imported CV before using it for a cover letter")
     progress.step("Reading your CV", total=6)
-    master_cv = document.tailored.cv if document else await ensure_selected_cv(ws, usage_sink)
+    master_cv = document.tailored.cv if document else await ensure_selected_cv(
+        ws, usage_sink, role="letter"
+    )
     llm = ws.structured("letter", usage_sink, "Cover letter")
     text = _job_text(job)
     progress.step("Analysing the job description")

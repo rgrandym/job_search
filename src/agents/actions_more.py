@@ -175,7 +175,7 @@ async def edit_cv_basics(args: CVBasicsEdit, ctx: AgentContext) -> dict[str, Any
     allowed = {"name", "headline", "email", "phone", "location", "summary"}
     if not args.patch or set(args.patch) - allowed:
         raise ValueError("Only existing contact details and summary can be edited here")
-    cv = await cv_service.ensure_selected_cv(ctx.ws, ctx.usage_sink("assistant"))
+    cv = await cv_service.ensure_selected_cv(ctx.ws, ctx.usage_sink("assistant"), role="cv")
     updated = mgr.update(cv, {"basics": args.patch})
     cv_service.save_selected_cv(ctx.ws, updated)
     await ctx.emit("cv_updated", {"reason": "CV details corrected"})
@@ -199,7 +199,7 @@ async def edit_cv_role(args: CVRoleEdit, ctx: AgentContext) -> dict[str, Any]:
     allowed = {"title", "company", "location", "start", "end"}
     if not args.patch or set(args.patch) - allowed:
         raise ValueError("Only existing role details can be corrected here")
-    cv = await cv_service.ensure_selected_cv(ctx.ws, ctx.usage_sink("assistant"))
+    cv = await cv_service.ensure_selected_cv(ctx.ws, ctx.usage_sink("assistant"), role="cv")
     if not any(role.id == args.role_id for role in cv.experience):
         raise ValueError("Role id not found in the selected CV")
     data = cv.model_dump(mode="json")
@@ -330,7 +330,7 @@ async def build_profile(args: ProfileQuery, ctx: AgentContext) -> dict[str, Any]
     from src.jobs.models import SearchQuery
     from src.services import cv_service
 
-    cv = await cv_service.ensure_selected_cv(ctx.ws, ctx.usage_sink("assistant"))
+    cv = await cv_service.ensure_selected_cv(ctx.ws, ctx.usage_sink("assistant"), role="profile")
     query = SearchQuery.model_validate(mgr.merge_patch(ctx.query.model_dump(), args.query_patch))
     summary, cached = await search_service.get_summary(
         ctx.ws, cv, query, False, ctx.emit, ctx.usage_sink("assistant")

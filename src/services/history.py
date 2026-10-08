@@ -48,10 +48,11 @@ def _models(ws: Workspace, outcome: SearchOutcome) -> str | None:
     if not outcome.report.screened:
         return None
     llm = ws.llm
-    profile = ""
-    if llm.profile_model:
-        via = "" if llm.profile_provider_for() == llm.provider else f"{llm.profile_provider_for()} "
-        profile = f" · profile {via}{llm.profile_model} ({llm.profile_effort})"
+    profile = (
+        " · profile saved" if outcome.summary_from_memory
+        else " · profile built with quality" if outcome.summary_from_memory is False
+        else ""
+    )
     return (
         f"{llm.provider} · screening {llm.screening_model} ({llm.screening_effort}) "
         f"· quality {llm.quality_model} ({llm.quality_effort}){profile}"

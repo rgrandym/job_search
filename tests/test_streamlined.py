@@ -118,9 +118,10 @@ def test_profile_can_run_on_another_provider(
 
     signed_in = {"codex"}
     monkeypatch.setattr(ws, "_cli_logged_in", lambda provider: provider in signed_in)
-    assert not ws.llm_ready()  # the profile's provider must be signed in too
+    assert ws.llm_ready()  # search needs only its own Codex models
+    assert not ws.role_ready("profile")
     signed_in.add("claude_code")
-    assert ws.llm_ready()
+    assert ws.role_ready("profile")
 
     # Without a profile model the profile stays on the main provider and its quality model.
     ws.set_llm_config({"profile_model": ""})
@@ -163,9 +164,60 @@ def test_cv_and_letter_writing_have_their_own_models_apart_from_search(
 
     signed_in = {"codex"}
     monkeypatch.setattr(ws, "_cli_logged_in", lambda provider: provider in signed_in)
-    assert not ws.llm_ready()  # the CV model's provider must be signed in too
+    assert ws.llm_ready()  # writing credentials cannot block search
+    assert not ws.role_ready("cv") and ws.role_ready("letter")
     signed_in.add("claude_code")
-    assert ws.llm_ready()
+    assert ws.role_ready("cv") and ws.role_ready("letter")
+
+
+def test_search_uses_codex_when_separate_writing_roles_use_claude(
+    settings: Settings, master_cv: MasterCV, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.services import search_service, workspace
+    from src.services.search_service import SearchRequest
+
+    ws = Workspace(settings)
+    ws.master_cv, ws.active_cv_id = master_cv, "master"
+    ws.set_llm_config({
+        "provider": "codex", "quality_model": "sol", "screening_model": "luna",
+        "profile_model": "claude-opus-5-5", "profile_provider": "claude_code",
+        "cv_model": "claude-opus-5-5", "cv_provider": "claude_code",
+        "letter_model": "claude-opus-5-5", "letter_provider": "claude_code",
+    })
+    monkeypatch.setattr(ws, "_cli_logged_in", lambda provider: provider == "codex")
+    calls: list[tuple[str, str]] = []
+    fake = FakeLLM({ProfileSummary: SUMMARY, ScreeningBatch: _assessments((4, 4, 3, 4, 3, 3))})
+
+    def make(cfg: LLMConfig, role: str, *_: Any) -> FakeLLM:
+        calls.append((role, cfg.provider))
+        assert cfg.provider == "codex"
+        return fake
+
+    monkeypatch.setattr(workspace, "make_structured", make)
+    outcome = asyncio.run(search_service.run_search(
+        ws, SearchRequest(query=SearchQuery(sources=["demo"]), smart=True)
+    ))
+    assert outcome.report.screened
+    assert any(role == "quality" for role, _ in calls)
+    assert any(role == "screening" for role, _ in calls)
+    assert not any(role == "profile" or provider == "claude_code" for role, provider in calls)
+
+
+@pytest.mark.parametrize("role", ["profile", "cv", "letter"])
+def test_first_cv_read_uses_its_task_provider(
+    role: str, settings: Settings, master_cv: MasterCV, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = Workspace(settings)
+    cv_service.store_cv(ws, "candidate.txt", b"Candidate CV\n" + b"Experienced researcher.\n" * 10)
+    roles: list[str] = []
+    fake = FakeLLM({MasterCV: master_cv})
+    monkeypatch.setattr(ws, "role_ready", lambda selected: selected == role)
+    monkeypatch.setattr(
+        ws, "structured", lambda selected, *_: roles.append(selected) or fake
+    )
+
+    assert asyncio.run(cv_service.ensure_selected_cv(ws, role=role)) == master_cv
+    assert roles == [role]
 
 
 def test_profile_provider_key_is_saved_for_that_provider(settings: Settings) -> None:

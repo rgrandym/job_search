@@ -108,12 +108,12 @@ class Workspace:
         )
 
     def llm_ready(self) -> bool:
-        """Models chosen and credentials available, for every role's provider."""
-        if not (self.llm.quality_model and self.llm.screening_model):
-            return False
-        own: tuple[Role, ...] = ("profile", "cv", "letter")
-        providers = {self.llm.provider, *(self.llm.provider_for(r) for r in own)}
-        return all(self.provider_ready(provider) for provider in providers)
+        """Search and matching are ready, regardless of separate writing providers."""
+        return self.role_ready("quality") and self.role_ready("screening")
+
+    def role_ready(self, role: Role) -> bool:
+        """The selected model and credentials for one task are available."""
+        return bool(self.llm.model_for(role)) and self.provider_ready(self.llm.provider_for(role))
 
     def provider_ready(self, provider: LLMProviderName) -> bool:
         """Credentials available for `provider` (Anthropic may use env/CLI credentials)."""

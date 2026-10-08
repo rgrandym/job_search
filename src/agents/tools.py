@@ -189,7 +189,7 @@ class PreferencesArgs(BaseModel):
     PreferencesArgs,
 )
 async def update_preferences(args: PreferencesArgs, ctx: AgentContext) -> dict[str, Any]:
-    cv = await cv_service.ensure_selected_cv(ctx.ws, ctx.usage_sink("assistant"))
+    cv = await cv_service.ensure_selected_cv(ctx.ws, ctx.usage_sink("assistant"), role="profile")
     updated = mgr.update(cv, {"preferences": args.patch})
     cv_service.save_selected_cv(ctx.ws, updated)
     await ctx.emit("cv_updated", {"reason": args.reason})
@@ -223,7 +223,7 @@ async def propose_cv_facts(args: FactsArgs, ctx: AgentContext) -> dict[str, Any]
 
 @tool("read_cv", "The selected CV in full, with the ids of every role and bullet.", NoArgs)
 async def read_cv(_: NoArgs, ctx: AgentContext) -> dict[str, Any]:
-    cv = await cv_service.ensure_selected_cv(ctx.ws, ctx.usage_sink("assistant"))
+    cv = await cv_service.ensure_selected_cv(ctx.ws, ctx.usage_sink("assistant"), role="cv")
     return cv.model_dump(mode="json", exclude={"preferences"})
 
 
@@ -257,7 +257,7 @@ def _cv_lines(cv: MasterCV) -> set[str]:
     CVEditArgs,
 )
 async def edit_cv(args: CVEditArgs, ctx: AgentContext) -> dict[str, Any]:
-    cv = await cv_service.ensure_selected_cv(ctx.ws, ctx.usage_sink("assistant"))
+    cv = await cv_service.ensure_selected_cv(ctx.ws, ctx.usage_sink("assistant"), role="cv")
     updated = apply_edits(cv, args.edits)
     before, after = _cv_lines(cv), _cv_lines(updated)
     cv_service.save_selected_cv(ctx.ws, updated)

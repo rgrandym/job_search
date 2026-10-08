@@ -84,6 +84,7 @@ def ws(settings: Settings, master_cv: MasterCV, monkeypatch: pytest.MonkeyPatch)
     )
     monkeypatch.setattr(w, "structured", lambda *a, **k: llm)
     monkeypatch.setattr(w, "llm_ready", lambda: True)
+    monkeypatch.setattr(w, "role_ready", lambda role: True)
     monkeypatch.setattr(
         "src.services.cv_service.save_selected_cv", lambda ws, cv: setattr(ws, "master_cv", cv)
     )

@@ -94,9 +94,9 @@ def _llm_view() -> dict[str, Any]:
     return cfg.model_dump(exclude={"api_key"}) | {
         "key_set": cfg.api_key is not None,
         "ready": ws.llm_ready(),
-        "profile_ready": ws.provider_ready(cfg.profile_provider_for()),
-        "cv_ready": ws.provider_ready(cfg.provider_for("cv")),
-        "letter_ready": ws.provider_ready(cfg.provider_for("letter")),
+        "profile_ready": ws.role_ready("profile"),
+        "cv_ready": ws.role_ready("cv"),
+        "letter_ready": ws.role_ready("letter"),
     }
 
 
@@ -405,7 +405,7 @@ def get_cv() -> MasterCV | None:
 async def get_editable_cv() -> MasterCV:
     """Load the selected CV for editing, parsing an uploaded source on first use."""
     try:
-        return await cv_service.ensure_selected_cv(get_workspace())
+        return await cv_service.ensure_selected_cv(get_workspace(), role="cv")
     except (ValueError, LLMError) as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -506,12 +506,12 @@ class SummaryRequest(BaseModel):
 @app.post("/api/profile-summary")
 async def profile_summary(body: SummaryRequest, progress_id: str | None = None) -> dict[str, Any]:
     ws = get_workspace()
-    if not ws.llm_ready():
-        raise HTTPException(400, "Configure an LLM provider first (Settings)")
+    if not ws.role_ready("profile"):
+        raise HTTPException(400, "Connect the profile model in Settings")
     try:
         with progress.track(progress_id, "Building the profile", total=4):
             progress.step("Reading your CV")
-            cv = await cv_service.ensure_selected_cv(ws) if body.use_cv else None
+            cv = await cv_service.ensure_selected_cv(ws, role="profile") if body.use_cv else None
             summary, cached = await get_summary(ws, cv, body.query, body.refresh)
     except (ValueError, LLMError) as exc:
         raise HTTPException(502, str(exc)) from exc
@@ -564,8 +564,8 @@ def edit_profile(key: str, summary: ProfileSummary) -> ProfileRecord:
 async def refresh_profile(key: str, progress_id: str | None = None) -> ProfileRecord:
     """Rebuild a stored profile from the CV's current content (only when the user asks)."""
     ws = get_workspace()
-    if not ws.llm_ready():
-        raise HTTPException(400, "Configure an LLM provider first (Settings)")
+    if not ws.role_ready("profile"):
+        raise HTTPException(400, "Connect the profile model in Settings")
     try:
         with progress.track(progress_id, "Updating the profile", total=3):
             return await search_service.refresh_profile(ws, _profile_cv(), key)
@@ -1127,8 +1127,8 @@ def learning_state() -> learning.LearningState:
 async def learning_suggest() -> learning.LearningState:
     """Ask the quality model for general preferences from your labels and notes."""
     ws = get_workspace()
-    if not ws.llm_ready():
-        raise HTTPException(400, "Configure an LLM provider first (Settings)")
+    if not ws.role_ready("quality"):
+        raise HTTPException(400, "Connect the quality model in Settings")
     llm = ws.structured("quality", None, "Learn from your labels")
     try:
         return await asyncio.to_thread(learning.suggest, ws, llm)
@@ -1183,8 +1183,8 @@ async def evidence_upload(
 ) -> list[enrichment.QueuedEvidence]:
     """Read a document (.pdf, .docx, .md, .txt) and queue what it adds to the CV."""
     ws = get_workspace()
-    if not ws.llm_ready():
-        raise HTTPException(400, "Configure an LLM provider first (Settings)")
+    if not ws.role_ready("quality"):
+        raise HTTPException(400, "Connect the quality model in Settings")
     data = await file.read()
     try:
         return await enrichment.propose_from_file(ws, file.filename or "document", data)
@@ -1196,8 +1196,8 @@ async def evidence_upload(
 async def evidence_text(body: EvidenceText) -> list[enrichment.QueuedEvidence]:
     """Queue what pasted text (e.g. a portfolio page) adds to the CV."""
     ws = get_workspace()
-    if not ws.llm_ready():
-        raise HTTPException(400, "Configure an LLM provider first (Settings)")
+    if not ws.role_ready("quality"):
+        raise HTTPException(400, "Connect the quality model in Settings")
     try:
         return await enrichment.propose(ws, body.source or "pasted text", body.text)
     except (ValueError, LLMError) as exc:
@@ -1297,7 +1297,7 @@ async def chat_ws(websocket: WebSocket) -> None:
                 if not (
                     ws.provider_ready(selected_provider)
                     if requested_provider is not None
-                    else ws.llm_ready()
+                    else ws.role_ready(selected_role)
                 ):
                     await emit(
                         "error", {"message": "Connect the selected chat provider in Settings"}

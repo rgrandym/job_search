@@ -3,7 +3,7 @@
 1. Capture     sources (per title, location, distance, salary)  -> postings
 2. Pre-filter  deterministic: hard exclusions + cheap ranking    -> shortlist
 3. Enrich      full descriptions for shortlisted snippet-only postings (e.g. Reed)
-4. Summarise   ProfileSummary, profile model (from memory when the search type repeats)
+4. Summarise   ProfileSummary, saved profile or search quality model on a cache miss
 5. Screen      job_matcher (screening model) judges the shortlist -> true matches
 """
 
@@ -417,7 +417,7 @@ async def _rejudge(
         report.summary
         or (
             pinned_profile(ws, cv, req.profile_key)
-            or await get_summary(ws, cv, req.query, False, emit, usage_sink, intent)
+            or await get_summary(ws, cv, req.query, False, emit, usage_sink, intent, role="quality")
         )[0]
     )
     threshold = ws.settings.score_threshold if req.threshold is None else req.threshold
@@ -620,7 +620,7 @@ async def _plan_query(
         # The summary is stored per CV, so the same CV always searches the same roles.
         try:
             profile = profile or await get_summary(
-                ws, cv, query, req.refresh_summary, emit, usage_sink, intent
+                ws, cv, query, req.refresh_summary, emit, usage_sink, intent, role="quality"
             )
         except LLMError:
             if not _stopped():
@@ -765,7 +765,8 @@ async def _screen_shortlist(
     """Profile summary (pinned, remembered or built), then the job_matcher on the shortlist.
     Returns (summary from memory, screening errors)."""
     summary, from_memory = ctx.profile or await get_summary(
-        ws, ctx.cv, ctx.query, ctx.req.refresh_summary, emit, usage_sink, ctx.intent
+        ws, ctx.cv, ctx.query, ctx.req.refresh_summary, emit, usage_sink, ctx.intent,
+        role="quality",
     )
     errors = await _screen(
         ws, summary, shortlist, ctx.query, report, threshold, emit, usage_sink,
@@ -908,17 +909,20 @@ async def get_summary(
     emit: Emit = _noop,
     usage_sink: UsageSink | None = None,
     intent: SearchIntent | None = None,
+    *,
+    role: Literal["profile", "quality"] = "profile",
 ) -> tuple[ProfileSummary, bool]:
-    """Profile summary (profile model), reused from memory for the same CV and search type.
+    """Profile summary, reused from memory for the same CV and search type.
     A new one is oriented by the career `intent` (the selected CV's when not given). The
-    preferences you accepted from your labels are applied on top (`learning`)."""
+    preferences you accepted from your labels are applied on top (`learning`). Searches use
+    their quality model; explicit profile actions use the dedicated profile model."""
     intent = intent if intent is not None else get_intent(ws)
     family = role_family(query)
     owner = _owner(ws, cv)
     if cv is not None and ws.active_cv_id:
         ws.memory.adopt(ws.active_cv_id, cv_fingerprint(cv))
     known = not refresh and ws.memory.get(owner, family) is not None
-    model = ws.llm.model_for("profile")
+    model = ws.llm.model_for(role)
     await _say(
         emit,
         "summary",
@@ -935,7 +939,7 @@ async def get_summary(
             summarize_profile,
             cv,
             query,
-            ws.structured("profile", usage_sink, "Profile summary"),
+            ws.structured(role, usage_sink, "Profile summary"),
             ws.memory,
             refresh,
             ws.active_cv_id,

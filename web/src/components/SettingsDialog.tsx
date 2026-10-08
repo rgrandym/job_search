@@ -125,7 +125,7 @@ const ROLE_LABEL: Record<Role, string> = {
   screening: "Screening model",
 };
 const ROLE_HINT: Record<Role, string> = {
-  profile: "Builds the profile summary and role families every job is judged against. It can use another provider, e.g. Opus through Claude Code while Codex searches",
+  profile: "Builds or updates profiles when you ask. Searches reuse saved profiles, and use the search quality model if a new summary is needed",
   cv: "Writes tailored CVs. Independent of search and matching: it can use another provider, e.g. Opus through Claude Code while Codex searches",
   letter: "Writes cover letters. Left blank, letters use the CV writing model",
   quality: "CV reading, second opinions on matches and near the threshold, the assistant; also any writing task without its own model",
@@ -413,11 +413,6 @@ export function SettingsDialog({ open, onClose, llm }: { open: boolean; onClose:
     letter: useModels(ownProvider("letter"), open),
   };
   const cli = useCliStatus(provider, open);
-  const ownCli: Record<OwnRole, ReturnType<typeof useCliStatus>> = {
-    profile: useCliStatus(ownProvider("profile"), open && separate("profile")),
-    cv: useCliStatus(ownProvider("cv"), open && separate("cv")),
-    letter: useCliStatus(ownProvider("letter"), open && separate("letter")),
-  };
 
   useEffect(() => {
     const available = models.data ?? [];
@@ -487,9 +482,6 @@ export function SettingsDialog({ open, onClose, llm }: { open: boolean; onClose:
   const modelsFor = (role: Role) => (isOwn(role) ? ownModels[role] : models);
   const recommendationFor = (role: Role) => RECOMMENDATIONS[isOwn(role) ? ownProvider(role) : provider];
   const recommendation = RECOMMENDATIONS[provider];
-  const ownSignedOut = OWN_ROLES.some(
-    (role) => separate(role) && !!owns[role].model && isCliProvider(ownProvider(role)) && !ownCli[role].data?.logged_in,
-  );
   const setRoleModel = (role: Role, model: string) =>
     isOwn(role) ? setOwn(role, { ...owns[role], model }) : setDraft({ [role]: model });
   const roleModel = (role: Role) => (isOwn(role) ? owns[role].model : draft[role]);
@@ -600,8 +592,7 @@ export function SettingsDialog({ open, onClose, llm }: { open: boolean; onClose:
               !draft.quality ||
               !draft.screening ||
               save.isPending ||
-              (isCliProvider(provider) && !cli.data?.logged_in) ||
-              ownSignedOut
+              (isCliProvider(provider) && !cli.data?.logged_in)
             }
             onClick={() => save.mutate()}
           >

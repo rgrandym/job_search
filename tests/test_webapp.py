@@ -80,6 +80,7 @@ def ws(settings: Settings, master_cv: MasterCV, monkeypatch: pytest.MonkeyPatch)
     llm = fake_llm()
     monkeypatch.setattr(w, "structured", lambda role="worker", *_: llm)
     monkeypatch.setattr(w, "llm_ready", lambda: True)
+    monkeypatch.setattr(w, "role_ready", lambda role: True)
     return w
 
 
@@ -1324,6 +1325,7 @@ def test_search_history_keeps_last_ten_and_can_be_reopened_deleted_and_cleared(
     assert item["models"] == (
         f"{ws.llm.provider} · screening {ws.llm.screening_model} ({ws.llm.screening_effort}) "
         f"· quality {ws.llm.quality_model} ({ws.llm.quality_effort})"
+        " · profile built with quality"
     )
 
     ws.last_report = None
