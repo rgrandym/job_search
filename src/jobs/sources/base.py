@@ -15,6 +15,7 @@ import json
 import re
 import threading
 import time
+from collections.abc import Callable, Iterable
 from datetime import date, datetime
 from typing import Any
 from urllib.parse import urlsplit
@@ -195,6 +196,23 @@ def country_names(name: str | None) -> list[str]:
         return []
     code = country_code(name)
     return sorted({name.strip().lower(), *COUNTRY_ALIASES.get(code or "", ())})
+
+
+def _names(names: Iterable[str]) -> str:
+    """Regex for any of `names` as whole words, longest first ("northern ireland" before
+    "ireland")."""
+    ordered = sorted({n.lower() for n in names}, key=len, reverse=True)
+    return r"\b(?:" + "|".join(map(re.escape, ordered)) + r")\b"
+
+
+def located_in(places: list[str]) -> Callable[[str], bool]:
+    """Whether a location label is in `places`: it names one and, those names taken out, no
+    other country ("USA - Pennsylvania - North Wales" is not in Wales; "Belfast, Northern
+    Ireland" is in the UK)."""
+    place = re.compile(_names(places), re.IGNORECASE)
+    every = {*COUNTRY_CODES, *(n for names in COUNTRY_ALIASES.values() for n in names)}
+    other = re.compile(_names(every - {p.lower() for p in places}), re.IGNORECASE)
+    return lambda label: bool(place.search(label)) and not other.search(place.sub(" ", label))
 
 
 def stable_id(*parts: object) -> str:

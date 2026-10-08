@@ -554,8 +554,7 @@ def family_of(title: str, families: list[RoleFamily]) -> str | None:
     words ("Business Development Manager") matches it whole. Ties go to core first."""
     order = sorted(families, key=lambda f: list(TIER_BUDGET).index(f.tier))
     vocab = {
-        f.name: set().union(*(role_words(t) for t in [*f.titles, *f.domain_terms]))
-        for f in order
+        f.name: set().union(*(role_words(t) for t in [*f.titles, *f.domain_terms])) for f in order
     }
     spread = Counter(w for words in vocab.values() for w in words)
     words = role_words(title)

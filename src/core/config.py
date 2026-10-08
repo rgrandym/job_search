@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     llm_provider: LLMProviderName = "anthropic"
     # quality: CV and letters, second opinions, assistant · screening: job matching ·
     # profile: the profile summary (empty profile_model: the quality model and its effort).
+    # cv: tailored CVs (empty cv_model: the quality model) · letter: cover letters (empty
+    # letter_model: the CV model, else the quality model). Each may use another provider.
     # The pre-rename variable names (ORCHESTRATOR_MODEL, WORKER_MODEL, LLM_EFFORT) still work.
     quality_model: str = Field(
         "claude-opus-5-5",
@@ -71,6 +73,12 @@ class Settings(BaseSettings):
     profile_model: str = ""
     profile_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
     profile_provider: LLMProviderName | None = None  # e.g. Claude Code profiles, Codex searches
+    cv_model: str = ""
+    cv_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
+    cv_provider: LLMProviderName | None = None  # e.g. Opus through Claude Code for CVs
+    letter_model: str = ""
+    letter_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
+    letter_provider: LLMProviderName | None = None
     llm_max_tokens: int = 16000
     llm_refusal_fallback: bool = True
     anthropic_api_key: SecretStr | None = Field(
@@ -136,11 +144,15 @@ class Settings(BaseSettings):
         60, ge=0, description="Shortlisted LinkedIn postings opened for the full text per search"
     )
     enrich_budget_s: float = Field(
-        180.0, gt=0, description="Time a search spends opening full postings; the rest can be "
+        180.0,
+        gt=0,
+        description="Time a search spends opening full postings; the rest can be "
         "fetched later from the results",
     )
     recheck_budget_s: float = Field(
-        600.0, gt=0, description="Time a later read of unread postings may take (results stay on "
+        600.0,
+        gt=0,
+        description="Time a later read of unread postings may take (results stay on "
         "screen meanwhile, so it can wait out LinkedIn's slow-downs)",
     )
     # Headless Chrome, signed out, for postings still too thin to check (sources/browser.py).

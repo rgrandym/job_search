@@ -74,11 +74,12 @@ function Register() {
   const register = useQuery({ queryKey: ["tracker"], queryFn: api.tracker });
   const refresh = () => qc.invalidateQueries({ queryKey: ["tracker"] });
   const edit = useMutation({
+    meta: { syncLists: true },
     mutationFn: (v: Edit & { id: string }) =>
       api.editTracked(v.id, v.status, v.note, { reason: v.reason, stage: v.stage }),
     onSuccess: refresh,
   });
-  const remove = useMutation({ mutationFn: api.deleteTracked, onSuccess: refresh });
+  const remove = useMutation({ meta: { syncLists: true }, mutationFn: api.deleteTracked, onSuccess: refresh });
   const error = (edit.error ?? remove.error ?? register.error) as Error | null;
   const items = register.data ?? [];
 
@@ -199,6 +200,7 @@ function RegisterRow({
 function AddApplication({ onAdded }: { onAdded: () => void }) {
   const [form, setForm] = useState({ title: "", company: "", url: "", note: "" });
   const add = useMutation({
+    meta: { syncLists: true },
     mutationFn: () =>
       api.addApplication({
         title: form.title.trim(),

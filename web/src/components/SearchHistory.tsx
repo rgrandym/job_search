@@ -4,7 +4,7 @@ import { useState } from "react";
 import { api } from "../lib/api";
 import type { HistoryItem } from "../lib/types";
 import { cn } from "../lib/utils";
-import { EMPTY_QUERY, profileSearchQuery, useSearch } from "../stores/searchStore";
+import { openedSearch, useSearch } from "../stores/searchStore";
 
 const when = (iso: string) => new Date(iso).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
 
@@ -18,24 +18,14 @@ export function SearchHistory() {
 
   const open = useMutation({
     mutationFn: (item: HistoryItem) => api.openHistory(item.id),
-    onSuccess: ({ request, outcome }, item) =>
-      s.set({
-        query: profileSearchQuery({ ...EMPTY_QUERY, ...request.query }),
-        useCv: request.use_cv,
-        smart: request.smart,
-        threshold: request.threshold,
-        profileKey: request.profile_key ?? null,
-        outcome,
-        log: [],
-        error: null,
-        openedFrom: { id: item.id, label: item.label, createdAt: item.created_at, models: item.models },
-      }),
+    onSuccess: ({ request, outcome }, item) => s.set(openedSearch(request, outcome, item)),
     onError: () => void refresh(),
   });
   const remove = useMutation({
     mutationFn: (id: string) => api.deleteHistory(id),
     onSuccess: (_, id) => {
       if (s.openedFrom?.id === id) s.set({ openedFrom: null });
+      if (s.lastSearchId === id) s.set({ lastSearchId: null });
       void refresh();
     },
   });
@@ -43,7 +33,7 @@ export function SearchHistory() {
     mutationFn: api.clearHistory,
     onSuccess: () => {
       setConfirmClear(false);
-      s.set({ openedFrom: null });
+      s.set({ openedFrom: null, lastSearchId: null });
       void refresh();
     },
   });

@@ -21,24 +21,44 @@ const DEFAULT_MODEL: Record<Provider, string> = {
   openrouter: "",
 };
 
-type Role = "quality" | "screening" | "profile";
-const ROLES: Role[] = ["profile", "quality", "screening"];
+type Role = "quality" | "screening" | "profile" | "cv" | "letter";
+/** Tasks that may have their own model and provider (blank: the quality model). */
+type OwnRole = "profile" | "cv" | "letter";
+const OWN_ROLES: OwnRole[] = ["profile", "cv", "letter"];
+const ROLES: Role[] = ["profile", "cv", "letter", "quality", "screening"];
 type ModelDraft = Record<"quality" | "screening", string>;
-/** The profile model; `provider` "" means the main provider, `model` "" the quality model. */
+/** A role's own model; `provider` "" means the main provider, `model` "" the quality model. */
 type ProfileDraft = { provider: Provider | ""; model: string };
 type Efforts = Record<Role, Effort>;
 type Recommendation = Record<Role, { prefer: string[]; why: string }> & { footnote: string };
 
 const emptyDraft = (p: Provider): ModelDraft => ({ quality: DEFAULT_MODEL[p], screening: DEFAULT_MODEL[p] });
 const draftOf = (llm: LLMView): ModelDraft => ({ quality: llm.quality_model, screening: llm.screening_model });
-const profileOf = (llm: LLMView): ProfileDraft => ({
-  provider: llm.profile_provider && llm.profile_provider !== llm.provider ? llm.profile_provider : "",
-  model: llm.profile_model,
+const OWN_FIELDS = {
+  profile: { model: "profile_model", effort: "profile_effort", provider: "profile_provider", ready: "profile_ready" },
+  cv: { model: "cv_model", effort: "cv_effort", provider: "cv_provider", ready: "cv_ready" },
+  letter: { model: "letter_model", effort: "letter_effort", provider: "letter_provider", ready: "letter_ready" },
+} as const;
+const ownOf = (llm: LLMView, role: OwnRole): ProfileDraft => {
+  const provider = llm[OWN_FIELDS[role].provider];
+  return { provider: provider && provider !== llm.provider ? provider : "", model: llm[OWN_FIELDS[role].model] };
+};
+const ownsOf = (llm: LLMView): Record<OwnRole, ProfileDraft> => ({
+  profile: ownOf(llm, "profile"),
+  cv: ownOf(llm, "cv"),
+  letter: ownOf(llm, "letter"),
 });
+const NO_OWN: Record<OwnRole, ProfileDraft> = {
+  profile: { provider: "", model: "" },
+  cv: { provider: "", model: "" },
+  letter: { provider: "", model: "" },
+};
 const effortsOf = (llm: LLMView): Efforts => ({
   quality: llm.quality_effort,
   screening: llm.screening_effort,
   profile: llm.profile_effort,
+  cv: llm.cv_effort,
+  letter: llm.letter_effort,
 });
 
 // Preference order per role: the smallest, fastest model that does the work well comes first.
@@ -47,9 +67,17 @@ const OPENAI_RECOMMENDATION: Recommendation = {
     prefer: ["gpt-6-sol", "gpt-6.1-sol", "gpt-5.6-sol"],
     why: "at high effort: built once per role family, and every verdict is judged against it.",
   },
+  cv: {
+    prefer: ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"],
+    why: "at high effort: tailored CVs are few, and their wording matters.",
+  },
+  letter: {
+    prefer: ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"],
+    why: "at high effort: a letter is one short, careful piece of writing.",
+  },
   quality: {
     prefer: ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol", "gpt-6-luna"],
-    why: "for CV and cover letters and second opinions: rare calls where quality matters.",
+    why: "for CV reading and second opinions: rare calls where quality matters.",
   },
   screening: {
     prefer: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-6.1-sol"],
@@ -63,9 +91,17 @@ const CLAUDE_RECOMMENDATION: Recommendation = {
     prefer: ["claude-opus-5-5", "claude-sonnet-5-5"],
     why: "at high effort: built once per role family, so the strongest model costs little here.",
   },
+  cv: {
+    prefer: ["claude-opus-5-5", "claude-sonnet-5-5"],
+    why: "at high effort: tailored CVs are few, and their wording matters.",
+  },
+  letter: {
+    prefer: ["claude-opus-5-5", "claude-sonnet-5-5"],
+    why: "at high effort: a letter is one short, careful piece of writing.",
+  },
   quality: {
     prefer: ["claude-sonnet-5-5", "claude-sonnet-5", "claude-opus-5-5"],
-    why: "for CV and cover letters and second opinions, at a fraction of Opus usage.",
+    why: "for CV reading and second opinions, at a fraction of Opus usage.",
   },
   screening: {
     prefer: ["claude-haiku-4-5", "claude-sonnet-5-5"],
@@ -83,16 +119,20 @@ const RECOMMENDATIONS: Partial<Record<Provider, Recommendation>> = {
 
 const ROLE_LABEL: Record<Role, string> = {
   profile: "Profile model",
+  cv: "CV writing model",
+  letter: "Cover letter model",
   quality: "Quality model",
   screening: "Screening model",
 };
 const ROLE_HINT: Record<Role, string> = {
   profile: "Builds the profile summary and role families every job is judged against. It can use another provider, e.g. Opus through Claude Code while Codex searches",
-  quality: "CV reading and tailoring, cover letters, second opinions on matches and near the threshold, the assistant",
+  cv: "Writes tailored CVs. Independent of search and matching: it can use another provider, e.g. Opus through Claude Code while Codex searches",
+  letter: "Writes cover letters. Left blank, letters use the CV writing model",
+  quality: "CV reading, second opinions on matches and near the threshold, the assistant; also any writing task without its own model",
   screening: "First-pass job matching (the job_matcher), batch after batch",
 };
 const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
-const DEFAULT_EFFORTS: Efforts = { quality: "medium", screening: "medium", profile: "high" };
+const DEFAULT_EFFORTS: Efforts = { quality: "medium", screening: "medium", profile: "high", cv: "high", letter: "high" };
 
 const isCliProvider = (p: Provider) => p === "codex" || p === "claude_code";
 const hasEffort = (p: Provider) => p === "anthropic" || isCliProvider(p);
@@ -250,35 +290,134 @@ function ModelPicker({
   );
 }
 
+/** A task with its own model, optionally on another provider (profile, CV, letter). */
+function OwnModelSection({
+  role,
+  open,
+  provider,
+  own,
+  onOwn,
+  apiKey,
+  onKey,
+  keySaved,
+  effort,
+  qualityEffort,
+  onEffort,
+  fallback,
+  models,
+}: {
+  role: OwnRole;
+  open: boolean;
+  provider: Provider;
+  own: ProfileDraft;
+  onOwn: (own: ProfileDraft) => void;
+  apiKey: string;
+  onKey: (key: string) => void;
+  keySaved: boolean;
+  effort: Effort;
+  qualityEffort: Effort;
+  onEffort: (effort: Effort) => void;
+  /** What a blank model falls back to, e.g. "quality model (sol)". */
+  fallback: string;
+  models: ReturnType<typeof useModels>;
+}) {
+  const ownProvider: Provider = own.provider || provider;
+  const separate = ownProvider !== provider;
+  const name = { profile: "Profile", cv: "CV writing", letter: "Cover letter" }[role];
+  return (
+    <div className="space-y-2 rounded-md border border-border p-3">
+      <Field label={`${name} provider`} hint={ROLE_HINT[role]}>
+        <select
+          className="input"
+          value={own.provider}
+          onChange={(e) => {
+            const value = e.target.value as Provider | "";
+            onOwn({ provider: value === provider ? "" : value, model: "" });
+          }}
+        >
+          <option value="">Same as above ({providerLabel(provider)})</option>
+          {PROVIDERS.filter((p) => p.value !== provider).map((p) => (
+            <option key={p.value} value={p.value}>
+              {p.label}
+            </option>
+          ))}
+        </select>
+      </Field>
+      {separate && (
+        <ProviderAccess
+          provider={ownProvider}
+          open={open}
+          apiKey={apiKey}
+          onKey={onKey}
+          keySaved={keySaved}
+          label={`${providerLabel(ownProvider)} API key`}
+        />
+      )}
+      <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_110px]">
+        <Field label={ROLE_LABEL[role]}>
+          <ModelPicker
+            value={own.model}
+            onChange={(model) => onOwn({ ...own, model })}
+            models={models.data ?? []}
+            loading={models.isPending}
+            unavailable={models.isError}
+            emptyLabel={separate ? "Choose a model" : `Same as ${fallback}`}
+          />
+        </Field>
+        {hasEffort(ownProvider) && (
+          <EffortSelect
+            value={own.model ? effort : qualityEffort}
+            onChange={onEffort}
+            disabled={!own.model}
+            title={own.model ? undefined : `Uses the effort of the ${fallback.split(" (")[0]}`}
+          />
+        )}
+      </div>
+      {separate && !own.model && (
+        <p className="text-[11px] text-faint">Choose a model, or this stays with the {fallback.split(" (")[0]}.</p>
+      )}
+    </div>
+  );
+}
+
 export function SettingsDialog({ open, onClose, llm }: { open: boolean; onClose: () => void; llm: LLMView | undefined }) {
   const qc = useQueryClient();
   const [provider, setProvider] = useState<Provider>("anthropic");
   const [drafts, setDrafts] = useState<Partial<Record<Provider, ModelDraft>>>({});
   const [efforts, setEfforts] = useState<Efforts>(DEFAULT_EFFORTS);
-  const [profile, setProfile] = useState<ProfileDraft>({ provider: "", model: "" });
+  const [owns, setOwns] = useState<Record<OwnRole, ProfileDraft>>(NO_OWN);
   const [key, setKey] = useState("");
-  const [profileKey, setProfileKey] = useState("");
+  const [ownKeys, setOwnKeys] = useState<Record<OwnRole, string>>({ profile: "", cv: "", letter: "" });
 
   const draft = drafts[provider] ?? emptyDraft(provider);
   const setDraft = (update: Partial<ModelDraft>) =>
     setDrafts((current) => ({ ...current, [provider]: { ...draft, ...update } }));
-  const profileProvider: Provider = profile.provider || provider;
-  const ownProfileProvider = profileProvider !== provider;
+  const ownProvider = (role: OwnRole): Provider => owns[role].provider || provider;
+  const separate = (role: OwnRole) => ownProvider(role) !== provider;
+  const setOwn = (role: OwnRole, own: ProfileDraft) => setOwns((current) => ({ ...current, [role]: own }));
 
   useEffect(() => {
     if (!open || !llm) return;
     setProvider(llm.provider);
     setDrafts({ [llm.provider]: draftOf(llm) });
     setEfforts(effortsOf(llm));
-    setProfile(profileOf(llm));
+    setOwns(ownsOf(llm));
     setKey("");
-    setProfileKey("");
+    setOwnKeys({ profile: "", cv: "", letter: "" });
   }, [open, llm]);
 
   const models = useModels(provider, open);
-  const profileModels = useModels(profileProvider, open);
+  const ownModels: Record<OwnRole, ReturnType<typeof useModels>> = {
+    profile: useModels(ownProvider("profile"), open),
+    cv: useModels(ownProvider("cv"), open),
+    letter: useModels(ownProvider("letter"), open),
+  };
   const cli = useCliStatus(provider, open);
-  const profileCli = useCliStatus(profileProvider, open && ownProfileProvider);
+  const ownCli: Record<OwnRole, ReturnType<typeof useCliStatus>> = {
+    profile: useCliStatus(ownProvider("profile"), open && separate("profile")),
+    cv: useCliStatus(ownProvider("cv"), open && separate("cv")),
+    letter: useCliStatus(ownProvider("letter"), open && separate("letter")),
+  };
 
   useEffect(() => {
     const available = models.data ?? [];
@@ -305,11 +444,19 @@ export function SettingsDialog({ open, onClose, llm }: { open: boolean; onClose:
         screening_model: draft.screening,
         quality_effort: efforts.quality,
         screening_effort: efforts.screening,
-        profile_model: profile.model,
+        profile_model: owns.profile.model,
         profile_effort: efforts.profile,
-        profile_provider: ownProfileProvider && profile.model ? profileProvider : null,
+        profile_provider: separate("profile") && owns.profile.model ? ownProvider("profile") : null,
+        cv_model: owns.cv.model,
+        cv_effort: efforts.cv,
+        cv_provider: separate("cv") && owns.cv.model ? ownProvider("cv") : null,
+        letter_model: owns.letter.model,
+        letter_effort: efforts.letter,
+        letter_provider: separate("letter") && owns.letter.model ? ownProvider("letter") : null,
         api_key: key || undefined,
-        profile_api_key: ownProfileProvider ? profileKey || undefined : undefined,
+        profile_api_key: separate("profile") ? ownKeys.profile || undefined : undefined,
+        cv_api_key: separate("cv") ? ownKeys.cv || undefined : undefined,
+        letter_api_key: separate("letter") ? ownKeys.letter || undefined : undefined,
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["state"] });
@@ -321,21 +468,35 @@ export function SettingsDialog({ open, onClose, llm }: { open: boolean; onClose:
     setProvider(p);
     setDrafts((current) => (current[p] ? current : { ...current, [p]: p === llm?.provider ? draftOf(llm) : emptyDraft(p) }));
     setEfforts(p === llm?.provider ? effortsOf(llm) : DEFAULT_EFFORTS);
-    // A profile model on the main provider belongs to the old provider's model list.
-    if (!profile.provider) setProfile({ provider: "", model: p === llm?.provider && !llm.profile_provider ? llm.profile_model : "" });
+    // A task's model on the main provider belongs to the old provider's model list.
+    setOwns((current) => {
+      const next = { ...current };
+      for (const role of OWN_ROLES) {
+        if (current[role].provider) continue;
+        const kept = p === llm?.provider && !llm[OWN_FIELDS[role].provider];
+        next[role] = { provider: "", model: kept && llm ? llm[OWN_FIELDS[role].model] : "" };
+      }
+      return next;
+    });
   };
-  const switchProfileProvider = (value: Provider | "") =>
-    setProfile({ provider: value === provider ? "" : value, model: "" });
 
   const keySaved = llm?.provider === provider && llm.key_set;
-  const profileKeySaved = llm?.profile_provider === profileProvider && llm.profile_ready;
-  const modelsFor = (role: Role) => (role === "profile" ? profileModels : models);
-  const recommendationFor = (role: Role) => RECOMMENDATIONS[role === "profile" ? profileProvider : provider];
+  const isOwn = (role: Role): role is OwnRole => (OWN_ROLES as Role[]).includes(role);
+  const keySavedFor = (role: OwnRole) =>
+    !!llm && llm[OWN_FIELDS[role].provider] === ownProvider(role) && llm[OWN_FIELDS[role].ready];
+  const modelsFor = (role: Role) => (isOwn(role) ? ownModels[role] : models);
+  const recommendationFor = (role: Role) => RECOMMENDATIONS[isOwn(role) ? ownProvider(role) : provider];
   const recommendation = RECOMMENDATIONS[provider];
-  const profileSignedOut = ownProfileProvider && !!profile.model && isCliProvider(profileProvider) && !profileCli.data?.logged_in;
+  const ownSignedOut = OWN_ROLES.some(
+    (role) => separate(role) && !!owns[role].model && isCliProvider(ownProvider(role)) && !ownCli[role].data?.logged_in,
+  );
   const setRoleModel = (role: Role, model: string) =>
-    role === "profile" ? setProfile({ ...profile, model }) : setDraft({ [role]: model });
-  const roleModel = (role: Role) => (role === "profile" ? profile.model : draft[role]);
+    isOwn(role) ? setOwn(role, { ...owns[role], model }) : setDraft({ [role]: model });
+  const roleModel = (role: Role) => (isOwn(role) ? owns[role].model : draft[role]);
+  const fallbackFor = (role: OwnRole) =>
+    role === "letter" && owns.cv.model
+      ? `CV writing model (${owns.cv.model})`
+      : `quality model (${draft.quality || "not set"})`;
 
   return (
     <Modal open={open} onClose={onClose} title="LLM settings">
@@ -355,57 +516,24 @@ export function SettingsDialog({ open, onClose, llm }: { open: boolean; onClose:
           ))}
         </div>
         <ProviderAccess provider={provider} open={open} apiKey={key} onKey={setKey} keySaved={keySaved} />
-        <div className="space-y-2 rounded-md border border-border p-3">
-          <Field label="Profile provider" hint={ROLE_HINT.profile}>
-            <select
-              className="input"
-              value={profile.provider}
-              onChange={(e) => switchProfileProvider(e.target.value as Provider | "")}
-            >
-              <option value="">Same as above ({providerLabel(provider)})</option>
-              {PROVIDERS.filter((p) => p.value !== provider).map((p) => (
-                <option key={p.value} value={p.value}>
-                  {p.label}
-                </option>
-              ))}
-            </select>
-          </Field>
-          {ownProfileProvider && (
-            <ProviderAccess
-              provider={profileProvider}
-              open={open}
-              apiKey={profileKey}
-              onKey={setProfileKey}
-              keySaved={profileKeySaved}
-              label={`${providerLabel(profileProvider)} API key`}
-            />
-          )}
-          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_110px]">
-            <Field label={ROLE_LABEL.profile}>
-              <ModelPicker
-                value={profile.model}
-                onChange={(model) => setRoleModel("profile", model)}
-                models={profileModels.data ?? []}
-                loading={profileModels.isPending}
-                unavailable={profileModels.isError}
-                emptyLabel={
-                  ownProfileProvider ? "Choose a model" : `Same as quality model (${draft.quality || "not set"})`
-                }
-              />
-            </Field>
-            {hasEffort(profileProvider) && (
-              <EffortSelect
-                value={profile.model ? efforts.profile : efforts.quality}
-                onChange={(effort) => setEfforts({ ...efforts, profile: effort })}
-                disabled={!profile.model}
-                title={profile.model ? undefined : "Uses the quality model's effort"}
-              />
-            )}
-          </div>
-          {ownProfileProvider && !profile.model && (
-            <p className="text-[11px] text-faint">Choose a model, or the profile stays with the quality model.</p>
-          )}
-        </div>
+        {OWN_ROLES.map((role) => (
+          <OwnModelSection
+            key={role}
+            role={role}
+            open={open}
+            provider={provider}
+            own={owns[role]}
+            onOwn={(own) => setOwn(role, own)}
+            apiKey={ownKeys[role]}
+            onKey={(value) => setOwnKeys((current) => ({ ...current, [role]: value }))}
+            keySaved={keySavedFor(role)}
+            effort={efforts[role]}
+            qualityEffort={efforts.quality}
+            onEffort={(effort) => setEfforts({ ...efforts, [role]: effort })}
+            fallback={fallbackFor(role)}
+            models={ownModels[role]}
+          />
+        ))}
         {(["quality", "screening"] as const).map((role) => (
           <div key={role} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_110px]">
             <Field label={ROLE_LABEL[role]} hint={ROLE_HINT[role]}>
@@ -422,7 +550,7 @@ export function SettingsDialog({ open, onClose, llm }: { open: boolean; onClose:
             )}
           </div>
         ))}
-        {(models.isError || profileModels.isError) && (
+        {(models.isError || OWN_ROLES.some((role) => ownModels[role].isError)) && (
           <p className="text-[11px] text-faint">Model list unavailable: type a model id.</p>
         )}
         {recommendation && (models.data ?? []).length > 0 && (
@@ -435,7 +563,7 @@ export function SettingsDialog({ open, onClose, llm }: { open: boolean; onClose:
               const model = preferredModel(available, rec[role].prefer);
               const use = () => {
                 setRoleModel(role, model);
-                if (role === "profile") setEfforts({ ...efforts, profile: "high" });
+                if (isOwn(role)) setEfforts({ ...efforts, [role]: "high" });
               };
               return (
                 <div key={role} className="flex items-start justify-between gap-3">
@@ -452,7 +580,7 @@ export function SettingsDialog({ open, onClose, llm }: { open: boolean; onClose:
           </div>
         )}
         <p className="text-[11px] text-faint">
-          {[provider, ...(ownProfileProvider ? [profileProvider] : [])]
+          {[...new Set([provider, ...OWN_ROLES.filter((role) => separate(role) && owns[role].model).map(ownProvider)])]
             .map((p) =>
               isCliProvider(p)
                 ? `${providerLabel(p)} runs through its local CLI; the app never reads your ${planName(p)} credentials.`
@@ -473,7 +601,7 @@ export function SettingsDialog({ open, onClose, llm }: { open: boolean; onClose:
               !draft.screening ||
               save.isPending ||
               (isCliProvider(provider) && !cli.data?.logged_in) ||
-              profileSignedOut
+              ownSignedOut
             }
             onClick={() => save.mutate()}
           >

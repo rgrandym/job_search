@@ -153,6 +153,7 @@ function TrackingControls({ result }: { result: MatchResult }) {
   const [note, setNote] = useState(tracking?.note ?? "");
   const [reason, setReason] = useState(tracking?.reason ?? "");
   const save = useMutation({
+    meta: { syncLists: true },
     mutationFn: (v: { status?: "open" | "applied" | "na"; note?: string; reason?: string; stage?: OutcomeStage }) =>
       api.trackJob(job.id, v.status, v.note, { reason: v.reason, stage: v.stage }),
     onSuccess: (t) => {
@@ -302,6 +303,22 @@ function Rejected({ items, what }: { items: Rejection[]; what: string }) {
 }
 
 /** For a posting whose requirements were not checked: fetch it again, or paste its text. */
+/** The posting's text: a preview, and the whole of it on request (nothing is cut). */
+function Description({ text }: { text: string }) {
+  const [full, setFull] = useState(false);
+  const long = text.length > 600 || text.split("\n").length > 6;
+  return (
+    <div className="pt-1 text-[12px] text-muted">
+      <p className={cn("whitespace-pre-line", !full && long && "line-clamp-6")}>{text}</p>
+      {long && (
+        <button className="mt-1 text-[11px] text-accent hover:underline" onClick={() => setFull(!full)}>
+          {full ? "Show less" : `Show full description (${text.split(/\s+/).length} words)`}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function UncheckedPosting({ onRecheck }: { onRecheck: (description?: string) => void }) {
   const [pasting, setPasting] = useState(false);
   const [text, setText] = useState("");
@@ -352,6 +369,8 @@ export function JobCard({
   onRecheck,
   removeLabel = "Remove",
   removeTitle = "Remove from saved jobs (its application record is kept)",
+  removeAtTop = false,
+  removing = false,
   labelable = true,
 }: {
   result: MatchResult;
@@ -364,6 +383,10 @@ export function JobCard({
   onRemove?: () => void;
   removeLabel?: string;
   removeTitle?: string;
+  /** Show the remove button in the card's top-right corner instead of the action row. */
+  removeAtTop?: boolean;
+  /** The remove request is running (the button shows a spinner). */
+  removing?: boolean;
   /** Read this job's full posting again (no text), or judge it on pasted `description`. */
   onRecheck?: (description?: string) => void;
   /** Show "Your call" (only for jobs of the current search, which the label snapshots). */
@@ -371,7 +394,10 @@ export function JobCard({
 }) {
   const { job, verdict, score } = result;
   const [open, setOpen] = useState(false);
-  const [template, setTemplate] = useState("classic");
+  const [template, setTemplate] = useState("original");
+  const [length, setLength] = useState<"auto" | "full" | "junior">("auto");
+  const [headlineChoice, setHeadlineChoice] = useState<{ headline: string; url: string } | null>(null);
+  const [reportOpen, setReportOpen] = useState(true);
   const [emphasis, setEmphasis] = useState<"auto" | "leadership" | "hands_on">("auto");
   const [level, setLevel] = useState<"auto" | "senior" | "junior">("auto");
   const [documentsOpen, setDocumentsOpen] = useState(false);
@@ -380,8 +406,10 @@ export function JobCard({
   const tailorTask = useTaskId();
   const letterTask = useTaskId();
   const tailor = useMutation({
-    mutationFn: () => api.tailor(job.id, template, result, emphasis, level, tailorTask.next()),
+    meta: { syncLists: true },
+    mutationFn: () => api.tailor(job.id, template, result, emphasis, level, length, tailorTask.next()),
     onSuccess: (data) => {
+      setHeadlineChoice(null);
       setDocumentsOpen(true);
       void qc.invalidateQueries({ queryKey: ["tailored-cvs"] });
       if (data.tracking) setTracking(job.id, data.tracking);
@@ -390,7 +418,21 @@ export function JobCard({
       void qc.invalidateQueries({ queryKey: ["saved"] });
     },
   });
+  // The newest saved draft's report, so it is shown again after a reload or in another tab.
+  const drafts = useQuery({ queryKey: ["tailored-cvs", "all"], queryFn: api.allTailoredCVs, staleTime: 60_000 });
+  const savedDraft = drafts.data?.find((d) => d.job_id === job.id && d.report);
+  const report = tailor.data ?? savedDraft?.report ?? null;
+  const pickHeadline = useMutation({
+    meta: { syncLists: true },
+    mutationFn: ({ documentId, headline }: { documentId: string; headline: string }) =>
+      api.editTailoredCV(documentId, { headline }),
+    onSuccess: (view) => {
+      setHeadlineChoice({ headline: view.cv.basics.headline ?? "", url: view.download_url });
+      void qc.invalidateQueries({ queryKey: ["tailored-cvs"] });
+    },
+  });
   const letter = useMutation({
+    meta: { syncLists: true },
     mutationFn: (documentId?: string) => api.coverLetter(job.id, template, result, documentId, letterTask.next()),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["cover-letters"] }),
   });
@@ -554,6 +596,17 @@ export function JobCard({
           )}
         </div>
         <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
+          {onRemove && removeAtTop && (
+            <button
+              className="btn-ghost h-fit py-1 text-[12px] text-bad"
+              title={removeTitle}
+              aria-label={`${removeLabel} ${job.title} at ${job.company}`}
+              disabled={removing}
+              onClick={onRemove}
+            >
+              {removing ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />} {removeLabel}
+            </button>
+          )}
           {verdict && <ScoreBadge value={verdict.fit_score} label="AI fit" />}
           {score && !result.excluded && (
             <div className={cn(verdict && "opacity-60")}>
@@ -572,10 +625,16 @@ export function JobCard({
         {!job.url && <span className="text-[11px] text-faint">No link provided by the source</span>}
         {canTailor && !result.excluded && (
           <>
-            <select className="input w-auto py-1 text-[12px]" value={template} onChange={(e) => setTemplate(e.target.value)}>
-              <option value="classic">Classic</option>
-              <option value="modern">Modern</option>
-              <option value="compact">Compact</option>
+            <select aria-label="CV design" title="Same as my CV: a copy of your Word CV (for a PDF, its Word version). Pick a design only to change the look." className="input w-auto py-1 text-[12px]" value={template} onChange={(e) => setTemplate(e.target.value)}>
+              <option value="original">Design: same as my CV</option>
+              <option value="classic">Classic design</option>
+              <option value="modern">Modern design</option>
+              <option value="compact">Compact design</option>
+            </select>
+            <select aria-label="CV length" title="Automatic keeps every line unless the job is clearly more junior than your experience" className="input w-auto py-1 text-[12px]" value={length} onChange={(e) => setLength(e.target.value as typeof length)}>
+              <option value="auto">Length: automatic</option>
+              <option value="full">Keep full length</option>
+              <option value="junior">Junior role (trim)</option>
             </select>
             <select aria-label="CV emphasis" title="Which evidenced work should lead the CV" className="input w-auto py-1 text-[12px]" value={emphasis} onChange={(e) => setEmphasis(e.target.value as typeof emphasis)}>
               <option value="auto">Emphasis: automatic</option>
@@ -600,7 +659,7 @@ export function JobCard({
         >
           <Mail size={12} /> Cover letter / review CV
         </button>
-        {onRemove && (
+        {onRemove && !removeAtTop && (
           <button className="btn-ghost py-1 text-[12px] text-bad" title={removeTitle} onClick={onRemove}>
             <Trash2 size={12} /> {removeLabel}
           </button>
@@ -615,36 +674,90 @@ export function JobCard({
       <TrackingControls key={`${job.id}:${result.tracking?.note ?? ""}:${result.tracking?.reason ?? ""}`} result={result} />
       {labelable && !result.excluded && <LabelControls jobId={job.id} />}
 
-      {tailor.data && (
+      {report && (
         <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md bg-surface p-2 text-[12px]">
-          <a className="btn-primary py-1 text-[12px]" href={tailor.data.download_url}>
+          <a className="btn-primary py-1 text-[12px]" href={headlineChoice?.url ?? report.download_url}>
             <Download size={12} /> Download .docx
           </a>
-          <span className="text-muted">Word keyword coverage {tailor.data.source_ats_keyword_coverage == null ? "" : `${Math.round(tailor.data.source_ats_keyword_coverage * 100)}% original → `}{Math.round((tailor.data.ats?.keyword_coverage ?? tailor.data.keyword_coverage) * 100)}% tailored · review the wording and claims</span>
-          {tailor.data.missing_keywords.length > 0 && (
-            <span className="min-w-0 text-faint" title="Not in your Master CV: gaps to address truthfully, never to fill in">
-              Gaps: {tailor.data.missing_keywords.join(", ")}
+          {!tailor.data && savedDraft && (
+            <span className="text-faint" title="Saved with this tailored CV">
+              Tailored {new Date(savedDraft.created_at).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}
             </span>
           )}
-          {tailor.data.restored_keywords.length > 0 && (
+          <span className="text-muted">Word keyword coverage {report.source_ats_keyword_coverage == null ? "" : `${Math.round(report.source_ats_keyword_coverage * 100)}% original → `}{Math.round((report.ats?.keyword_coverage ?? report.keyword_coverage) * 100)}% tailored · review the wording and claims</span>
+          <button
+            className="ml-auto flex items-center gap-1 text-muted hover:text-fg"
+            aria-expanded={reportOpen}
+            title={reportOpen ? "Hide the tailoring report" : "Show the tailoring report"}
+            onClick={() => setReportOpen((v) => !v)}
+          >
+            Report <ChevronDown size={12} className={cn("transition-transform", reportOpen && "rotate-180")} />
+          </button>
+          {reportOpen && <>
+          {report.missing_keywords.length > 0 && (
+            <span className="min-w-0 text-faint" title="Job keywords not found word for word in the tailored CV. Requirements written as sentences are judged by the match verdict, not here. If your experience covers one, add it truthfully to the Master CV.">
+              Keywords not found word for word: {report.missing_keywords.join(", ")}
+            </span>
+          )}
+          {report.restored_keywords.length > 0 && (
             <span className="min-w-0 text-faint" title="A left-out bullet carried these keywords, so it was put back">
-              Kept: {tailor.data.restored_keywords.join(", ")}
+              Kept: {report.restored_keywords.join(", ")}
             </span>
           )}
-          {tailor.data.critique.length > 0 && (
+          <p className="basis-full text-[11px] text-faint">
+            {report.trim?.allowed
+              ? `Trimmed for a more junior role (${report.trim.reason}): ${report.left_out.length} line(s) left out.`
+              : "Nothing removed: the most relevant lines lead each section, the rest follow."}
+            {report.trim && !report.trim.allowed ? ` Not trimmed: ${report.trim.reason}.` : ""}
+          </p>
+          {report.headline_options.length > 0 && (
+            <div className="basis-full space-y-1 text-[11px]">
+              <p className="text-muted">
+                Headline: <span className="text-fg">{headlineChoice?.headline ?? report.headline ?? "none"}</span>
+                {!headlineChoice || headlineChoice.headline === report.headline ? " (your own)" : " (chosen; a new Word version was saved)"}
+              </p>
+              <div className="flex flex-wrap gap-1">
+                {[report.headline ?? "", ...report.headline_options].filter(Boolean).map((option, index) => (
+                  <button
+                    key={option}
+                    className={cn("rounded border px-2 py-0.5 hover:border-accent", (headlineChoice?.headline ?? report.headline) === option ? "border-accent text-fg" : "border-border text-muted")}
+                    disabled={pickHeadline.isPending || (headlineChoice?.headline ?? report.headline) === option}
+                    onClick={() => pickHeadline.mutate({ documentId: report.document_id, headline: option })}
+                  >
+                    {index === 0 ? `Keep: ${option}` : option}
+                  </button>
+                ))}
+                {pickHeadline.isPending && <Loader2 size={12} className="animate-spin text-muted" />}
+              </div>
+              {pickHeadline.error && <p className="text-bad">{pickHeadline.error.message}</p>}
+            </div>
+          )}
+          {report.document_notes.map((note) => (
+            <p key={note} className="basis-full text-[11px] text-faint">Word file: {note}</p>
+          ))}
+          {report.left_out.length > 0 && (
             <details className="basis-full text-[11px] text-faint">
-              <summary className="cursor-pointer">Review raised {tailor.data.critique.length} point(s); revised draft created</summary>
-              {tailor.data.critique.map((c) => (
+              <summary className="cursor-pointer">Left out ({report.left_out.length})</summary>
+              {report.left_out.map((line) => (
+                <p key={line}>· {line}</p>
+              ))}
+            </details>
+          )}
+          {report.critique.length > 0 && (
+            <details className="basis-full text-[11px] text-faint">
+              <summary className="cursor-pointer">Review of the first draft: {report.critique.length} point(s), used for the revised draft you downloaded (it never removes lines, changes the design or headline, or adds facts)</summary>
+              {report.critique.map((c) => (
                 <p key={c}>· {c}</p>
               ))}
             </details>
           )}
-          {tailor.data.ats?.warnings.map((w) => (
+          {report.ats?.warnings.map((w) => (
             <p key={w} className="basis-full text-[11px] text-warn">
               ATS: {w}
             </p>
           ))}
-          <Rejected items={tailor.data.rejections} what="change(s)" />
+          <Rejected items={report.rejections} what="change(s)" />
+          </>}
         </div>
       )}
       {tailor.isPending && <TaskProgress id={tailorTask.id} className="mt-2" />}
@@ -698,9 +811,7 @@ export function JobCard({
           {score?.notes.map((n) => (
             <p key={n} className="text-[11px] text-faint">{n}</p>
           ))}
-          {job.description && (
-            <p className="line-clamp-6 whitespace-pre-line pt-1 text-[12px] text-muted">{job.description}</p>
-          )}
+          {job.description && <Description text={job.description} />}
         </div>
       )}
     </article>

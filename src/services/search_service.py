@@ -57,7 +57,15 @@ from src.jobs.sources.browser import BrowserFetcher
 from src.jobs.sources.gmail_alerts import GmailAlertSource, GmailAuth
 from src.jobs.sources.pages import PostingPages
 from src.jobs.sources.public_boards import LinkedInSource
-from src.services import company_discovery, cv_service, history, labels, learning, tracker
+from src.services import (
+    company_discovery,
+    cv_service,
+    history,
+    labels,
+    learning,
+    saved,
+    tracker,
+)
 from src.services.intent import get_intent
 from src.services.workspace import Workspace
 from src.tools.search_tools import board_terms, company_key, shares_role_words
@@ -516,7 +524,9 @@ async def _say(emit: Emit, stage: str, message: str, **extra: Any) -> None:
 async def _ensure_company_boards(ws: Workspace, emit: Emit) -> None:
     """Company sites selected and directory companies not checked yet (first use, or a pass
     that was stopped): find their job boards now, so every board is searched. Takes about 10
-    minutes the first time; later searches skip this (results are kept for 30 days)."""
+    minutes the first time; later searches skip this (results are kept for 30 days). The
+    hand-verified employers are added to the watch-list first, at no cost."""
+    await asyncio.to_thread(company_discovery.add_known_boards, ws.settings)
     if _stopped() or not company_discovery.needs_discovery(ws.settings):
         return
     loop, stop = asyncio.get_running_loop(), _stop.get()
@@ -1009,11 +1019,13 @@ async def refresh_profile(
 
 
 def remove_result(ws: Workspace, job_id: str, history_id: str | None) -> bool:
-    """Delete a posting from the current results and from its search in the history. Its
-    tracker status and label are kept: this only tidies the list."""
+    """Delete a posting from the current results, every retained search (`history_id`, the
+    search on screen, included) and the saved jobs, so no list shows it again. Its tracker
+    entry (an application, a status, a note) and its label are kept: the register of
+    applications is never changed by tidying a list."""
     removed = ws.last_report is not None and history.drop_job(ws.last_report, job_id)
-    if history_id is not None:
-        removed = history.remove_job(ws, history_id, job_id) or removed
+    removed = history.remove_job_everywhere(ws, job_id) > 0 or removed
+    removed = saved.remove(ws, [job_id]) > 0 or removed
     return removed
 
 

@@ -22,6 +22,8 @@ from src.core.llm.types import (
     LLMConfig,
     LLMError,
     ModelUsage,
+    NativeAgentModel,
+    NativeTurn,
     Role,
     ToolCall,
     ToolSpec,
@@ -39,6 +41,8 @@ __all__ = [
     "LLMConfig",
     "LLMError",
     "ModelUsage",
+    "NativeAgentModel",
+    "NativeTurn",
     "Role",
     "ToolCall",
     "ToolSpec",
@@ -69,8 +73,17 @@ def make_structured(
     usage_sink: UsageSink | None = None,
     purpose: str = "structured output",
 ) -> LLMProvider:
-    """Structured-output provider for `cfg.provider`, reporting its calls as task progress."""
-    return _Reported(_backend(cfg, role, usage_sink, purpose), purpose, cfg.model_for(role))
+    """Structured-output provider for `cfg.provider`, reporting its calls as task progress.
+    Usage reports name `cfg.provider`: roles may use different providers."""
+    sink = _stamped(usage_sink, cfg.provider) if usage_sink is not None else None
+    return _Reported(_backend(cfg, role, sink, purpose), purpose, cfg.model_for(role))
+
+
+def _stamped(usage_sink: UsageSink, provider: str) -> UsageSink:
+    def sink(usage: ModelUsage) -> None:
+        usage_sink(usage.model_copy(update={"provider": provider}))
+
+    return sink
 
 
 def _backend(

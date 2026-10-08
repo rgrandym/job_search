@@ -462,10 +462,33 @@ export interface TailoredCVView {
     projects: { id: string; name: string; description: string; skills: string[] }[];
     languages: string[];
   };
+  original_headline: string | null;
+  headline_options: string[];
   ats: ATSReport | null;
   source_ats_keyword_coverage: number | null;
   reviewed: boolean;
   imported: boolean;
+  /** What tailoring did; kept with the draft (null for an imported Word CV). */
+  report: TailorReport | null;
+}
+
+/** What tailoring did, shown under the job: coverage, keywords, headlines, rejections. */
+export interface TailorReport {
+  document_id: string;
+  headline: string | null;
+  headline_options: string[];
+  download_url: string;
+  keyword_coverage: number;
+  missing_keywords: string[];
+  restored_keywords: string[];
+  critique: string[];
+  ats: ATSReport | null;
+  source_ats_keyword_coverage: number | null;
+  trim: { allowed: boolean; reason: string } | null;
+  left_out: string[];
+  document_notes: string[];
+  rejected: number;
+  rejections: { source_id: string; reason: string | null }[];
 }
 
 /** What the candidate's publications (and patents, grants, talks, awards) show employers. */
@@ -652,10 +675,23 @@ export interface LLMView {
   profile_effort: Effort;
   /** The profile model's own provider (null: `provider`). Used only with a profile model. */
   profile_provider: Provider | null;
+  /** Tailored CVs ("": the quality model). */
+  cv_model: string;
+  cv_effort: Effort;
+  /** The CV model's own provider (null: `provider`). Used only with a CV model. */
+  cv_provider: Provider | null;
+  /** Cover letters ("": the CV model, else the quality model). */
+  letter_model: string;
+  letter_effort: Effort;
+  /** The letter model's own provider (null: `provider`). Used only with a letter model. */
+  letter_provider: Provider | null;
   key_set: boolean;
   ready: boolean;
   /** Credentials available for the provider that builds the profile. */
   profile_ready: boolean;
+  /** Credentials available for the providers that write CVs and letters. */
+  cv_ready: boolean;
+  letter_ready: boolean;
 }
 
 export interface CVAsset {

@@ -1,6 +1,9 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { Heartbeat, JobTracking, MatchReport, ProfileSummary, ProgressEvent, SearchOutcome, SearchQuery } from "../lib/types";
+import type { SearchRequest } from "../lib/api";
+import type {
+  Heartbeat, HistoryItem, JobTracking, MatchReport, ProfileSummary, ProgressEvent, SearchOutcome, SearchQuery,
+} from "../lib/types";
 
 export const EMPTY_QUERY: SearchQuery = {
   titles: [],
@@ -49,6 +52,9 @@ interface SearchState {
   disabledSources: string[];
   /** Set while showing a search reopened from the history. */
   openedFrom: { id: string; label: string; createdAt: string; models: string | null } | null;
+  /** The saved search on screen last, reopened on reload and in new tabs (persisted).
+   *  undefined: never recorded (the newest saved search is opened); null: the user cleared it. */
+  lastSearchId: string | null | undefined;
   /** Id of the running search (or continuation), so it can be stopped. */
   runId: string | null;
   error: string | null;
@@ -101,6 +107,7 @@ export const useSearch = create<SearchState>()(
       profileKey: null,
       disabledSources: ["demo"],
       openedFrom: null,
+      lastSearchId: undefined,
       runId: null,
       error: null,
       selected: [],
@@ -145,7 +152,31 @@ export const useSearch = create<SearchState>()(
         threshold: s.threshold,
         profileKey: s.profileKey,
         disabledSources: s.disabledSources,
+        lastSearchId: s.lastSearchId,
       }),
     },
   ),
 );
+
+// Whatever shows a saved search's results (a search, a continuation, the assistant, the
+// history list) makes it the one reopened next time.
+useSearch.subscribe((s) => {
+  const id = s.outcome?.history_id;
+  if (id && id !== s.lastSearchId) useSearch.setState({ lastSearchId: id });
+});
+
+/** Store fields that show a search reopened from the history. */
+export function openedSearch(request: SearchRequest, outcome: SearchOutcome, item: HistoryItem): Partial<SearchState> {
+  return {
+    query: profileSearchQuery({ ...EMPTY_QUERY, ...request.query }),
+    useCv: request.use_cv,
+    smart: request.smart,
+    threshold: request.threshold,
+    profileKey: request.profile_key ?? null,
+    outcome,
+    log: [],
+    error: null,
+    openedFrom: { id: item.id, label: item.label, createdAt: item.created_at, models: item.models },
+    lastSearchId: item.id,
+  };
+}

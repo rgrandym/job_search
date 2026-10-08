@@ -29,8 +29,11 @@ It opens http://localhost:5173. Running it again restarts both servers cleanly; 
 
 1. **Settings** (top right): pick Claude, Claude Code (Pro/Max), Codex (ChatGPT), or OpenAI API,
    then choose the models, each with its own effort: the **profile** model (the profile
-   summary every job is judged against; blank uses the quality model; it may use another signed-in provider, e.g. Opus through Claude Code while Codex screens), the **quality** model (CV reading and tailoring, cover letters, second opinions on matches and near the threshold, the
-   assistant) and the **screening** model (first-pass job matching, hundreds of calls per
+   summary every job is judged against), the **CV writing** model (tailored CVs) and the
+   **cover letter** model (blank uses the CV writing model). Each of these three is optional
+   (blank uses the quality model) and may use another signed-in provider, e.g. Opus through
+   Claude Code while Codex searches and matches. Then the **quality** model (CV reading, second
+   opinions on matches and near the threshold, the assistant) and the **screening** model (first-pass job matching, hundreds of calls per
    search). Claude Code and Codex drive your local, signed-in CLI (`claude -p` / `codex exec`)
    and need no API key; usage counts against your plan's limits. The UI recommends a setup per
    provider (e.g. Sol + Luna, or Sonnet + Haiku); check a change on your own past verdicts with
@@ -78,7 +81,7 @@ python .agent/skills/job_search/scoring_engine.py --cv data/master_cv.json --job
 | Reed | Official API (`JOBSEARCH_REED_API_KEY`) |
 | CV-Library | Official API, partner key (`JOBSEARCH_CV_LIBRARY_API_KEY`) |
 | Adzuna | Official UK search API (`JOBSEARCH_ADZUNA_APP_ID` and `JOBSEARCH_ADZUNA_APP_KEY`); [register](https://developer.adzuna.com/) to get both. Results contain description snippets. |
-| Company sites | Public ATS feeds (Greenhouse, Lever, Ashby, Workable, SmartRecruiters, Recruitee, Personio, Teamtailor, Pinpoint), Workday, iCIMS and BambooHR careers endpoints within robots.txt, schema.org JSON-LD for other careers pages. The app finds the boards from the BioPharmGuy UK list; add your own companies under the company-sites toggle |
+| Company sites | Public ATS feeds (Greenhouse, Lever, Ashby, Workable, SmartRecruiters, Recruitee, Personio, Teamtailor, Pinpoint), Workday, iCIMS, BambooHR, SuccessFactors, Phenom, Oracle, Jobvite and Radancy CWS careers sites within robots.txt, schema.org JSON-LD for other careers pages. The app finds the boards from the BioPharmGuy UK list; add your own companies under the company-sites toggle |
 | LinkedIn | Public (logged-out) job search: one search per title, a few pages, a request every 2.5 s; full postings fetched only for the shortlist. Stops quietly if LinkedIn asks it to slow down. |
 | Totaljobs | Public search pages (first page per title and place, within robots.txt); judged from snippets. |
 | jobs.ac.uk | Public search (UK-wide; universities, institutes, spinouts), with closing dates. |

@@ -104,7 +104,8 @@ def load(ws: Workspace) -> dict[str, TrackedJob]:
 def _save(ws: Workspace, entries: dict[str, TrackedJob], today: date) -> None:
     cutoff = (today - timedelta(days=FORGET_SEEN_DAYS)).isoformat()
     kept = [
-        e for e in entries.values()
+        e
+        for e in entries.values()
         if e.status != "seen" or e.last_seen >= cutoff or e.document_postings
     ]
     path = _path(ws)
@@ -346,8 +347,11 @@ def remember_document_job(ws: Workspace, job: JobPosting, cv_file: str | None = 
 def document_job(ws: Workspace, job_id: str) -> JobPosting | None:
     """Find the original posting of a previously generated document."""
     return next(
-        (entry.document_postings[job_id] for entry in load(ws).values()
-         if job_id in entry.document_postings),
+        (
+            entry.document_postings[job_id]
+            for entry in load(ws).values()
+            if job_id in entry.document_postings
+        ),
         None,
     )
 

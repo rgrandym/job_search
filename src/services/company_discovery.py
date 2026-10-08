@@ -1,10 +1,17 @@
 """Find the job feed behind each company in a directory and keep `companies.json` current.
 
-For every company: big pharma whose Workday board is known is taken as is; otherwise the
+For every company: an employer whose feed was verified by hand (`_KNOWN`, mostly big pharma,
+CROs and tools makers behind Workday) is taken as is; otherwise the
 homepage, then its careers links (two hops at most) are read, checking robots.txt, until an ATS
 board is found (`companies.detect_boards`) and answers. A homepage without a careers link gets
 the usual paths tried (/careers, /jobs, /join-us, /vacancies). A page carrying schema.org
-JobPosting JSON-LD for at least two jobs is the fallback.
+JobPosting JSON-LD for at least two jobs is the fallback. Careers sites on SuccessFactors,
+Phenom or Radancy CWS are recognised by the assets they load (`detect_boards`). A page on a
+platform the app cannot read (an older SuccessFactors site, Avature, Taleo, Eightfold,
+Salesforce, a recruiter's talent community) is named in the note, so the user knows why.
+
+The hand-verified employers also join the watch-list themselves (origin "known",
+`add_known_boards`), whether or not the directory lists them.
 
 Companies the user adds by hand (`add_company`: a name and its website, careers page or ATS
 link) go through the same search at once and are kept with no `origin`: discovery never
@@ -44,6 +51,8 @@ from src.core.config import Settings, get_settings
 from src.jobs.models import SearchQuery
 from src.jobs.sources.base import HttpFetcher, SourceError, extract_jsonld_jobs, html_to_text
 from src.jobs.sources.companies import (
+    URL_KINDS,
+    AtsKind,
     CompanyBoard,
     CompanyCareersSource,
     detect_boards,
@@ -59,17 +68,104 @@ MAX_LINKS = 3  # careers-looking links followed per page
 STANDARD_PATHS = ("/careers", "/jobs", "/join-us", "/vacancies")
 # Verifies a detected board answers, without opening postings (no title matches this).
 PROBE_QUERY = SearchQuery(titles=["zz discovery probe"])
-# Big pharma whose careers sites front a Workday board (verified 2026-10-01). Their homepages
-# rarely link to Workday directly, so crawling would miss them.
-KNOWN_BOARDS: dict[str, str] = {
-    "astrazeneca": "https://astrazeneca.wd3.myworkdayjobs.com/Careers",
-    "gsk": "https://gsk.wd5.myworkdayjobs.com/GSKCareers",
-    "pfizer": "https://pfizer.wd1.myworkdayjobs.com/PfizerCareers",
-    "roche": "https://roche.wd3.myworkdayjobs.com/roche-ext",
-    "sanofi": "https://sanofi.wd3.myworkdayjobs.com/SanofiCareers",
-    "moderna therapeutics": "https://modernatx.wd1.myworkdayjobs.com/M_tx",
-    "novartis": "https://novartis.wd3.myworkdayjobs.com/Novartis_Careers",
-}
+KNOWN_ORIGIN = "known"
+_WD = "myworkdayjobs.com"
+# UK life-science employers whose job feed was verified by hand (2026-10-08: answers, robots.txt
+# allows it, UK postings listed). Most front a Workday board their homepage does not link to, or
+# block automated reading (Lonza, Agilent), so crawling misses them. They join the watch-list
+# (origin "known") and answer `add_company` by name. (name, ats, url or token, other names)
+_KNOWN: list[tuple[str, AtsKind, str, tuple[str, ...]]] = [
+    ("AstraZeneca", "workday", f"https://astrazeneca.wd3.{_WD}/Careers", ()),
+    ("GSK", "workday", f"https://gsk.wd5.{_WD}/GSKCareers", ()),
+    ("Pfizer", "workday", f"https://pfizer.wd1.{_WD}/PfizerCareers", ()),
+    ("Roche", "workday", f"https://roche.wd3.{_WD}/roche-ext", ()),
+    ("Sanofi", "workday", f"https://sanofi.wd3.{_WD}/SanofiCareers", ()),
+    ("Moderna", "workday", f"https://modernatx.wd1.{_WD}/M_tx", ("moderna therapeutics",)),
+    ("Novartis", "workday", f"https://novartis.wd3.{_WD}/Novartis_Careers", ()),
+    ("MSD", "workday", f"https://msd.wd5.{_WD}/SearchJobs", ("merck sharp & dohme",)),
+    ("Bristol Myers Squibb", "workday", f"https://bristolmyerssquibb.wd5.{_WD}/BMS", ("bms",)),
+    ("Johnson & Johnson", "workday", f"https://jj.wd5.{_WD}/JJ", ("janssen", "j&j")),
+    ("Takeda", "workday", f"https://takeda.wd502.{_WD}/External", ()),
+    ("Amgen", "workday", f"https://amgen.wd1.{_WD}/Careers", ()),
+    ("Biogen", "workday", f"https://biibhr.wd3.{_WD}/external", ()),
+    ("Gilead Sciences", "workday", f"https://gilead.wd1.{_WD}/gileadcareers", ("gilead",)),
+    ("Regeneron", "workday", f"https://regeneron.wd1.{_WD}/Careers", ()),
+    ("Vertex Pharmaceuticals", "workday", f"https://vrtx.wd501.{_WD}/vertex_careers", ("vertex",)),
+    ("Eisai", "workday", f"https://eisai.wd5.{_WD}/Eisai", ()),
+    ("Viatris", "workday", f"https://viatris.wd5.{_WD}/External", ()),
+    ("Sandoz", "workday", f"https://sandoz.wd103.{_WD}/SANDOZ_Careers", ()),
+    ("CSL Seqirus", "workday", f"https://csl.wd1.{_WD}/CSL_External", ("csl", "seqirus")),
+    ("Indivior", "workday", f"https://indivior.wd3.{_WD}/INDIVIOR", ()),
+    ("Galderma", "workday", f"https://galderma.wd3.{_WD}/External", ()),
+    ("Autolus Therapeutics", "workday", f"https://autolus.wd103.{_WD}/External", ("autolus",)),
+    ("Lonza", "workday", f"https://lonza.wd3.{_WD}/Lonza_Careers", ()),
+    ("Thermo Fisher", "workday", f"https://thermofisher.wd5.{_WD}/ThermoFisherCareers",
+     ("thermo fisher scientific",)),
+    ("Danaher", "workday", f"https://danaher.wd1.{_WD}/DanaherJobs",
+     ("abcam", "cytiva", "leica biosystems", "beckman coulter")),
+    ("Agilent", "workday", f"https://agilent.wd5.{_WD}/Agilent_Careers",
+     ("agilent technologies",)),
+    ("Illumina", "workday", f"https://illumina.wd1.{_WD}/illumina-careers", ()),
+    ("Qiagen", "workday", f"https://qiagen.wd502.{_WD}/QIAGEN", ()),
+    ("Bio-Techne", "workday", f"https://biotechne.wd5.{_WD}/biotechne", ()),
+    ("Revvity", "workday", f"https://revvity.wd103.{_WD}/External", ("perkinelmer",)),
+    ("Sartorius", "workday", f"https://sartorius.wd3.{_WD}/SartoriusCareers", ()),
+    ("IQVIA", "workday", f"https://iqvia.wd1.{_WD}/IQVIA", ()),
+    ("ICON", "workday", f"https://icon.wd3.{_WD}/broadbean_external", ("icon plc",)),
+    ("Parexel", "workday", f"https://parexel.wd1.{_WD}/PAREXEL_External_Careers", ()),
+    ("Syneos Health", "workday", f"https://syneoshealth.wd12.{_WD}/Syneos_Health_External_Site",
+     ()),
+    ("Labcorp", "workday", f"https://labcorp.wd1.{_WD}/External", ()),
+    ("Fortrea", "workday", f"https://fortrea.wd1.{_WD}/fortrea", ()),
+    ("Catalent", "workday", f"https://catalent.wd1.{_WD}/External", ()),
+    ("Medtronic", "workday", f"https://medtronic.wd1.{_WD}/MedtronicCareers", ()),
+    ("Abbott", "workday", f"https://abbott.wd5.{_WD}/abbottcareers", ()),
+    ("GE HealthCare", "workday", f"https://gehc.wd5.{_WD}/GEHC_ExternalSite", ("ge healthcare",)),
+    ("Eurofins", "smartrecruiters", "Eurofins", ()),
+    ("Recursion", "greenhouse", "recursionpharmaceuticals", ("exscientia",)),
+    ("Owkin", "ashby", "owkin", ()),
+    # Careers sites read through their own search (career_sites.py), checked 2026-10-08.
+    ("Bayer", "successfactors", "https://jobs.bayer.com", ()),
+    ("Boehringer Ingelheim", "successfactors", "https://jobs.boehringer-ingelheim.com",
+     ("boehringer",)),
+    ("Astellas", "successfactors", "https://careers.astellas.com", ("astellas pharma",)),
+    ("UCB", "phenom", "https://careers.ucb.com/global/en", ("ucb pharma",)),
+    ("Merck KGaA", "phenom", "https://careers.emdgroup.com/us/en",
+     ("merck group", "emd group", "milliporesigma", "merck life science")),
+    ("Siemens Healthineers", "phenom", "https://careers.siemens-healthineers.com/global/en", ()),
+    ("Hikma", "phenom", "https://talents.hikma.com/us/en", ("hikma pharmaceuticals",)),
+    ("Oxford Nanopore", "oracle",
+     "https://ejnh.fa.em2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1",
+     ("oxford nanopore technologies",)),
+    ("BioMarin", "jobvite", "biomarin", ("biomarin pharmaceutical",)),
+    ("Charles River Laboratories", "cws", "https://jobs.criver.com/en-gb/job-search-results/",
+     ("charles river",)),
+]  # fmt: skip
+# Platforms a careers page can sit on that the app cannot read, so the user is told why.
+_UNREADABLE: list[tuple[str, re.Pattern[str]]] = [
+    (
+        "this is a recruitment agency's talent community (a sign-up pool), not the company's "
+        "job list",
+        re.compile(r"talent-community\.com|talent-pool\.com|randstadsourceright", re.I),
+    ),
+    *(
+        (f"its jobs are on {name}, which the app cannot read yet", re.compile(pattern, re.I))
+        for name, pattern in (
+            ("an older SAP SuccessFactors site", r"career\d*\.successfactors\.(?:com|eu)/career"),
+            ("Avature", r"\.avature\.net"),
+            ("Taleo", r"\.taleo\.net"),
+            ("Eightfold", r"\.eightfold\.ai|/api/apply/v2/jobs"),
+            ("Salesforce", r"\.my\.salesforce-sites\.com|\.my\.site\.com"),
+        )
+    ),
+]
+# Shown when nothing readable is found for a company the user adds.
+_PASTE_HINT = (
+    "Open one of its job postings and paste the address of the job list behind it instead "
+    "(on myworkdayjobs.com, greenhouse.io, lever.co, ashbyhq.com, smartrecruiters.com, "
+    "workable.com, teamtailor.com, bamboohr.com, pinpointhq.com, recruitee.com, personio, "
+    "jobs.jobvite.com or oraclecloud.com, or a SuccessFactors or Phenom careers site)"
+)
 _CAREERS_HINT = re.compile(
     r"career|vacanc|\bjobs?\b|join[\s-]*(?:us|our|the)|work[\s-]*(?:with|for)[\s-]*us"
     r"|opportunit|openings|recruit",
@@ -166,13 +262,50 @@ def careers_links(page_html: str, base_url: str) -> list[str]:
     return links[:MAX_LINKS]
 
 
+def known_boards() -> list[CompanyBoard]:
+    """The hand-verified employers as watch-list entries."""
+    return [_known(name, ats, ref, KNOWN_ORIGIN) for name, ats, ref, _ in _KNOWN]
+
+
+def known_board(name: str, origin: str | None) -> CompanyBoard | None:
+    """The verified feed of a company known by this name (or one of its other names)."""
+    key = " ".join(name.lower().split())
+    for known, ats, ref, aliases in _KNOWN:
+        if key == known.lower() or key in aliases:
+            return _known(name, ats, ref, origin)
+    return None
+
+
+def _known(name: str, ats: AtsKind, ref: str, origin: str | None) -> CompanyBoard:
+    by_url = ats in URL_KINDS
+    return CompanyBoard(
+        name=name, ats=ats, url=ref if by_url else None, token=None if by_url else ref,
+        origin=origin,
+    )  # fmt: skip
+
+
+def add_known_boards(settings: Settings) -> None:
+    """Keep the hand-verified employers on the watch-list (written only when it changes)."""
+    path = settings.companies_path
+    existing = load_companies(path) if path.exists() else []
+    merged = merge_boards(existing, known_boards(), KNOWN_ORIGIN)
+    if merged != existing:
+        save_companies(path, merged)
+
+
+def unreadable_platform(page: str) -> str | None:
+    """Why a careers page with jobs on it gives no feed: the platform it sits on, if known."""
+    return next((note for note, pattern in _UNREADABLE if pattern.search(page)), None)
+
+
 def discover_board(
     source: CompanyCareersSource, company: DirectoryCompany, origin: str | None
 ) -> tuple[CompanyBoard | None, str]:
     """The company's job feed (or None) and a note on how it was found or why not."""
-    if known := KNOWN_BOARDS.get(company.name.lower()):
-        return CompanyBoard(name=company.name, ats="workday", url=known, origin=origin), "known"
+    if known := known_board(company.name, origin):
+        return known, "known"
     queue, seen, guessed = [company.website], set[str](), set[str]()
+    platform = unreadable_platform(company.website)
     jsonld_url: str | None = None
     note = "no careers link on the homepage"
     for hop in range(MAX_HOPS):
@@ -187,6 +320,7 @@ def discover_board(
                     note = str(exc)[:200]
                 continue
             loaded = True
+            platform = platform or unreadable_platform(page)
             if hop:
                 note = "careers pages have no readable job feed"
             for board in detect_boards(page, company.name, origin, page_url=url):
@@ -209,7 +343,7 @@ def discover_board(
     if jsonld_url:
         board = CompanyBoard(name=company.name, ats="careers_page", url=jsonld_url, origin=origin)
         return board, "schema.org JobPosting"
-    return None, note
+    return None, platform or note
 
 
 def merge_boards(
@@ -283,6 +417,7 @@ class BoardView(BaseModel):
 
 def list_boards(settings: Settings) -> list[BoardView]:
     """The job boards company searches read, by company name (switch them off per search)."""
+    add_known_boards(settings)
     path = settings.companies_path
     boards: dict[str, BoardView] = {}
     for c in load_companies(path) if path.exists() else []:
@@ -393,6 +528,7 @@ def _save(
     watch_path = settings.companies_path
     existing = load_companies(watch_path) if watch_path.exists() else []
     watch_list = merge_boards(existing, boards, directory)
+    watch_list = merge_boards(watch_list, known_boards(), KNOWN_ORIGIN)
     save_companies(watch_path, watch_list)
     return DiscoveryReport(
         companies=len(companies),
@@ -440,7 +576,9 @@ def add_company(
     if board is None:
         board, note = discover_board(source, DirectoryCompany(name=name, website=url), None)
     if board is None:
-        raise ValueError(f"No readable job list found for {name}: {note}")
+        if "403 Forbidden" in note:
+            note = "the site refuses automated reading (403)"
+        raise ValueError(f"No readable job list found for {name}: {note}. {_PASTE_HINT}")
     path = settings.companies_path
     existing = load_companies(path) if path.exists() else []
     save_companies(path, [*(b for b in existing if b.name.lower() != name.lower()), board])

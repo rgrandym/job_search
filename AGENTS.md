@@ -45,13 +45,16 @@ never change a search; the sidebar's **Your labels** compares each model setup w
 Its **Learn from your labels** section (`services/learning.py`) turns labels and notes into
 general preferences (requirements the CV lacks, seniority floor, target roles, transferable
 strengths, adjacent role families); the user accepts each, and every search's profile gets them.
-The LLM provider (Claude API, Claude Code CLI, OpenAI/Codex, OpenRouter) and two models,
-each with its own effort, are chosen in Settings:
+The LLM provider (Claude API, Claude Code CLI, OpenAI/Codex, OpenRouter) and a model per task,
+each with its own effort, are chosen in Settings. Profile, CV and letter models may run on
+another provider than search and matching (e.g. Opus through Claude Code while Codex screens):
 
 | Role | Used for | Calls |
 | --- | --- | --- |
 | **profile** | profile summary and role families (optional; blank = the quality model and its effort; may use its own provider, `profile_provider`) | once per CV and role family |
-| **quality** | CV parsing, tailoring plan + review, cover letters, evidence extraction, second opinions on matches and near the threshold, the assistant's default | rare, accuracy-critical |
+| **cv** | tailored CVs: JD analysis, plan, review and revision (optional; blank = the quality model; `cv_provider`) | per tailored CV |
+| **letter** | cover letters (optional; blank = the CV model, else the quality model; `letter_provider`) | per letter |
+| **quality** | CV parsing, evidence extraction, second opinions on matches and near the threshold, the assistant's default, and writing tasks without their own model | rare, accuracy-critical |
 | **screening** | the job_matcher's first pass (batches of 3) | hundreds per search |
 
 ## Buttons and assistant share services
@@ -60,7 +63,15 @@ Search, screening, tailoring, cover letters, saving and tracking call `src/servi
 directly from buttons or from the single assistant (`src/agents/`). The assistant can
 select the configured quality or screening model, another tool-capable model from the
 current provider's catalogue, or a connected Claude Code model per turn. Its completed conversation
-turns are saved under `data/chat_sessions/`; its model calls appear in live usage.
+turns are saved under `data/chat_sessions/` (recent turns with their tool calls and results);
+its model calls appear in live usage. Claude Code and Codex models run natively: the CLI's own
+agent loop calls the app's tools through `POST /api/mcp/<run token>` (`src/agents/mcp.py`, valid
+only during that run) with its built-in shell, file, web and similar tools off, and resumes its
+own session on each turn (`src/core/llm/native.py`). API models (Claude, OpenAI, OpenRouter)
+use their native tool calling in `runtime.py`'s loop.
+`edit_cv` also writes bullet changes to a Word CV's own file (`services/cv_document.py`). An uploaded CV
+is one CV: its file and its copy in `output/cvs/` are kept identical (the one changed last wins)
+and its id never changes (`data/cv_ids.json`), so its parse, profiles and documents stay attached.
 
 | Tool | Does |
 | --- | --- |
@@ -68,7 +79,9 @@ turns are saved under `data/chat_sessions/`; its model calls appear in live usag
 | `actions.py` / `actions_more.py` tools | search and results, jobs, documents, review queues, profiles, tracker, companies and history via services |
 | `update_search_intent` | merge patch of the career intent |
 | `update_preferences` | merge patch of the CV's search preferences |
-| `propose_cv_facts` | the user's words -> evidence review queue; the user accepts each fact |
+| `update_profile` | edits a saved profile as the user asks (`patch`, or `append` to add list items) |
+| `read_cv` / `edit_cv` | the selected CV in full with ids; targeted edits by id (`src/cv/edits.py`: add/reword/remove a bullet, edit/add/remove a role, set a section) |
+| `propose_cv_facts` | a long pasted document -> evidence review queue; the user accepts each fact |
 
 The **job_matcher** is not a chat agent: it is the screening model inside `run_search`
 (`src/jobs/screener.py`). `python -m src.services.model_compare` (or `/compare_models` with `model_compare.toml`)
@@ -84,7 +97,8 @@ UI filters ─▶ SearchQuery          career intent (services/intent, per CV)
         │
         ▼  services/search_service.run_search
 1 capture     sources: Reed · CV-Library (1 query per title, radius, salary) · company ATS feeds
-              (Greenhouse … Workday, iCIMS; boards found by services/company_discovery,
+              (Greenhouse … Workday, iCIMS; SuccessFactors, Phenom, Oracle, Jobvite, CWS
+              careers sites; boards found by services/company_discovery,
               run before capture when companies are unchecked)
               · LinkedIn public search · Totaljobs · jobs.ac.uk · NHS Jobs
               · LinkedIn/Indeed alert emails & saved postings · demo           → JobPosting[]
@@ -132,10 +146,13 @@ No LLM configured → steps 4–5 are skipped and the report says it shows pre-f
 upload (.pdf/.docx/.md/.txt) ─▶ data/cvs/ (stored unchanged; no parsing or LLM call)
 select CV + request a CV-powered action ─pypdf/python-docx─▶ text ─LLM─▶ MasterCV
 job from results ─▶ tailor.analyze_jd ─▶ propose_plan (LLM, steered by the job_matcher verdict)
-─▶ apply_plan (guards: source ids, no new numbers, skills only from the source bullet, headline
-within the level and roles held, summary skills/numbers in the CV; dropped keyword bullets put
-back) ─▶ critique_cv (LLM, second reader) ─▶ revise_plan ─▶ apply_plan ─▶ TailoredCV
-─▶ export_docx ─▶ output/<Name>_<Company>.docx ─▶ ats.check_docx (read-back)
+─▶ apply_plan (guards: source ids, no new numbers, skills only from the source bullet, summary
+skills/numbers in the CV; headline kept, up to 4 checked headline_options offered; every bullet
+kept and reordered unless the length choice or assess_trim allows trimming) ─▶ critique_cv (LLM, second reader)
+─▶ revise_plan ─▶ apply_plan ─▶ TailoredCV
+─▶ docx_original.write_like_original (a copy of the CV's Word design, also for a PDF CV's Word
+version; templates only when chosen)
+─▶ output/cvs/<Name>_<Company>.docx ─▶ ats.check_docx (read-back)
                                                   └─▶ tracker: remember the CV; only the user marks Applied
 job ─▶ cover_letter.draft_letter (LLM; motivation only from the career intent) ─▶ apply_letter
 (each paragraph cites CV ids; numbers/skills from them) ─▶ <Name>_<Company>_cover_letter.docx
@@ -148,6 +165,9 @@ document ─▶ enrichment.propose (LLM; quotes checked against the document) �
 - Only `src/core/llm/` and `src/core/llm_provider.py` talk to model APIs.
 - Whether a job matches is the job_matcher's semantic verdict, not keyword overlap. Hard
   constraints stay deterministic.
+- Tailored CVs keep the original's design, headline (suggestions are offered) and publications,
+  and remove nothing unless the user chose a junior length or `tailor.assess_trim` finds a
+  clearly more junior role (see CLAUDE.md, Tailored CV Rules).
 - Tailoring never invents facts. Don't relax `tailor._fabrication_reason`, the headline and
   summary guards, `cover_letter.apply_letter` or `enrichment.check_proposals`.
 - Career intent is what the user wants, never evidence of what they can do. Outcome review

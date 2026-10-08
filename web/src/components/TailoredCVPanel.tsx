@@ -10,6 +10,7 @@ function Editor({ document, onSaved }: { document: TailoredCVView; onSaved: () =
   const [summary, setSummary] = useState(document.cv.basics.summary ?? "");
   const [bullets, setBullets] = useState<Record<string, string>>({});
   const save = useMutation({
+    meta: { syncLists: true },
     mutationFn: () => {
       const changed = Object.fromEntries(Object.entries(bullets).filter(([id, text]) =>
         document.cv.experience.some((role) => role.bullets.some((bullet) => bullet.id === id && bullet.text !== text)),
@@ -28,6 +29,17 @@ function Editor({ document, onSaved }: { document: TailoredCVView; onSaved: () =
       <label className="block">Headline
         <input className="input mt-1 w-full" value={headline} onChange={(e) => setHeadline(e.target.value)} />
       </label>
+      {document.headline_options.length > 0 && (
+        <div className="flex flex-wrap gap-1 text-[11px]">
+          <span className="text-faint">Suggestions:</span>
+          {[document.original_headline ?? "", ...document.headline_options].filter(Boolean).map((option, index) => (
+            <button key={option} type="button" onClick={() => setHeadline(option)}
+              className={headline === option ? "rounded border border-accent px-2 py-0.5 text-fg" : "rounded border border-border px-2 py-0.5 text-muted hover:border-accent"}>
+              {index === 0 ? `Your own: ${option}` : option}
+            </button>
+          ))}
+        </div>
+      )}
       <label className="block">Summary
         <textarea className="input mt-1 w-full" rows={3} value={summary} onChange={(e) => setSummary(e.target.value)} />
       </label>
@@ -75,6 +87,7 @@ export function TailoredCVPanel({ jobId, result, hasCv, onLetter, letterPending 
   const [editing, setEditing] = useState(false);
   const qc = useQueryClient();
   const importCV = useMutation({
+    meta: { syncLists: true },
     mutationFn: () => api.importTailoredCV(jobId, assetId, result),
     onSuccess: (draft) => {
       setChoice(draft.id);

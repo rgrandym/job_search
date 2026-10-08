@@ -8,11 +8,13 @@ import { SettingsDialog } from "./components/SettingsDialog";
 import { Sidebar } from "./components/Sidebar";
 import { SummaryDialog } from "./components/SummaryDialog";
 import { api } from "./lib/api";
+import { useRestoreLastSearch } from "./lib/useRestoreLastSearch";
 import { cn } from "./lib/utils";
 import { useChat } from "./stores/chatStore";
 import { useSearch } from "./stores/searchStore";
 
 const THEME_KEY = "jobsearch.theme";
+const VIEW_KEY = "jobsearch.view"; // the narrow-screen panel open last
 const WIDE = "(min-width: 1024px)"; // three resizable columns from here; tabs below
 
 type View = "search" | "results" | "agent";
@@ -53,6 +55,7 @@ export default function App() {
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [summaryProfileKey, setSummaryProfileKey] = useState<string | null>(null);
   const [theme, setTheme] = useState(() => localStorage.getItem(THEME_KEY) ?? "dark");
+  useRestoreLastSearch();
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -62,7 +65,11 @@ export default function App() {
   const llm = state.data?.llm;
   const ready = !!llm?.ready;
   const wide = useMediaQuery(WIDE);
-  const [view, setView] = useState<View>("search");
+  const [view, setView] = useState<View>(() => {
+    const saved = localStorage.getItem(VIEW_KEY);
+    return saved === "results" || saved === "agent" ? saved : "search";
+  });
+  useEffect(() => localStorage.setItem(VIEW_KEY, view), [view]);
   const searching = useSearch((st) => st.loading);
   const chatting = useChat((st) => st.running);
   const matches = useSearch((st) => st.outcome?.report.matches.length);
@@ -97,7 +104,9 @@ export default function App() {
               <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", ready ? "bg-good" : "bg-warn")} />
               <span className="truncate">{ready
                   ? `${llm.provider} · ${llm.quality_model} / ${llm.screening_model}` +
-                    (llm.profile_model ? ` · profile ${llm.profile_provider ?? llm.provider} ${llm.profile_model}` : "")
+                    (llm.profile_model ? ` · profile ${llm.profile_provider ?? llm.provider} ${llm.profile_model}` : "") +
+                    (llm.cv_model ? ` · CVs ${llm.cv_provider ?? llm.provider} ${llm.cv_model}` : "") +
+                    (llm.letter_model ? ` · letters ${llm.letter_provider ?? llm.provider} ${llm.letter_model}` : "")
                   : "Configure LLM"}</span>
             </button>
           )}

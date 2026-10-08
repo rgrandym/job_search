@@ -1,4 +1,9 @@
-"""Chat sessions: completed turns survive app reloads and backend restarts."""
+"""Chat sessions: completed turns survive app reloads and backend restarts.
+
+Recent turns keep their tool calls and results, so the model remembers what it read and did
+(e.g. the CV text behind a change the user then confirms). A native model (Claude Code, Codex)
+keeps its own session, resumed by id on every turn with the same provider.
+"""
 
 from __future__ import annotations
 
@@ -20,16 +25,40 @@ from src.services.workspace import Workspace
 class ChatSession:
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     messages: list[ChatMessage] = field(default_factory=list)
+    native_session: str | None = None  # "<provider>:<CLI session id>"
     ctx: AgentContext | None = None
 
 
 SESSIONS: dict[str, ChatSession] = {}
 SESSION_ID = re.compile(r"[0-9a-f]{12}")
-MAX_HISTORY_MESSAGES = 40  # the latest 20 complete exchanges fit ordinary chat contexts
+MAX_TURNS = 20  # user turns kept
+TOOL_TURNS = 6  # the latest turns keep their tool calls and results in full
 
 
 def _path(ws: Workspace, session_id: str) -> Path:
     return ws.settings.data_dir / "chat_sessions" / f"{session_id}.json"
+
+
+def _native_path(ws: Workspace, session_id: str) -> Path:
+    return _path(ws, session_id).with_suffix(".native")
+
+
+def _native_for(session: ChatSession, provider: str) -> str | None:
+    """The CLI session to resume: only one the same provider started."""
+    saved, prefix = session.native_session or "", f"{provider}:"
+    return saved.removeprefix(prefix) if saved.startswith(prefix) else None
+
+
+def _compact(messages: list[ChatMessage]) -> list[ChatMessage]:
+    """The latest turns; older ones keep only the user's message and the final answer."""
+    starts = [i for i, m in enumerate(messages) if m.role == "user"]
+    kept = messages[starts[-MAX_TURNS] :] if len(starts) > MAX_TURNS else messages
+    starts = [i for i, m in enumerate(kept) if m.role == "user"]
+    cut = starts[-TOOL_TURNS] if len(starts) > TOOL_TURNS else 0
+    final = [
+        m for m in kept[:cut] if m.role == "user" or (m.role == "assistant" and not m.tool_calls)
+    ]
+    return final + kept[cut:]
 
 
 def get_session(session_id: str | None, ws: Workspace) -> ChatSession:
@@ -43,6 +72,9 @@ def get_session(session_id: str | None, ws: Workspace) -> ChatSession:
             s.messages = [ChatMessage.model_validate(item) for item in json.loads(path.read_text())]
         except (OSError, ValueError):
             s.messages = []
+    native = _native_path(ws, s.id)
+    if native.exists():
+        s.native_session = native.read_text().strip() or None
     SESSIONS[s.id] = s
     return s
 
@@ -54,11 +86,15 @@ def save_session(ws: Workspace, session: ChatSession) -> None:
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps([m.model_dump(exclude={"raw"}) for m in session.messages]))
     temporary.replace(path)
+    if session.native_session:
+        _native_path(ws, session.id).write_text(session.native_session)
 
 
 def clear_session(ws: Workspace, session: ChatSession) -> None:
     session.messages.clear()
+    session.native_session = None
     _path(ws, session.id).unlink(missing_ok=True)
+    _native_path(ws, session.id).unlink(missing_ok=True)
 
 
 def visible_history(session: ChatSession) -> list[dict[str, str]]:
@@ -88,8 +124,10 @@ async def handle_user_message(
     threshold: float = 60,
     widen: bool = False,
     profile_key: str | None = None,
+    mcp_url: str | None = None,
 ) -> None:
-    """Run one assistant turn. On failure the turn is rolled back so history stays valid."""
+    """Run one assistant turn. On failure the turn is rolled back so history stays valid.
+    `mcp_url` is where the app serves its tools to models that run their own agent loop."""
     ctx = AgentContext(
         ws=ws,
         emit=emit,
@@ -102,6 +140,8 @@ async def handle_user_message(
         threshold=threshold,
         widen=widen,
         profile_key=profile_key,
+        mcp_url=mcp_url,
+        native_session=_native_for(session, chat_provider or ws.llm.provider),
     )
     session.ctx = ctx
     ui: dict[str, object] = {
@@ -121,11 +161,9 @@ async def handle_user_message(
     )
     try:
         await run_agent(ASSISTANT, session.messages, ctx)
-        session.messages = [
-            item
-            for item in session.messages
-            if item.role == "user" or (item.role == "assistant" and not item.tool_calls)
-        ][-MAX_HISTORY_MESSAGES:]
+        session.messages = _compact(session.messages)
+        if ctx.native_session:
+            session.native_session = f"{chat_provider or ws.llm.provider}:{ctx.native_session}"
         save_session(ws, session)
         await ctx.flush_usage()
         await emit("done", {"tokens": ctx.tokens})

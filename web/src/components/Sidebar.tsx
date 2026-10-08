@@ -517,7 +517,7 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
           className="flex w-full items-center justify-center gap-1 text-[11px] text-faint hover:text-fg"
           disabled={s.loading}
           title="Reset the filters and clear the results panel (history is kept)"
-          onClick={() => s.set({ query: EMPTY_QUERY, outcome: null, log: [], error: null, openedFrom: null })}
+          onClick={() => s.set({ query: EMPTY_QUERY, outcome: null, log: [], error: null, openedFrom: null, lastSearchId: null })}
         >
           <Eraser size={12} /> Clear filters and results
         </button>

@@ -2,7 +2,8 @@
 
 ATS parsers read the file's text, not its look: contact details must be plain text in the
 body (not in headers, text boxes or icons), keywords must be present as words, and tables
-can scramble the reading order. The page count is estimated from the word count.
+can scramble the reading order. The page count is estimated from the word count and
+reported, not warned about: the user prefers a full-length CV (user's decision, 2026-10-07).
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ from src.cv.models import ATSReport, MasterCV
 from src.tools.search_tools import mentions
 
 WORDS_PER_PAGE = 500  # a dense single-column CV page
-MAX_PAGES = 2
 
 
 def docx_text(path: Path) -> tuple[str, int]:
@@ -25,6 +25,11 @@ def docx_text(path: Path) -> tuple[str, int]:
     for table in doc.tables:
         parts += [cell.text for row in table.rows for cell in row.cells]
     return "\n".join(parts), len(doc.tables)
+
+
+def _plain(text: str) -> str:
+    """Case and spacing do not matter to a parser (a name set in capitals is still read)."""
+    return " ".join(text.casefold().split())
 
 
 def _header_text(path: Path) -> str:
@@ -37,7 +42,7 @@ def check_docx(path: Path, cv: MasterCV, keywords: list[str] | None = None) -> A
     text, tables = docx_text(path)
     b = cv.basics
     wanted = {"name": b.name, "email": b.email, "phone": b.phone}
-    missing = [k for k, v in wanted.items() if v and v not in text]
+    missing = [k for k, v in wanted.items() if v and _plain(v) not in _plain(text)]
     keywords = list(dict.fromkeys(keywords or []))
     absent = [k for k in keywords if not mentions(text, k)]
     words = len(text.split())
@@ -47,9 +52,7 @@ def check_docx(path: Path, cv: MasterCV, keywords: list[str] | None = None) -> A
         warnings.append(f"Contact details not readable as text: {', '.join(missing)}")
     if tables:
         warnings.append(f"{tables} table(s): some ATS parsers scramble their reading order")
-    if pages > MAX_PAGES:
-        warnings.append(f"About {pages} pages: trim to {MAX_PAGES} for most roles")
-    if any(v and v in _header_text(path) for v in wanted.values()):
+    if any(v and _plain(v) in _plain(_header_text(path)) for v in wanted.values()):
         warnings.append("Contact details in the page header: many ATS parsers skip headers")
     return ATSReport(
         words=words,

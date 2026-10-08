@@ -421,9 +421,7 @@ async def _review(
 ) -> dict[str, tuple[JobAssessment, bool]]:
     """Second, independent single-posting assessment for every match and borderline first
     verdict; returns (assessment to keep, whether it was reviewed) by job id."""
-    near = sorted(
-        j for j, a in first.items() if _needs_review(a, threshold, checkable(by_id[j]))
-    )
+    near = sorted(j for j, a in first.items() if _needs_review(a, threshold, checkable(by_id[j])))
     if near and note is not None:
         await note(f"Second opinion on {len(near)} matching or borderline posting(s)")
     if near and progress is not None:

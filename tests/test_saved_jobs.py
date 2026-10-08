@@ -71,3 +71,28 @@ def test_api_save_list_and_remove(ws: Workspace, monkeypatch: Any) -> None:
     marked = client.put("/api/jobs/a/tracking", json={"status": "applied"})  # a saved job
     assert marked.status_code == 200 and marked.json()["status"] == "applied"
     assert client.post("/api/saved/remove", json={"job_ids": ["a"]}).json() == {"removed": 1}
+
+
+def test_deleting_a_result_clears_it_from_every_list_but_the_register(ws: Workspace) -> None:
+    from src.jobs.models import SearchQuery
+    from src.services import history, search_service
+    from src.services.search_service import SearchOutcome, SearchRequest
+
+    req = SearchRequest(query=SearchQuery())
+    older = history.record(ws, req, SearchOutcome(report=_report(ws, "a", "b"), fetched=2))
+    newer = history.record(ws, req, SearchOutcome(report=_report(ws, "a", "c"), fetched=2))
+    ws.last_report = _report(ws, "a", "b", "c")
+    saved.save(ws, ["a", "b"])
+    tracker.set_status(ws, JobPosting(id="b", title="Scientist b", company="Co b"), "applied")
+
+    assert search_service.remove_result(ws, "a", newer.id)
+    assert "a" not in {r.job.id for r in ws.last_report.all_results()}
+    for entry in (older, newer):  # every saved search, not only the one on screen
+        _, outcome = history.open_entry(ws, entry.id)
+        assert "a" not in {r.job.id for r in outcome.report.all_results()}
+    assert [s.result.job.id for s in ws.saved_jobs()] == ["b"]
+
+    ws.last_report = _report(ws, "b")
+    assert search_service.remove_result(ws, "b", None)
+    assert ws.saved_jobs() == []
+    assert any(e.title == "Scientist b" for e in tracker.register(ws))  # the application stays

@@ -59,6 +59,7 @@ export function AppliedJobs({ query }: { query: UseQueryResult<TrackedJob[]> }) 
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const qc = useQueryClient();
   const response = useMutation({
+    meta: { syncLists: true },
     mutationFn: ({ id, stage }: { id: string; stage: OutcomeStage }) => api.editTracked(id, undefined, undefined, { stage }),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["tracker"] }),
   });

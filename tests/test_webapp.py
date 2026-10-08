@@ -374,6 +374,63 @@ def test_assistant_edits_selected_profile(ws: Workspace, monkeypatch: Any) -> No
     assert any(kind == "profile_updated" for kind, _ in events)
 
 
+def test_assistant_appends_to_a_profile_list_it_can_see(ws: Workspace, monkeypatch: Any) -> None:
+    ws.memory.put("master", "any", SUMMARY, cv_fp="older-cv")
+    script = {
+        "assistant": [
+            _call("get_context"),
+            _call(
+                "update_profile",
+                key="master:any",
+                append={"core_expertise": ["Protein engineering"]},
+                reason="add protein engineering",
+            ),
+            ChatMessage(role="assistant", content="Added."),
+        ]
+    }
+    monkeypatch.setattr(ws, "chat", lambda role: ScriptedChat(script))
+
+    async def emit(kind: str, payload: dict[str, Any]) -> None:
+        return None
+
+    messages = [ChatMessage(role="user", content="Add protein engineering to my profile")]
+    asyncio.run(run_agent(ASSISTANT, messages, AgentContext(ws=ws, emit=emit)))
+    assert "core_expertise" in messages[2].content  # the whole profile is visible
+    expertise = ws.memory.record("master:any").summary.core_expertise
+    assert expertise == [*SUMMARY.core_expertise, "Protein engineering"]
+
+
+def test_assistant_edits_the_cv_by_id(ws: Workspace, monkeypatch: Any) -> None:
+    from src.services import cv_service
+
+    assert ws.master_cv is not None
+    role = ws.master_cv.experience[0]
+    edits = [
+        {"action": "add_bullet", "role_id": role.id, "text": "Mentored two junior analysts"},
+        {"action": "set_section", "section": "languages", "value": ["Spanish"]},
+    ]
+    script = {
+        "assistant": [
+            _call("read_cv"),
+            _call("edit_cv", edits=edits, reason="add a bullet and Spanish"),
+            ChatMessage(role="assistant", content="Written to your CV."),
+        ]
+    }
+    monkeypatch.setattr(ws, "chat", lambda role: ScriptedChat(script))
+    monkeypatch.setattr(cv_service, "save_selected_cv", lambda w, cv: setattr(w, "master_cv", cv))
+    events: list[str] = []
+
+    async def emit(kind: str, payload: dict[str, Any]) -> None:
+        events.append(kind)
+
+    messages = [ChatMessage(role="user", content="Yes, add that bullet and Spanish")]
+    asyncio.run(run_agent(ASSISTANT, messages, AgentContext(ws=ws, emit=emit)))
+    assert not any(m.is_error for m in messages if m.role == "tool")
+    assert ws.master_cv.experience[0].bullets[-1].text == "Mentored two junior analysts"
+    assert ws.master_cv.languages == ["Spanish"] and "cv_updated" in events
+    assert "Mentored two junior analysts" in messages[4].content
+
+
 def test_assistant_cannot_edit_another_cvs_profile(ws: Workspace, monkeypatch: Any) -> None:
     ws.memory.put("other-cv", "any", SUMMARY, cv_fp="other")
     script = {
@@ -694,7 +751,8 @@ def test_cv_preview_shows_pdfs_as_stored_and_word_files_via_word(
     monkeypatch.setattr(document_files, "word_pdf_preview", fake_word)
     shown = client.get(f"/api/cv/preview/{asset['id']}")
     assert shown.content == b"%PDF-1.7 rendered by Word"
-    assert calls == [edited]
+    working = ws.output_dir / "cvs" / "cv.docx"  # the copy edits land in, not the stored file
+    assert calls == [working] and working.read_bytes() == b"PK saved from Word"
     assert edited.read_bytes() == b"PK saved from Word"
 
     monkeypatch.setattr(document_files, "word_pdf_preview", lambda source, cache_dir: None)
@@ -941,9 +999,11 @@ def test_ws_chat_can_use_connected_claude_code_without_switching_search_provider
     monkeypatch.setattr(
         webapp,
         "available_models",
-        lambda cfg: [ModelInfo(id="claude-sonnet-5-5", name="Claude Sonnet", tools=True)]
-        if cfg.provider == "claude_code"
-        else [],
+        lambda cfg: (
+            [ModelInfo(id="claude-sonnet-5-5", name="Claude Sonnet", tools=True)]
+            if cfg.provider == "claude_code"
+            else []
+        ),
     )
     selected: list[tuple[str, str | None, str | None]] = []
 
@@ -969,8 +1029,7 @@ def test_ws_chat_can_use_connected_claude_code_without_switching_search_provider
             seen.append(conn.receive_json())
     assert selected == [("quality", "claude-sonnet-5-5", "claude_code")]
     assert any(
-        event["type"] == "model_usage" and event["provider"] == "claude_code"
-        for event in seen
+        event["type"] == "model_usage" and event["provider"] == "claude_code" for event in seen
     )
 
 
@@ -1545,8 +1604,12 @@ def test_api_state_lists_the_source_catalog_and_company_boards(
         )
     )
     boards = client.get("/api/companies/boards").json()
-    assert [b["key"] for b in boards] == ["lever:abcam", "greenhouse:gsk"]
-    assert boards[1]["companies"] == ["ViiV", "GSK"]  # one shared board, read once
+    firsts = [b["companies"][0].casefold() for b in boards]
+    assert firsts == sorted(firsts)
+    by_key = {b["key"]: b for b in boards}
+    assert by_key["greenhouse:gsk"]["companies"] == ["ViiV", "GSK"]  # one shared board, read once
+    assert "lever:abcam" in by_key and "workday:msd/searchjobs" in by_key  # verified employers
+    assert "workday:gsk/gskcareers" not in by_key  # GSK keeps the board it already has
 
 
 def test_a_saved_search_keeps_its_progress_log(

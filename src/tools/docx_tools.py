@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import copy
+from collections.abc import Collection
+from difflib import SequenceMatcher
+from typing import Any
+
 from docx.document import Document as DocxDocument
 from docx.enum.text import WD_TAB_ALIGNMENT
 from docx.oxml import OxmlElement
@@ -95,3 +100,100 @@ def add_bullet(doc: DocxDocument, text: str) -> Paragraph:
     p = doc.add_paragraph(text, style="List Bullet")
     p.paragraph_format.space_after = Pt(1)
     return p
+
+
+def _plain(text: str) -> str:
+    return " ".join(text.casefold().replace("\u2019", "'").split())
+
+
+def all_paragraphs(doc: DocxDocument) -> list[Paragraph]:
+    """Body paragraphs, including those inside table cells (CV layouts often use tables)."""
+    out = list(doc.paragraphs)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                out.extend(p for p in cell.paragraphs if p not in out)
+    return out
+
+
+def find_paragraph(
+    doc: DocxDocument, text: str, min_ratio: float = 0.8, exclude: Collection[Any] = ()
+) -> Paragraph | None:
+    """The paragraph whose text best matches `text` (exact, then contained, then similar).
+    `exclude`: paragraph elements (`p._p`) already claimed by other text."""
+    target = _plain(text)
+    if not target:
+        return None
+    best: tuple[float, Paragraph | None] = (0.0, None)
+    for p in all_paragraphs(doc):
+        here = _plain(p.text)
+        if not here or any(p._p is e for e in exclude):
+            continue
+        if here == target:
+            return p
+        ratio = 0.95 if target in here or (here in target and len(here) > 20) else 0.0
+        ratio = max(ratio, SequenceMatcher(None, here, target).ratio())
+        if ratio > best[0]:
+            best = (ratio, p)
+    return best[1] if best[0] >= min_ratio else None
+
+
+def set_paragraph_text(paragraph: Paragraph, text: str) -> None:
+    """Replace a paragraph's text, keeping its style and its first run's formatting."""
+    runs = paragraph.runs
+    if not runs:
+        paragraph.add_run(text)
+        return
+    runs[0].text = text
+    for run in runs[1:]:
+        run._r.getparent().remove(run._r)
+
+
+def insert_paragraph_after(paragraph: Paragraph, text: str) -> Paragraph:
+    """A copy of `paragraph` (same style, bullet and formatting) holding `text`, placed after it."""
+    new = copy.deepcopy(paragraph._p)
+    paragraph._p.addnext(new)
+    out = Paragraph(new, paragraph._parent)
+    set_paragraph_text(out, text)
+    return out
+
+
+def remove_paragraph(paragraph: Paragraph) -> None:
+    paragraph._p.getparent().remove(paragraph._p)
+
+
+def reorder_paragraphs(paragraphs: list[Paragraph], order: list[Paragraph]) -> None:
+    """Put `order` into the places `paragraphs` occupy (document order), each keeping its own
+    formatting. Paragraphs not in `order` are removed; `order` may not add new ones."""
+    slots = sorted(paragraphs, key=_position)
+    marks = []
+    for p in slots:
+        mark = OxmlElement("w:p")
+        p._p.addprevious(mark)
+        marks.append(mark)
+        p._p.getparent().remove(p._p)
+    for mark, p in zip(marks, order, strict=False):
+        mark.addprevious(p._p)
+    for mark in marks:
+        mark.getparent().remove(mark)
+
+
+def _position(paragraph: Paragraph) -> int:
+    body = paragraph._p.getroottree().getroot()
+    return next(i for i, e in enumerate(body.iter()) if e is paragraph._p)
+
+
+def replace_text_after(paragraph: Paragraph, prefix_len: int, text: str) -> None:
+    """Replace the paragraph's text after its first `prefix_len` characters (e.g. a bold
+    "Programming:" label), keeping the label's runs and formatting."""
+    seen = 0
+    runs = paragraph.runs
+    for index, run in enumerate(runs):
+        end = seen + len(run.text)
+        if end > prefix_len or (end == prefix_len and index == len(runs) - 1):
+            run.text = run.text[: prefix_len - seen] + text
+            for later in runs[index + 1 :]:
+                later._r.getparent().remove(later._r)
+            return
+        seen = end
+    paragraph.add_run(text)

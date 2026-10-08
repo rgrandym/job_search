@@ -151,6 +151,7 @@ def test_structured_validates_output_and_reports_real_usage(
     assert result.value == "ready"
     assert seen == {"model": "claude-haiku-4-5", "system": "Rules", "prompt": "Do it"}
     assert (usage[0].input_tokens, usage[0].output_tokens, usage[0].estimated) == (125, 30, False)
+    assert usage[0].provider == "claude_code"  # reported under its own provider, not the main one
 
 
 def test_chat_decodes_emulated_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:

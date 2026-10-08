@@ -157,7 +157,14 @@ async def label_job(args: LabelArgs, ctx: AgentContext) -> dict[str, Any]:
 
 class DocumentArgs(BaseModel):
     job_id: str = Field(description="Exact job id from find_jobs or search results")
-    template: Literal["classic", "modern", "compact"] = "classic"
+    template: Literal["original", "classic", "modern", "compact"] = Field(
+        "original", description="original: the CV's own Word design (use unless asked)"
+    )
+    length: Literal["auto", "full", "junior"] = Field(
+        "auto",
+        description="full: keep every line; junior: trim for a junior role; auto: trim only "
+        "when the job is clearly more junior",
+    )
 
 
 @tool("tailor_cv", "Create a guarded, reviewed Word CV for a result or saved job.", DocumentArgs)
@@ -166,7 +173,12 @@ async def tailor_cv(args: DocumentArgs, ctx: AgentContext) -> dict[str, Any]:
     if job is None:
         raise ValueError("Job not found in results or saved jobs")
     tailored, path = await cv_service.tailor_to_job(
-        ctx.ws, job, args.template, ctx.usage_sink("assistant"), ctx.ws.result(job.id)
+        ctx.ws,
+        job,
+        args.template,
+        ctx.usage_sink("assistant"),
+        ctx.ws.result(job.id),
+        length=args.length,
     )
     await ctx.emit("documents_updated", {"job_id": job.id})
     return {
@@ -174,6 +186,10 @@ async def tailor_cv(args: DocumentArgs, ctx: AgentContext) -> dict[str, Any]:
         "filename": path.name,
         "download_url": f"/api/files/cvs/{path.name}",
         "missing_keywords": tailored.missing_keywords,
+        "headline_kept": tailored.cv.basics.headline,
+        "headline_options": tailored.headline_options,
+        "trim": tailored.trim.model_dump() if tailored.trim else None,
+        "document_notes": tailored.document_notes,
         "rejections": [change.reason for change in tailored.changes if not change.accepted],
     }
 
@@ -223,7 +239,9 @@ async def refresh_profile(args: ProfileKeyArgs, ctx: AgentContext) -> dict[str, 
 
 
 class TemplateArgs(BaseModel):
-    template: Literal["classic", "modern", "compact"] = "classic"
+    template: Literal["original", "classic", "modern", "compact"] = Field(
+        "original", description="original: the CV's own Word design (use unless asked)"
+    )
 
 
 @tool("export_general_cv", "Export the selected CV as a general Word document.", TemplateArgs)

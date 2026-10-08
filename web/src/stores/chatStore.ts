@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { syncLists } from "../lib/queryClient";
 import type { ChatEvent, ModelUsageEvent, Provider, SearchQuery } from "../lib/types";
 import { useSearch } from "./searchStore";
 
@@ -87,7 +88,7 @@ export const useChat = create<ChatState>()((set, get) => {
         if (!ev.ok) push({ kind: "activity", agent: ev.agent, depth: ev.depth, text: `${ev.tool} failed`, ok: false, detail: ev.preview });
         break;
       case "cv_updated":
-        push({ kind: "activity", agent: "assistant", depth: 0, text: `search preferences updated: ${ev.reason}` });
+        push({ kind: "activity", agent: "assistant", depth: 0, text: `CV updated: ${ev.reason}` });
         break;
       case "profile_updated":
         push({ kind: "activity", agent: "assistant", depth: 0, text: `profile updated: ${ev.reason}` });
@@ -169,6 +170,8 @@ export const useChat = create<ChatState>()((set, get) => {
           chatSearchActive = false;
           useSearch.setState({ loading: false, progress: null });
         }
+        // The assistant may have applied to, saved or deleted jobs: every list follows.
+        void syncLists();
         set((s) => {
           // Usage events arrive before `done`; max() also recovers safely if a
           // client missed an event during a reconnect.
@@ -240,7 +243,7 @@ export const useChat = create<ChatState>()((set, get) => {
 
     reset: () => {
       get().socket?.send(JSON.stringify({ type: "reset" }));
-      set({ items: [], status: null });
+      set({ items: [], status: null, tokens: { input: 0, output: 0 } });
     },
     // Tab usage per model, from assistant turns and Search-button runs alike.
     recordUsage: (ev) =>

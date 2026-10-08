@@ -3,7 +3,9 @@
 Stored in `data/saved_jobs.json` (git-ignored, personal data), newest first, each with the
 result as it was judged (posting, verdict, role family, flags). Their status is read live from
 `services.tracker`; applied jobs are hidden here and shown in the application register. Saved
-jobs stay until the user removes them; tailoring and cover
+jobs stay until the user removes them, here or by deleting the job from the results
+(`search_service.remove_result`, which also drops it from every retained search; the register
+of applications is never changed); tailoring and cover
 letters work on them like on current results (`Workspace.job` finds both).
 """
 

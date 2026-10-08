@@ -2,10 +2,14 @@
 
 We never read or reuse the tokens in `~/.codex/auth.json`. Every call runs
 `codex exec` (non-interactive mode), and the CLI handles sign-in. Structured output uses
-`--output-schema`. Tool calling for the agent loop is emulated: each turn, Codex returns
-`{message, tool_calls[]}` under a strict schema, given the transcript and the tool catalogue.
+`--output-schema`; each such call is a fresh, ephemeral, read-only session in an empty temp
+directory.
 
-Each call is a fresh, ephemeral, read-only Codex session in an empty temp directory.
+The assistant runs natively (`run_native`): Codex runs its own agent loop with real tool calls
+to the app's MCP endpoint, its built-in shell, browser, plugin and similar tools switched off,
+and each chat resumes its Codex thread (`codex exec resume`). `chat` (one emulated
+`{message, tool_calls[]}` turn under a strict schema) remains for callers without that
+endpoint.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, TypeVar
@@ -26,12 +31,14 @@ from typing import Any, TypeVar
 from pydantic import BaseModel, ValidationError
 
 from src.core.llm.calls import run_cli
+from src.core.llm.native import MCP_SERVER, NATIVE_TIMEOUT_S, TextRelay, run_streaming
 from src.core.llm.types import (
     ChatMessage,
     ChatResponse,
     LLMConfig,
     LLMError,
     ModelUsage,
+    NativeTurn,
     Role,
     ToolCall,
     ToolSpec,
@@ -428,7 +435,8 @@ class _Turn(BaseModel):
 
 
 class CodexChat:
-    """`ChatModel` with tool calling emulated through a strict JSON turn format."""
+    """`ChatModel` with tool calling emulated through a strict JSON turn format, and a
+    `NativeAgentModel` (`run_native`) for Codex's own agent loop."""
 
     def __init__(self, cfg: LLMConfig, role: Role) -> None:
         self.cfg = cfg.for_role(role)
@@ -446,6 +454,22 @@ class CodexChat:
             input_tokens=_estimate_tokens(prompt),
             output_tokens=_estimate_tokens(json.dumps(data)),
             usage_estimated=True,
+        )
+
+    async def run_native(
+        self,
+        *,
+        system: str,
+        prompt: str,
+        mcp_url: str,
+        session_id: str | None,
+        workdir: Path,
+        on_text: Callable[[str], Awaitable[None]],
+        cancelled: Callable[[], bool],
+    ) -> NativeTurn:
+        """One user turn in Codex's own agent loop (see `run_native_turn`)."""
+        return await run_native_turn(
+            self.cfg, self.model, system, prompt, mcp_url, session_id, workdir, on_text, cancelled
         )
 
 
@@ -524,3 +548,125 @@ def render_turn(system: str, messages: list[ChatMessage], tools: list[ToolSpec])
         "Write the next assistant turn. Either call tools (put a short note in `message`), or "
         "give your final answer in `message` with an empty `tool_calls` list."
     )
+
+
+# ------------------------------------------------------------------ native agent
+
+# Built-in capabilities the assistant must not use: it acts only through the app's tools.
+NATIVE_DISABLED = (
+    "shell_tool",
+    "unified_exec",
+    "apps",
+    "plugins",
+    "browser_use",
+    "browser_use_external",
+    "in_app_browser",
+    "computer_use",
+    "image_generation",
+    "view_image",
+    "skill_search",
+    "tool_suggest",
+    "goals",
+)
+
+
+def _toml(value: str) -> str:
+    """A TOML basic string (JSON's escapes are valid TOML)."""
+    return json.dumps(value)
+
+
+def _native_command(
+    binary: str, cfg: LLMConfig, model: str, system: str, mcp_url: str, thread: str | None
+) -> list[str]:
+    """`codex exec --json` (or `exec resume`) whose only tools are the app's MCP tools."""
+    cmd = [binary, "exec", *(["resume"] if thread else [])]
+    cmd += ["--json", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules"]
+    settings = {
+        "sandbox_mode": _toml("read-only"),
+        "approval_policy": _toml("never"),
+        "web_search": _toml("disabled"),
+        "model_reasoning_effort": _toml(_effort(cfg)),
+        "developer_instructions": _toml(system),
+        f"mcp_servers.{MCP_SERVER}.url": _toml(mcp_url),
+        f"mcp_servers.{MCP_SERVER}.tool_timeout_sec": str(NATIVE_TIMEOUT_S),
+        f"mcp_servers.{MCP_SERVER}.default_tools_approval_mode": _toml("approve"),
+        **{f"features.{name}": "false" for name in NATIVE_DISABLED},
+    }
+    for key, value in settings.items():
+        cmd += ["-c", f"{key}={value}"]
+    if model:
+        cmd += ["-m", model]
+    return [*cmd, *([thread] if thread else []), "-"]
+
+
+def codex_events(
+    events: list[dict[str, Any]], on_text: Callable[[str], Awaitable[None]]
+) -> tuple[Callable[[dict[str, Any]], Awaitable[None]], TextRelay]:
+    """Collects `--json` events; text written before a tool call goes to `on_text`."""
+    relay = TextRelay(on_text)
+
+    async def on_event(event: dict[str, Any]) -> None:
+        events.append(event)
+        raw = event.get("item")
+        item: dict[str, Any] = raw if isinstance(raw, dict) else {}
+        kind = item.get("type")
+        if event.get("type") == "item.completed" and kind == "agent_message":
+            await relay.text([str(item.get("text") or "")])
+        elif event.get("type") == "item.started" and kind not in (
+            None,
+            "agent_message",
+            "reasoning",
+        ):
+            await relay.tool_use()
+
+    return on_event, relay
+
+
+def _native_result(
+    events: list[dict[str, Any]], relay: TextRelay, code: int, stderr: str
+) -> NativeTurn:
+    thread = next((e.get("thread_id") for e in events if e.get("type") == "thread.started"), None)
+    failed = next((e for e in events if e.get("type") in ("turn.failed", "error")), None)
+    done = next((e for e in reversed(events) if e.get("type") == "turn.completed"), None)
+    if done is None:
+        detail = (failed or {}).get("error") or (failed or {}).get("message")
+        if isinstance(detail, dict):
+            detail = detail.get("message")
+        tail = detail or "\n".join(stderr.strip().splitlines()[-8:])
+        raise LLMError(f"codex exec failed (exit {code}): {tail}")
+    usage = done.get("usage") or {}
+    return NativeTurn(
+        text=relay.answer,
+        session_id=str(thread or ""),
+        input_tokens=int(usage.get("input_tokens") or 0),
+        output_tokens=int(usage.get("output_tokens") or 0),
+    )
+
+
+async def run_native_turn(
+    cfg: LLMConfig,
+    model: str,
+    system: str,
+    prompt: str,
+    mcp_url: str,
+    session_id: str | None,
+    workdir: Path,
+    on_text: Callable[[str], Awaitable[None]],
+    cancelled: Callable[[], bool],
+) -> NativeTurn:
+    """One user turn through Codex's own agent loop; resumes the thread when given one."""
+    binary = codex_binary()
+    if binary is None:
+        raise LLMError("Codex CLI not found")
+    events: list[dict[str, Any]] = []
+    on_event, relay = codex_events(events, on_text)
+    code, stderr = await run_streaming(
+        _native_command(binary, cfg, model, system, mcp_url, session_id),
+        prompt,
+        workdir,
+        None,
+        on_event,
+        cancelled,
+    )
+    turn = _native_result(events, relay, code, stderr)
+    return turn.model_copy(update={"session_id": turn.session_id or session_id or ""})

@@ -127,6 +127,47 @@ def test_profile_can_run_on_another_provider(
     assert ws.llm.profile_provider_for() == "codex"
 
 
+def test_cv_and_letter_writing_have_their_own_models_apart_from_search(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.services import workspace
+
+    ws = Workspace(settings)
+    ws.set_llm_config(
+        {"provider": "codex", "quality_model": "sol", "screening_model": "luna",
+         "cv_model": "claude-opus-5-5", "cv_provider": "claude_code", "cv_effort": "max"}
+    )  # fmt: skip
+    built: list[tuple[str, str, str, str]] = []
+    monkeypatch.setattr(
+        workspace,
+        "make_structured",
+        lambda cfg, role, *_: built.append(
+            (role, cfg.provider, cfg.model_for(role), cfg.effort_for(role))
+        ),
+    )
+    for role in ("screening", "quality", "cv", "letter"):
+        ws.structured(role)
+    assert built == [
+        ("screening", "codex", "luna", "medium"),  # search and matching stay on Codex
+        ("quality", "codex", "sol", "medium"),
+        ("cv", "claude_code", "claude-opus-5-5", "max"),
+        ("letter", "claude_code", "claude-opus-5-5", "max"),  # no letter model: the CV model
+    ]
+
+    ws.set_llm_config({"letter_model": "claude-sonnet-5-5", "letter_effort": "medium"})
+    built.clear()
+    ws.structured("letter")
+    assert built == [
+        ("letter", "codex", "claude-sonnet-5-5", "medium")
+    ]  # its own, own provider unset
+
+    signed_in = {"codex"}
+    monkeypatch.setattr(ws, "_cli_logged_in", lambda provider: provider in signed_in)
+    assert not ws.llm_ready()  # the CV model's provider must be signed in too
+    signed_in.add("claude_code")
+    assert ws.llm_ready()
+
+
 def test_profile_provider_key_is_saved_for_that_provider(settings: Settings) -> None:
     ws = Workspace(settings)
     update = {"provider": "codex", "quality_model": "sol", "screening_model": "sol",

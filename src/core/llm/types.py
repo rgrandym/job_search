@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any, Literal, Protocol
+from collections.abc import Awaitable, Callable
+from pathlib import Path
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
@@ -11,9 +12,10 @@ from src.core.config import LLMProviderName, Settings
 
 # quality: rare, accuracy-critical work (CV parsing and tailoring, cover letters, second
 # opinions, the assistant). screening: the job_matcher's first pass, hundreds of calls per
-# search. profile: the profile summary, which every verdict is judged against; it uses the
-# quality model unless a profile model is set.
-Role = Literal["quality", "screening", "profile"]
+# search. profile: the profile summary, which every verdict is judged against. cv: tailored
+# CVs. letter: cover letters. These three use the quality model unless their own model is set
+# (a letter falls back to the CV model first), and each may use another provider.
+Role = Literal["quality", "screening", "profile", "cv", "letter"]
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 
 
@@ -25,6 +27,7 @@ class ModelUsage(BaseModel):
     output_tokens: int = 0
     estimated: bool = False
     purpose: str = ""
+    provider: str | None = None  # the provider that served the call (set by `make_structured`)
 
 
 UsageSink = Callable[[ModelUsage], None]
@@ -47,6 +50,16 @@ class LLMConfig(BaseModel):
     profile_provider: LLMProviderName | None = Field(
         None, description="Another provider for the profile model; None: `provider`"
     )
+    cv_model: str = Field("", description="Empty: tailored CVs use the quality model")
+    cv_effort: Effort = "high"
+    cv_provider: LLMProviderName | None = Field(
+        None, description="Another provider for the CV model; None: `provider`"
+    )
+    letter_model: str = Field("", description="Empty: letters use the CV model, else quality")
+    letter_effort: Effort = "high"
+    letter_provider: LLMProviderName | None = Field(
+        None, description="Another provider for the letter model; None: `provider`"
+    )
     max_tokens: int = 16000
     refusal_fallback: bool = True
     api_key: SecretStr | None = None
@@ -54,21 +67,34 @@ class LLMConfig(BaseModel):
         "medium", exclude=True, description="Set by `for_role`: the effort this client uses"
     )
 
-    def model_for(self, role: Role) -> str:
+    def _own(self, role: Role) -> tuple[str, Effort, LLMProviderName | None] | None:
+        """(model, effort, provider) of a role with its own model (profile, cv, letter)."""
         if role == "profile" and self.profile_model:
-            return self.profile_model
+            return self.profile_model, self.profile_effort, self.profile_provider
+        if role == "letter" and self.letter_model:
+            return self.letter_model, self.letter_effort, self.letter_provider
+        if role in ("cv", "letter") and self.cv_model:
+            return self.cv_model, self.cv_effort, self.cv_provider
+        return None
+
+    def model_for(self, role: Role) -> str:
+        if own := self._own(role):
+            return own[0]
         return self.screening_model if role == "screening" else self.quality_model
 
     def effort_for(self, role: Role) -> Effort:
-        if role == "profile" and self.profile_model:
-            return self.profile_effort
+        if own := self._own(role):
+            return own[1]
         return self.screening_effort if role == "screening" else self.quality_effort
 
+    def provider_for(self, role: Role) -> LLMProviderName:
+        """The provider a role runs on: its own only when it has its own model and provider."""
+        own = self._own(role)
+        return own[2] if own and own[2] else self.provider
+
     def profile_provider_for(self) -> LLMProviderName:
-        """The provider that builds the profile: its own only when a profile model is set."""
-        if self.profile_model and self.profile_provider:
-            return self.profile_provider
-        return self.provider
+        """The provider that builds the profile."""
+        return self.provider_for("profile")
 
     def for_role(self, role: Role) -> LLMConfig:
         """The config one client uses: its role's effort in `effort`."""
@@ -95,6 +121,12 @@ class LLMConfig(BaseModel):
             profile_model=s.profile_model,
             profile_effort=s.profile_effort,
             profile_provider=s.profile_provider,
+            cv_model=s.cv_model,
+            cv_effort=s.cv_effort,
+            cv_provider=s.cv_provider,
+            letter_model=s.letter_model,
+            letter_effort=s.letter_effort,
+            letter_provider=s.letter_provider,
             max_tokens=s.llm_max_tokens,
             refusal_fallback=s.llm_refusal_fallback,
             api_key=key,
@@ -144,4 +176,33 @@ class ChatModel(Protocol):
         self, *, system: str, messages: list[ChatMessage], tools: list[ToolSpec]
     ) -> ChatResponse:
         """One model turn."""
+        ...
+
+
+class NativeTurn(BaseModel):
+    """The outcome of one user turn run by a model's own agent loop."""
+
+    text: str
+    session_id: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+@runtime_checkable
+class NativeAgentModel(Protocol):
+    """A model that runs its own agent loop natively, calling the app's tools through an MCP
+    server, and keeps the conversation in a session it can resume."""
+
+    async def run_native(
+        self,
+        *,
+        system: str,
+        prompt: str,
+        mcp_url: str,
+        session_id: str | None,
+        workdir: Path,
+        on_text: Callable[[str], Awaitable[None]],
+        cancelled: Callable[[], bool],
+    ) -> NativeTurn:
+        """Run one user turn to its final answer."""
         ...

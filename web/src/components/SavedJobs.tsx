@@ -11,6 +11,7 @@ export function SavedJobs({ hasCv, query }: { hasCv: boolean; query: UseQueryRes
   const qc = useQueryClient();
   const { selected, toggleSelected, set } = useSearch();
   const remove = useMutation({
+    meta: { syncLists: true },
     mutationFn: (jobId: string) => api.removeSaved([jobId]),
     onSuccess: (_, jobId) => {
       set({ selected: selected.filter((id) => id !== jobId) });
@@ -45,6 +46,10 @@ export function SavedJobs({ hasCv, query }: { hasCv: boolean; query: UseQueryRes
               onSelect={() => toggleSelected(s.result.job.id)}
               savedAt={s.saved_at}
               onRemove={() => remove.mutate(s.result.job.id)}
+              removeLabel="Delete"
+              removeTitle="Delete from saved jobs (its status, note and any application record are kept)"
+              removeAtTop
+              removing={remove.isPending && remove.variables === s.result.job.id}
               labelable={false}
             />
           ))}

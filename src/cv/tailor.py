@@ -7,16 +7,19 @@ Pipeline:
 
 The LLM only *proposes* changes. `apply_plan` decides what is accepted. A rewrite is
 rejected (the original bullet is kept) if it introduces numbers or skills that its source
-bullet does not contain. A headline is rejected if it claims a level above any title held,
-a role the CV does not show, or unevidenced skills; a summary if it adds numbers or skills
-the CV lacks. A JD keyword lost because its bullet was left out is put back. Every decision
-is recorded in `TailoredCV.changes`.
+bullet does not contain; a summary if it adds numbers or skills the CV lacks. The CV's own
+headline is kept; up to 4 suggested headlines that pass the headline guard are offered.
+Nothing is removed: relevant bullets and skills move up, the rest move to the end of their
+section. Bullets may be left out only when the user's length choice or `assess_trim` (decided
+here, not by the model) allows it, keeping at least two per role; a JD keyword lost that way
+is put back. Every decision is recorded in `TailoredCV.changes`.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from datetime import date
 from typing import Literal
 
 from src.core import progress
@@ -32,6 +35,7 @@ from src.cv.models import (
     TailoredCV,
     TailoredCVEdits,
     TailoringPlan,
+    TrimAssessment,
 )
 from src.tools.search_tools import (
     extract_numbers,
@@ -61,23 +65,36 @@ restates only that bullet's facts.
 contain. You may rephrase, reorder clauses and use the JD's terminology for the same thing.
 3. Write concise, specific accomplishments. State a result only when the source records one; \
 do not imply leadership, ownership, scale, seniority or impact beyond the source.
-4. Keep each bullet under 30 words.
+4. Keep every fact, detail and number of the source bullet: rephrase and reorder clauses \
+to fit the job, but never shorten away information.
 5. Use the job's terms only for the same evidenced skill or work. Avoid keyword stuffing, \
 superlatives and generic claims such as 'expert' or 'proven leader'.
 
-Also return: a headline matching the target role, a 3-4 sentence summary built only from \
-facts in the CV. Open with the strongest evidence for this job, then draw relevant general \
-context from the original CV summary and retain distinctive breadth from the full CV: \
-leadership, hands-on practice, or adjacent experience when evidenced. Do not reduce the \
-candidate to the job description or repeat a keyword list. \
-Return `bullet_order` (per experience id, most relevant first; omit irrelevant \
-bullets but keep at least two per role), and `skills_priority` (CV skills ordered by JD \
-relevance).
+6. Keep everything. The CV's own headline, titles, section headings and publications stay \
+as they are. Every bullet stays: `bullet_order` lists each role's bullet ids with the most \
+relevant first, and the rest follow. Rewrite only bullets that gain from the job's wording; \
+leave the others unchanged.
 
-The headline names the candidate's own level and function (never a level above any title \
-they held). If a <match_assessment> is given, lead with the evidence it names under reasons \
-and transferable, and never paper over its gaps. If a <review> is given, revise your \
-previous plan to address it under the same rules."""
+Also return `headline_options`: up to 4 alternative headlines for this job, for the user to \
+choose from (the CV keeps its own unless they do). Each names the candidate's own level and \
+function (never a level above any title held), a role the CV shows, and only skills the CV \
+evidences.
+
+Also return a 3-4 sentence summary built only from facts in the CV. Open with the strongest \
+evidence for this job, then draw relevant general context from the original CV summary and \
+retain distinctive breadth from the full CV: leadership, hands-on practice, or adjacent \
+experience when evidenced. Do not reduce the candidate to the job description or repeat a \
+keyword list. If the CV's summary has several paragraphs (separated by a blank line), \
+return the same number, separated the same way, at about the same length. \
+Return `bullet_order` for every role. Return `skills_priority`: the CV's skills ordered by \
+relevance to the job \
+(skills you leave out stay, after the listed ones).
+
+If a <trimming> block allows it, you may leave out of `bullet_order` bullets that would \
+overstate the candidate for this more junior role, keeping at least two per role. Without \
+it, never leave a bullet out. If a <match_assessment> is given, lead with the evidence it \
+names under reasons and transferable, and never paper over its gaps. If a <review> is given, \
+revise your previous plan to address it under the same rules."""
 
 CRITIC_SYSTEM = """You are a demanding hiring manager reviewing a CV tailored to one job. You \
 see the job description, the Master CV (every fact the candidate has) and the tailored CV. \
@@ -90,7 +107,12 @@ result or overstate their scope (by id), and what to fix using only that bullet'
 - order_notes: at most 3 notes on the order of bullets or sections for this job. Flag a \
 summary that is too terse, only restates the job description, or omits distinctive, relevant \
 breadth evidenced in the Master CV.
-Return empty lists when the CV is already strong. Never suggest adding a fact."""
+Return empty lists when the CV is already strong. Never suggest adding a fact.
+The tailored CV keeps every line (only the user's length setting leaves lines out), \
+its roles in date order, the design and sections of their own Word CV, and their own \
+headline (suggested headlines are offered separately). Suggest only rewording and \
+reordering within those rules: never removing or cutting lines, merging bullets, \
+restructuring sections or changing the headline."""
 
 
 def analyze_jd(jd_text: str, llm: LLMProvider) -> JDAnalysis:
@@ -106,8 +128,60 @@ def _context(master: MasterCV, jd: JDAnalysis, jd_text: str) -> str:
     )
 
 
-TailoringEmphasis = Literal["auto", "leadership", "hands_on"]
 LevelEmphasis = Literal["auto", "senior", "junior"]
+LengthChoice = Literal["auto", "full", "junior"]
+MAX_HEADLINE_OPTIONS = 4
+YEARS_ASKED = re.compile(r"(\d{1,2})\s*\+?\s*(?:(?:-|to)\s*\d{1,2}\s*)?years?", re.IGNORECASE)
+
+
+def _career_years(master: MasterCV) -> float:
+    starts = [e.start for e in master.experience if e.start]
+    if not starts:
+        return 0.0
+    year, month = map(int, min(starts).split("-"))
+    today = date.today()
+    return (today.year - year) + (today.month - month) / 12
+
+
+def assess_trim(
+    master: MasterCV, jd: JDAnalysis, jd_text: str, length: LengthChoice = "auto"
+) -> TrimAssessment:
+    """May this tailoring leave bullets out? The user's choice decides: "full" never, "junior"
+    yes. "auto" only when the role is clearly more junior than the candidate: its stated level
+    at least two steps below the highest title held, or one step below while asking for at
+    most half the candidate's years. Unknown levels never trim."""
+    if length == "full":
+        return TrimAssessment(allowed=False, reason="you chose to keep the full length")
+    if length == "junior":
+        return TrimAssessment(allowed=True, reason="you chose to tailor for a junior role")
+    if not jd.seniority or not master.experience:
+        return TrimAssessment(allowed=False, reason="the job does not state its level")
+    job = seniority_level(jd.seniority)
+    held = max(seniority_level(e.title) for e in master.experience)
+    gap = held - job
+    asked = [int(n) for n in YEARS_ASKED.findall(jd_text)]
+    years = _career_years(master)
+    job_name, held_name = seniority_name(job), seniority_name(held)
+    if gap >= 2:
+        reason = f"a {job_name}-level role; you have held {held_name}-level roles"
+        return TrimAssessment(allowed=True, reason=reason)
+    if gap == 1 and asked and max(asked) * 2 <= years:
+        reason = (
+            f"a {job_name}-level role asking for {max(asked)}+ years; you have about {years:.0f}"
+        )
+        return TrimAssessment(allowed=True, reason=reason)
+    return TrimAssessment(
+        allowed=False, reason=f"a {job_name}-level role: not more junior than your experience"
+    )
+
+
+def _trimming(trim: TrimAssessment) -> str:
+    if not trim.allowed:
+        return ""
+    return f"\n\n<trimming>\nAllowed: {trim.reason}.\n</trimming>"
+
+
+TailoringEmphasis = Literal["auto", "leadership", "hands_on"]
 
 
 def _preferences(emphasis: TailoringEmphasis, level: LevelEmphasis) -> str:
@@ -133,13 +207,20 @@ def _preferences(emphasis: TailoringEmphasis, level: LevelEmphasis) -> str:
 
 
 def propose_plan(
-    master: MasterCV, jd: JDAnalysis, jd_text: str, llm: LLMProvider, guidance: str = "",
-    emphasis: TailoringEmphasis = "auto", level: LevelEmphasis = "auto",
+    master: MasterCV,
+    jd: JDAnalysis,
+    jd_text: str,
+    llm: LLMProvider,
+    guidance: str = "",
+    emphasis: TailoringEmphasis = "auto",
+    level: LevelEmphasis = "auto",
+    trim: TrimAssessment | None = None,
 ) -> TailoringPlan:
     """Ask the LLM for a tailoring plan. The output is untrusted until `apply_plan`.
     `guidance` is the job_matcher's assessment of this job (what fits, what transfers)."""
     steer = f"\n\n<match_assessment>\n{guidance}\n</match_assessment>" if guidance else ""
     prompt = _context(master, jd, jd_text) + steer + _preferences(emphasis, level)
+    prompt += _trimming(trim) if trim else ""
     return llm.generate(system=PLAN_SYSTEM, prompt=prompt, output_model=TailoringPlan)
 
 
@@ -150,7 +231,7 @@ def critique_cv(
     CV bullets are dropped (a review may only point at facts that exist)."""
     prompt = (
         _context(master, jd, jd_text)
-        + f"\n\n<tailored_cv>\n{cv_to_text(tailored.cv)}\n</tailored_cv>"
+        + f"\n\n<tailored_cv>\n{cv_to_text(tailored.cv, tags=False)}\n</tailored_cv>"
     )
     review = llm.generate(system=CRITIC_SYSTEM, prompt=prompt, output_model=CVCritique)
     ids = set(master.bullet_index())
@@ -173,6 +254,7 @@ def revise_plan(
     guidance: str = "",
     emphasis: TailoringEmphasis = "auto",
     level: LevelEmphasis = "auto",
+    trim: TrimAssessment | None = None,
 ) -> TailoringPlan:
     """A revised plan that addresses the review (still untrusted until `apply_plan`)."""
     steer = f"\n\n<match_assessment>\n{guidance}\n</match_assessment>" if guidance else ""
@@ -180,6 +262,7 @@ def revise_plan(
         _context(master, jd, jd_text)
         + steer
         + _preferences(emphasis, level)
+        + (_trimming(trim) if trim else "")
         + f"\n\n<previous_plan>\n{plan.model_dump_json(indent=2)}\n</previous_plan>"
         + "\n\n<review>\n"
         + "\n".join(f"- {n}" for n in critique.notes())
@@ -188,16 +271,22 @@ def revise_plan(
     return llm.generate(system=PLAN_SYSTEM, prompt=prompt, output_model=TailoringPlan)
 
 
-def apply_plan(master: MasterCV, plan: TailoringPlan, jd: JDAnalysis) -> TailoredCV:
-    """Apply `plan` to a copy of `master`, rejecting any change that adds unsupported facts."""
+def apply_plan(
+    master: MasterCV, plan: TailoringPlan, jd: JDAnalysis, trim: TrimAssessment | None = None
+) -> TailoredCV:
+    """Apply `plan` to a copy of `master`, rejecting any change that adds unsupported facts.
+    The headline stays; bullets and skills are reordered, and bullets are left out only when
+    `trim` allows it."""
     cv = master.model_copy(deep=True)
     changes = _apply_rewrites(cv, master, plan, jd)
     before_order = {e.id: list(e.bullets) for e in cv.experience}
-    _apply_bullet_order(cv, plan.bullet_order)
+    _apply_bullet_order(cv, plan.order_by_role(), trim is not None and trim.allowed)
     cv.skills = _prioritise_skills(cv.skills, plan.skills_priority)
-    changes += _apply_headline(cv, master, plan.headline, jd)
     changes += _apply_summary(cv, master, plan.summary, jd)
+    options, rejected = _headline_options(cv, master, plan.headline_options, jd)
+    changes += rejected
     restored = _restore_dropped(cv, before_order, jd)
+    changes += _removals(cv, before_order, trim)
 
     matched, missing = keyword_coverage(cv, jd)
     total = len(matched) + len(missing)
@@ -210,6 +299,8 @@ def apply_plan(master: MasterCV, plan: TailoringPlan, jd: JDAnalysis) -> Tailore
         missing_keywords=missing,
         restored_keywords=restored,
         changes=changes,
+        trim=trim,
+        headline_options=options,
     )
 
 
@@ -263,6 +354,7 @@ def tailor(
     jd: JDAnalysis | None = None,
     emphasis: TailoringEmphasis = "auto",
     level: LevelEmphasis = "auto",
+    length: LengthChoice = "auto",
 ) -> TailoredCV:
     """End-to-end: JD text + Master CV -> guarded TailoredCV. With `review`, a second reader
     critiques the result and, if it finds issues, one revised plan replaces the first (both
@@ -270,10 +362,11 @@ def tailor(
     if jd is None:
         progress.step("Analysing the job description")
         jd = analyze_jd(jd_text, llm)
+    trim = assess_trim(master, jd, jd_text, length)
     progress.step("Planning the tailored CV")
-    plan = propose_plan(master, jd, jd_text, llm, guidance, emphasis, level)
+    plan = propose_plan(master, jd, jd_text, llm, guidance, emphasis, level, trim)
     progress.step("Checking every change against your CV")
-    out = apply_plan(master, plan, jd)
+    out = apply_plan(master, plan, jd, trim)
     if not review:
         return out
     progress.step("Reviewing the draft as a second reader")
@@ -282,8 +375,8 @@ def tailor(
         progress.step("No revision needed")
         return out
     progress.step("Revising the draft from the review")
-    revised = revise_plan(master, jd, jd_text, plan, critique, llm, guidance, emphasis, level)
-    return apply_plan(master, revised, jd).model_copy(update={"critique": critique.notes()})
+    revised = revise_plan(master, jd, jd_text, plan, critique, llm, guidance, emphasis, level, trim)
+    return apply_plan(master, revised, jd, trim).model_copy(update={"critique": critique.notes()})
 
 
 def _apply_rewrites(
@@ -298,7 +391,9 @@ def _apply_rewrites(
         if src is None:
             changes.append(_record(rw.source_id, "", rw.text, "unknown source_id"))
             continue
-        reason = _fabrication_reason(src, rw.text, jd, cv_skills, master)
+        reason = _fabrication_reason(src, rw.text, jd, cv_skills, master) or _loss_reason(
+            src.text, rw.text
+        )
         changes.append(_record(src.id, src.text, rw.text, reason))
         if reason is None:
             src.text = rw.text
@@ -344,6 +439,17 @@ def _fabrication_reason(
     return None
 
 
+def _loss_reason(source: str, new: str) -> str | None:
+    """Why a rewrite loses information from its source line, or None. Tailoring rephrases;
+    it never drops the line's numbers or most of its detail."""
+    dropped = extract_numbers(source) - extract_numbers(new)
+    if dropped:
+        return f"drops numbers from the original: {sorted(dropped)}"
+    if len(new.strip()) < 0.6 * len(source.strip()):
+        return "drops too much of the original line"
+    return None
+
+
 def _apply_headline(
     cv: MasterCV, master: MasterCV, headline: str | None, jd: JDAnalysis
 ) -> list[ChangeRecord]:
@@ -372,6 +478,29 @@ def _apply_headline(
     if reason is None:
         cv.basics.headline = headline
     return [_record("headline", master.basics.headline or "", headline, reason)]
+
+
+def _headline_options(
+    cv: MasterCV, master: MasterCV, proposed: list[str], jd: JDAnalysis
+) -> tuple[list[str], list[ChangeRecord]]:
+    """Suggested headlines that pass the headline guards (the CV keeps its own); rejected
+    suggestions are recorded."""
+    options: list[str] = []
+    rejected: list[ChangeRecord] = []
+    own = _plain_text(master.basics.headline or "")
+    for text in dict.fromkeys(h.strip() for h in proposed if h.strip()):
+        if _plain_text(text) == own or len(options) == MAX_HEADLINE_OPTIONS:
+            continue
+        record = _apply_headline(cv.model_copy(deep=True), master, text, jd)
+        if record and not record[0].accepted:
+            rejected.extend(record)
+        else:
+            options.append(text)
+    return options, rejected
+
+
+def _plain_text(text: str) -> str:
+    return " ".join(text.casefold().split())
 
 
 def _apply_summary(
@@ -421,18 +550,36 @@ def _restore_dropped(
     return restored
 
 
-def _apply_bullet_order(cv: MasterCV, order: dict[str, list[str]]) -> None:
+def _apply_bullet_order(cv: MasterCV, order: dict[str, list[str]], trim: bool) -> None:
+    """Most relevant bullets first. Unlisted bullets follow in their original order, unless
+    trimming is allowed: then they are left out, keeping at least two per role."""
     for exp in cv.experience:
         ids = order.get(exp.id)
         if not ids:
             continue
         by_id = {b.id: b for b in exp.bullets}
         kept = list(dict.fromkeys(i for i in ids if i in by_id))
-        needed = min(2, len(exp.bullets)) - len(kept)
-        if needed > 0:
-            kept.extend([i for i in by_id if i not in kept][:needed])
-        if kept:
-            exp.bullets = [by_id[i] for i in kept]
+        rest = [i for i in by_id if i not in kept]
+        if trim:
+            needed = max(0, min(2, len(exp.bullets)) - len(kept))
+            kept.extend(rest[:needed])
+        else:
+            kept.extend(rest)
+        exp.bullets = [by_id[i] for i in kept]
+
+
+def _removals(
+    cv: MasterCV, before: dict[str, list[Bullet]], trim: TrimAssessment | None
+) -> list[ChangeRecord]:
+    """One record per bullet left out (only possible when trimming was allowed)."""
+    kept = set(cv.bullet_index())
+    reason = f"left out: {trim.reason}" if trim else "left out"
+    return [
+        _record(b.id, b.text, "", None).model_copy(update={"reason": reason})
+        for bullets in before.values()
+        for b in bullets
+        if b.id not in kept
+    ]
 
 
 def _prioritise_skills(groups: list[SkillGroup], priority: list[str]) -> list[SkillGroup]:
@@ -448,21 +595,36 @@ def _prioritise_skills(groups: list[SkillGroup], priority: list[str]) -> list[Sk
     return sorted(ordered, key=lambda g: min(map(r, g.items)))
 
 
+MAX_KEYWORD_WORDS = 4  # longer must-haves are requirement sentences, not ATS keywords
+
+
+def ats_keywords(jd: JDAnalysis) -> list[str]:
+    """The JD's keywords an ATS matches word for word: hard skills and short must-haves.
+    Requirement sentences ("Experience leading scientific teams.") never appear verbatim in
+    a CV; the job_matcher judges them on meaning instead."""
+    terms = [k for k in jd.hard_skills + jd.must_have if k.strip()]
+    short = [
+        k for k in terms if len(k.split()) <= MAX_KEYWORD_WORDS and not k.rstrip().endswith(".")
+    ]
+    return list(dict.fromkeys(short))
+
+
 def keyword_coverage(cv: MasterCV, jd: JDAnalysis) -> tuple[list[str], list[str]]:
-    """Split the JD's hard skills + must-haves into (present in CV, missing from CV)."""
+    """Split the JD's ATS keywords (`ats_keywords`) into (present in CV, missing from CV)."""
     text = cv_to_text(cv)
-    keywords = list(dict.fromkeys(jd.hard_skills + jd.must_have))
+    keywords = ats_keywords(jd)
     matched = [k for k in keywords if mentions(text, k)]
     return matched, [k for k in keywords if k not in matched]
 
 
-def cv_to_text(cv: MasterCV) -> str:
-    """Flatten a CV to plain text (for keyword checks and embeddings)."""
+def cv_to_text(cv: MasterCV, tags: bool = True) -> str:
+    """Flatten a CV to plain text (for keyword checks and embeddings). `tags=False` leaves
+    out each bullet's skill tags, which are evidence for the guards but not printed."""
     parts: list[str] = [cv.basics.headline or "", cv.basics.summary or ""]
     for e in cv.experience:
         parts.append(f"{e.title} at {e.company}")
         parts += [b.text for b in e.bullets]
-        parts += [s for b in e.bullets for s in b.skills]
+        parts += [s for b in e.bullets for s in b.skills] if tags else []
     parts += [s for g in cv.skills for s in g.items]
     parts += [f"{p.name}: {p.description} {' '.join(p.skills)}" for p in cv.projects]
     parts += [c.name for c in cv.certifications]

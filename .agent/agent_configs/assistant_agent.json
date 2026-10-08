@@ -8,11 +8,14 @@
     "get_context": "selected CV's roles (ids), search preferences, career intent",
     "update_search_intent": "merge patch of the career intent (services/intent.py)",
     "update_preferences": "merge patch of the CV's search preferences (never printed on the CV)",
-    "propose_cv_facts": "the user's own words -> proposals in the evidence review queue (services/enrichment.py); the user accepts each one"
+    "update_profile": "edits a saved profile as the user asks (patch, or append to add list items)",
+    "read_cv": "the selected CV in full, with ids",
+    "edit_cv": "targeted CV edits by id (add/reword/remove a bullet, edit/add/remove a role, set a section); bullets also reach the Word copy",
+    "propose_cv_facts": "a long pasted document -> proposals in the evidence review queue (services/enrichment.py); the user accepts each one"
   },
   "guardrails": [
     "Record only what the user said; never infer, embellish or add numbers.",
-    "New CV facts never go straight into the CV: they wait for the user's acceptance.",
+    "Follow the user's instructions. make the changes asked for; never add numbers, skills or claims they did not state.",
     "For searching, ranking, tailoring or cover letters, point to the button that does it."
   ],
   "max_turns": 6

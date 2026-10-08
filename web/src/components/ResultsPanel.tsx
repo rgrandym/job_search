@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { UseQueryResult } from "@tanstack/react-query";
 import { AlertTriangle, Bookmark, BookmarkX, BrainCircuit, ClipboardList, Download, FileText, History, ListChecks, Loader2, Play, Square, X } from "lucide-react";
 import { api } from "../lib/api";
+import { syncLists } from "../lib/queryClient";
 import { useSearchRunner } from "../lib/useSearchRunner";
 import { useState } from "react";
 import type { MatchResult, SavedJob, SourceReport, TailoredCVView, TrackedJob } from "../lib/types";
@@ -214,7 +215,7 @@ interface Prepared {
 function SelectionBar({ savedIds, saved, hasCv }: { savedIds: Map<string, string>; saved: SavedJob[]; hasCv: boolean }) {
   const qc = useQueryClient();
   const { selected, outcome, set } = useSearch();
-  const [template, setTemplate] = useState("classic");
+  const [template, setTemplate] = useState("original");
   const [prepared, setPrepared] = useState<Prepared[]>([]);
   const [working, setWorking] = useState<string | null>(null);
   const [workingIndex, setWorkingIndex] = useState(0);
@@ -233,8 +234,9 @@ function SelectionBar({ savedIds, saved, hasCv }: { savedIds: Map<string, string
   const toSave = activeSelected.filter((id) => inResults.has(id) && !savedIds.has(id));
   const toRemove = activeSelected.filter((id) => savedIds.has(id));
   const done = () => void qc.invalidateQueries({ queryKey: ["saved"] });
-  const save = useMutation({ mutationFn: () => api.saveJobs(toSave), onSuccess: done });
+  const save = useMutation({ meta: { syncLists: true }, mutationFn: () => api.saveJobs(toSave), onSuccess: done });
   const remove = useMutation({
+    meta: { syncLists: true },
     mutationFn: () => api.removeSaved(toRemove),
     onSuccess: () => {
       set({ selected: selected.filter((id) => !toRemove.includes(id)) });
@@ -250,7 +252,7 @@ function SelectionBar({ savedIds, saved, hasCv }: { savedIds: Map<string, string
       setWorking(item.title);
       setWorkingIndex(index);
       try {
-        const tailored = await api.tailor(jobId, template, selectedResults.get(jobId), "auto", "auto", docTask.next());
+        const tailored = await api.tailor(jobId, template, selectedResults.get(jobId), "auto", "auto", "auto", docTask.next());
         item.cv = tailored.download_url;
         item.letter = (await api.coverLetter(jobId, template, selectedResults.get(jobId), tailored.document_id, docTask.next())).download_url;
       } catch (e) {
@@ -261,7 +263,8 @@ function SelectionBar({ savedIds, saved, hasCv }: { savedIds: Map<string, string
     }
     setWorking(null);
     set({ selected: [] });
-    for (const key of ["saved", "tracker", "state", "tailored-cvs", "cover-letters"]) void qc.invalidateQueries({ queryKey: [key] });
+    void qc.invalidateQueries({ queryKey: ["state"] });
+    void syncLists(); // documents and statuses, in every open tab
   };
   if (!activeSelected.length && !prepared.length) return null;
   const error = (save.error ?? remove.error) as Error | null;
@@ -283,9 +286,10 @@ function SelectionBar({ savedIds, saved, hasCv }: { savedIds: Map<string, string
           {hasCv && (
             <>
               <select className="input w-auto py-0.5 text-[12px]" value={template} onChange={(e) => setTemplate(e.target.value)}>
-                <option value="classic">Classic</option>
-                <option value="modern">Modern</option>
-                <option value="compact">Compact</option>
+                <option value="original">Design: same as my CV</option>
+                <option value="classic">Classic design</option>
+                <option value="modern">Modern design</option>
+                <option value="compact">Compact design</option>
               </select>
               <button
                 className="btn-ghost py-0.5 text-[12px]"
@@ -344,6 +348,7 @@ function SearchResults({ hasCv, savedAt, tracked }: { hasCv: boolean; savedAt: M
     useSearch();
   const runner = useSearchRunner();
   const removeResult = useMutation({
+    meta: { syncLists: true },
     mutationFn: (jobId: string) => api.removeResult(jobId, outcome?.history_id ?? null),
     onSuccess: (_, jobId) => removeJob(jobId),
   });
@@ -453,7 +458,7 @@ function SearchResults({ hasCv, savedAt, tracked }: { hasCv: boolean; savedAt: M
               <button
                 className="flex items-center gap-1 text-faint hover:text-fg"
                 title="Clear the results panel (the search stays in history)"
-                onClick={() => set({ outcome: null, log: [], error: null, openedFrom: null })}
+                onClick={() => set({ outcome: null, log: [], error: null, openedFrom: null, lastSearchId: null })}
               >
                 <X size={12} /> Clear results
               </button>

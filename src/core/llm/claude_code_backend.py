@@ -5,8 +5,11 @@ mode) with built-in tools and MCP servers disabled, no session persistence and n
 settings, in an empty temp directory; the CLI handles sign-in. Inherited Anthropic API keys
 are stripped from the child environment so usage comes from the Claude plan (Pro/Max), never
 from an API account.
-Structured output uses `--json-schema`. Tool calling for the agent loop is emulated with the
-same strict `{message, tool_calls[]}` turn format as the Codex backend.
+Structured output uses `--json-schema`. The assistant runs natively (`run_native`): Claude Code
+runs its own agent loop with real tool use, the app's tools reach it through the app's MCP
+endpoint, and each chat resumes its CLI session, so the model keeps every earlier tool result.
+`chat` (one emulated `{message, tool_calls[]}` turn, as in the Codex backend) remains for
+callers without that endpoint.
 
 For personal, local use: the app drives the user's own signed-in CLI on their machine.
 """
@@ -19,6 +22,8 @@ import shutil
 import subprocess
 import tempfile
 import time
+import uuid
+from collections.abc import Awaitable, Callable
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, TypeVar
@@ -28,12 +33,14 @@ from pydantic import BaseModel, ValidationError
 from src.core.llm.anthropic_backend import NO_EFFORT, NO_XHIGH, subscription_env
 from src.core.llm.calls import run_cli
 from src.core.llm.codex_backend import parse_turn, render_turn, turn_schema
+from src.core.llm.native import MCP_SERVER, NATIVE_TIMEOUT_S, TextRelay, run_streaming
 from src.core.llm.types import (
     ChatMessage,
     ChatResponse,
     LLMConfig,
     LLMError,
     ModelUsage,
+    NativeTurn,
     Role,
     ToolSpec,
     UsageSink,
@@ -309,7 +316,8 @@ class ClaudeCodeStructured:
 
 
 class ClaudeCodeChat:
-    """`ChatModel` with tool calling emulated through a strict JSON turn format."""
+    """`ChatModel` with tool calling emulated through a strict JSON turn format, and a
+    `NativeAgentModel` (`run_native`) for Claude Code's own agent loop."""
 
     def __init__(self, cfg: LLMConfig, role: Role) -> None:
         self.cfg = cfg.for_role(role)
@@ -330,3 +338,125 @@ class ClaudeCodeChat:
             input_tokens=tokens_in,
             output_tokens=tokens_out,
         )
+
+    async def run_native(
+        self,
+        *,
+        system: str,
+        prompt: str,
+        mcp_url: str,
+        session_id: str | None,
+        workdir: Path,
+        on_text: Callable[[str], Awaitable[None]],
+        cancelled: Callable[[], bool],
+    ) -> NativeTurn:
+        """One user turn in Claude Code's own agent loop (see `run_native_turn`)."""
+        return await run_native_turn(
+            self.cfg, self.model, system, prompt, mcp_url, session_id, workdir, on_text, cancelled
+        )
+
+
+# ------------------------------------------------------------------ native agent
+
+
+def _native_command(
+    binary: str, cfg: LLMConfig, model: str, system: str, mcp_url: str, session: tuple[str, bool]
+) -> list[str]:
+    """`claude -p` with only the app's MCP tools: no built-in shell, file or web tools."""
+    session_id, resume = session
+    config = {"mcpServers": {MCP_SERVER: {"type": "http", "url": mcp_url}}}
+    cmd = [
+        binary,
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--mcp-config",
+        json.dumps(config),
+        "--strict-mcp-config",
+        "--tools",
+        "",
+        "--allowedTools",
+        f"mcp__{MCP_SERVER}",
+        "--setting-sources",
+        "",
+        "--system-prompt",
+        system,
+        "--resume" if resume else "--session-id",
+        session_id,
+    ]
+    if model:
+        cmd += ["--model", model]
+    if effort := _effort(cfg, model):
+        cmd += ["--effort", effort]
+    return cmd
+
+
+def _blocks(event: dict[str, Any]) -> tuple[list[str], bool]:
+    """(texts, has tool use) of one stream-json assistant event."""
+    content = (event.get("message") or {}).get("content") or []
+    blocks = [b for b in content if isinstance(b, dict)]
+    texts = [str(b.get("text")) for b in blocks if b.get("type") == "text" and b.get("text")]
+    return texts, any(b.get("type") == "tool_use" for b in blocks)
+
+
+def claude_events(
+    events: list[dict[str, Any]], on_text: Callable[[str], Awaitable[None]]
+) -> Callable[[dict[str, Any]], Awaitable[None]]:
+    """Collects stream-json events; text written before a tool call goes to `on_text` (the
+    final text is the answer, which the `result` event repeats)."""
+    relay = TextRelay(on_text)
+
+    async def on_event(event: dict[str, Any]) -> None:
+        events.append(event)
+        if event.get("type") == "assistant":
+            texts, uses_tool = _blocks(event)
+            await (relay.tool_use(texts) if uses_tool else relay.text(texts))
+
+    return on_event
+
+
+def _native_result(events: list[dict[str, Any]], code: int, stderr: str) -> NativeTurn:
+    _record_limits(events)
+    data = next((e for e in reversed(events) if e.get("type") == "result"), None)
+    if data is None:
+        tail = "\n".join(stderr.strip().splitlines()[-8:])
+        raise LLMError(f"claude -p failed (exit {code}): {tail}")
+    if data.get("is_error") or data.get("subtype") != "success":
+        detail = data.get("result") or data.get("api_error_status") or data.get("subtype")
+        raise LLMError(f"Claude Code error: {detail}")
+    tokens_in, tokens_out = _tokens(data)
+    return NativeTurn(
+        text=str(data.get("result") or ""),
+        session_id=str(data.get("session_id") or ""),
+        input_tokens=tokens_in,
+        output_tokens=tokens_out,
+    )
+
+
+async def run_native_turn(
+    cfg: LLMConfig,
+    model: str,
+    system: str,
+    prompt: str,
+    mcp_url: str,
+    session_id: str | None,
+    workdir: Path,
+    on_text: Callable[[str], Awaitable[None]],
+    cancelled: Callable[[], bool],
+) -> NativeTurn:
+    """One user turn through Claude Code's own agent loop; a new session unless resuming."""
+    binary = claude_binary()
+    if binary is None:
+        raise LLMError("Claude Code CLI not found")
+    session = (session_id, True) if session_id else (str(uuid.uuid4()), False)
+    events: list[dict[str, Any]] = []
+    code, stderr = await run_streaming(
+        _native_command(binary, cfg, model, system, mcp_url, session),
+        prompt,
+        workdir,
+        {**subscription_env(), "MCP_TOOL_TIMEOUT": str(NATIVE_TIMEOUT_S * 1000)},
+        claude_events(events, on_text),
+        cancelled,
+    )
+    return _native_result(events, code, stderr)

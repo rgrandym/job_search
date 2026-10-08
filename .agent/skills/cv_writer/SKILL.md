@@ -17,7 +17,8 @@ Turns a factual **Master CV** into job-specific, ATS-optimised CVs and exports t
 | `src/services/tailored_documents.py` | Saved tailored drafts, guarded edits and Word versions |
 | `src/services/cover_letters.py` | Saved letter text, edits and Word/text exports |
 | `src/cv/ats.py` | Reads the exported .docx back the way an ATS does |
-| `src/cv/docx_exporter.py` | Word rendering (CV and cover letter) + template definitions (`TEMPLATES`) |
+| `src/cv/docx_original.py` | Tailored CV written as a copy of the original Word CV (its design kept) |
+| `src/cv/docx_exporter.py` | Word rendering for PDF/text CVs and cover letters + template definitions (`TEMPLATES`) |
 | `src/services/enrichment.py` | Evidence review queue: document → proposed CV additions → user accepts |
 
 The Master CV lives at `data/master_cv.json` (git-ignored, personal data). Example:
@@ -88,7 +89,55 @@ bullets with fresh ids and their numbers as `metrics`. Inferred items stay sugge
 
 ---
 
-## 3. Rewrite bullets as STAR accomplishments, without hallucinating
+## 3. Tailoring rules: same CV, content fitted to the post
+
+These hold for every tailored CV (user's decision; mandatory):
+
+1. **Same format and design as the original CV** (template `"original"`, the default).
+   `docx_original.write_like_original` writes the tailored CV as a copy of the selected Word
+   CV, or, for a PDF or text CV, of its Word version in the library
+   (`cv_service.original_docx`: the uploaded `.docx` with the same name, or at least 60% the
+   same words); for the structured Master CV, the library Word CV that holds at least 60% of
+   its words (`_master_docx`). Layout, fonts, name, section headings and publications stay exactly as in the
+   original. Only the content changes: bullet wording, bullet order within each role, skill
+   order, the summary. Paragraphs move whole, so each keeps its own formatting. The `classic` /
+   `modern` / `compact` templates are used only when the user picks one, or when no Word
+   version exists (`TailoredCV.document_notes` says which).
+2. **The CV keeps its own headline; publications are never edited.** The plan returns up to 4
+   `headline_options` for the job; each must pass the headline guard (no level above any title
+   held, no role the CV does not show, no unevidenced skills or numbers) and the passing ones
+   are offered in `TailoredCV.headline_options` and written into the Word file under the CV's
+   own headline, in its formatting, so the user can delete the ones they do not want. Picking
+   one in the app saves a new Word version with only that headline, through the guarded edit
+   (`tailored_documents.edit`). The second reader sees the CV as printed (no per-bullet skill
+   tags) and is told these rules, so it suggests rewording and reordering only.
+3. **Never lose information.** The bullets that fit the post move to the top of their role and
+   the others follow at the bottom of that role; relevant skills lead each skills list and the
+   rest follow. Nothing is removed, because the rest may still be useful. Before tailoring a
+   Word CV, `docx_original.align_to_document` finds each role's block in the file (its heading
+   line to the next role or section) and gives the structured CV the document's own wording
+   (matched bullets keep their ids; lines the parse missed are added), so rewrites start from
+   every fact the user wrote. The summary is read the same way, from the lines under the
+   file's profile/summary heading (several paragraphs joined by a blank line), and the
+   rewritten summary goes back into those lines (`docx_original.profile_paragraphs`); the
+   headline is taken from its line in the file. Headers and footers get the CV's own name,
+   "CV" instead of "Master CV" and today's date. A rewrite that drops one of its line's numbers or cuts it below
+   60% of its length is rejected (`tailor._loss_reason`). Only bullet and numbered lines move;
+   a role's intro paragraph and date lines stay in place.
+4. **Length is the user's choice** (`length`, a picker on the job card): `full` keeps every
+   line; `junior` trims for a junior role; `auto` (default) trims only for a clearly more junior
+   role, which `tailor.assess_trim(master, jd, jd_text, length)` decides in code, never the
+   model: the job's stated level (`JDAnalysis.seniority`) at least two steps below the highest
+   title held, or one step below while the posting asks for at most half the candidate's years
+   of experience. A job with no stated level is never trimmed automatically.
+   When allowed, the plan may leave out bullets that would overstate the candidate, keeping at
+   least two per role; roles, education and publications always stay; a left-out bullet that
+   carried a JD keyword is put back; every left-out line is recorded in `TailoredCV.changes`
+   and listed in the UI with the reason (`TailoredCV.trim`).
+5. Anything the Word writer cannot find safely in the file is left as in the original and
+   reported in `TailoredCV.document_notes`.
+
+## 3a. Rewrite bullets as STAR accomplishments, without hallucinating
 
 `tailor.propose_plan(..., guidance) -> TailoringPlan`, then `tailor.apply_plan(...)` enforces
 the rules. `guidance` is the job_matcher's verdict on this job (fit summary, reasons,
@@ -105,7 +154,8 @@ bullet's id. Compress STAR into one sentence:
 | Led migration of model training pipelines to Kubernetes, cutting training costs by 35%. | Drove MLOps migration of model training pipelines to Kubernetes, cutting training costs 35%. |
 
 **Allowed:** rephrasing, reordering clauses, swapping in the JD's synonym for the *same* thing,
-dropping irrelevant detail, promoting relevant bullets, omitting irrelevant ones (keep ≥ 2/role).
+dropping irrelevant detail within a bullet, promoting relevant bullets (the rest move down).
+Omitting bullets only under rule 4 above.
 
 **Forbidden, and auto-rejected by `apply_plan`:**
 - Any number, %, currency amount or count not present in the source bullet or its `metrics`.
@@ -119,18 +169,21 @@ Rejected rewrites keep the original bullet. Every decision is logged in `Tailore
 missing keyword is a gap to discuss, never something to paper over. If the user confirms they
 do have that experience, add it to the **Master CV** first, then re-tailor.
 
-Also produced, and guarded the same way (recorded in `changes` as `headline` / `summary`):
-- `headline`: rejected if it claims a seniority above any title held (or the CV headline), a
-  role the CV does not show (role words of the title part, before a comma, "|" or dash), or
-  skills or numbers the CV lacks. "Staff ML Engineer" for a Senior is rejected.
+Also produced, and guarded the same way (recorded in `changes` as `summary`):
+- Headline suggestions (rule 2), and a user's own headline edit to a saved draft, are rejected
+  if they claim a seniority above any title held, a role the CV does not show (role words of the
+  title part, before a comma, "|" or dash), or skills or numbers the CV lacks.
 - `summary` (3–4 substantive sentences): lead with evidence relevant to the job, then retain
   distinctive relevant breadth from the Master CV, such as leadership, hands-on practice or
   adjacent experience. Numbers and skills must exist somewhere in the CV. The tailoring request
   may emphasise leadership or hands-on work and use a more senior or junior presentation;
   these choices never change the candidate's evidenced level or permit new claims.
-- `bullet_order` (keep ≥ 2 per role) and `skills_priority` (re-orders existing skills only).
-  If the order left out the only bullet carrying a JD keyword, the bullet is put back
-  (`restored_keywords`); `missing_keywords` are then true gaps.
+- `bullet_order`: a list of `{experience_id, bullet_ids}` for every role (a list, because
+  strict output schemas such as Codex's cannot carry dict keys) (most relevant first; unlisted bullets follow, or are left out only under
+  rule 4) and `skills_priority` (re-orders existing skills only). If trimming left out the only
+  bullet carrying a JD keyword, the bullet is put back (`restored_keywords`);
+  `missing_keywords` are then true gaps. Keywords are `tailor.ats_keywords`: hard skills and
+  must-haves of at most 4 words; requirement sentences are left to the job_matcher's verdict.
 
 **Review and revision** (`tailor(..., review=True)`, the default): a second, fresh reader
 (`critique_cv`, `CVCritique`) lists JD requirements a Master CV bullet evidences but the
@@ -193,18 +246,22 @@ the CV library, displays their text, permits edits, exports Word or plain text, 
 one letter or all letters with their saved exports. Older generated Word files in the root of
 `output/` are moved into those folders when the
 document libraries load; older download links continue to work.
-Uploaded CV files are stored byte-for-byte in `data/cvs/` on upload, with an identical copy in
-`output/cvs/` (the library lists that copy once; deleting the CV removes both). The app never
-modifies them. Opening a library CV only views it (`GET /api/cv/preview/{id}`: PDFs and text as
+Uploaded CV files are stored in `data/cvs/` on upload, with an identical copy in `output/cvs/`.
+They are one CV: the library lists it once, the two files are kept identical (the one changed
+last, in Word or by the assistant's `edit_cv`, is copied over the other), its id never changes
+(`data/cv_ids.json`), and deleting the CV removes both. Opening a library CV only views it (`GET /api/cv/preview/{id}`: PDFs and text as
 stored; `.docx` files as a PDF that Microsoft Word renders from a copy in its sandbox, cached in
 `data/cvs/.preview/`) or opens its copy in `output/cvs/` in a desktop app (`POST /api/cv/open/{id}`, creating the copy
 if needed and reusing an existing same-name copy so earlier edits are kept; `?app=word` opens a
-PDF in Word as an editable copy). Saves therefore land in `output/cvs/`, where edited `.docx`
-files are listed as their own CVs. Viewing never parses the CV.
+PDF in Word as an editable copy). Saves land in `output/cvs/` and are copied back to the upload. Viewing never parses the CV.
 
 ---
 
 ## 4. Export to Word
+
+By default a CV is never re-rendered: tailored and general CVs are copies of its Word design
+(section 3). The templates below apply only when the user picks one, or when no Word version
+of the CV exists.
 
 ```bash
 python .agent/skills/cv_writer/docx_templates.py --list
@@ -227,5 +284,6 @@ Name generated CV files `<First>_<Last>_<Company>.docx` under `output/cvs/` (git
 **ATS read-back** (`ats.check_docx(path, cv, keywords) -> ATSReport`, run after every
 tailored export and returned as `TailoredCV.ats`): reads the file's text as a parser would,
 and reports contact details not readable as plain text, keyword coverage of the exported
-text, an estimated page count (500 words a page; warns above 2), tables, and contact details
+text (case-insensitive), an estimated page count (500 words a page; reported, never a warning:
+the user prefers a full-length CV), tables, and contact details
 placed in the page header.

@@ -78,11 +78,12 @@ def export_docx(cv: MasterCV | TailoredCV, path: Path, template: str = "classic"
         raise ValueError(f"Unknown template {template!r}. Choose from {sorted(TEMPLATES)}")
     tpl = TEMPLATES[template]
     master = cv.cv if isinstance(cv, TailoredCV) else cv
+    options = cv.headline_options if isinstance(cv, TailoredCV) else []
 
     doc = Document()
     dt.set_margins(doc, tpl.margins_in)
     dt.set_base_font(doc, tpl.font, tpl.body_pt)
-    _header(doc, master, tpl)
+    _header(doc, master, tpl, options)
     renderers = {
         "summary": _summary,
         "experience": _experience,
@@ -115,14 +116,19 @@ def _heading(doc: DocxDocument, text: str, tpl: DocxTemplate) -> None:
     dt.add_bottom_border(p, color=tpl.accent)
 
 
-def _header(doc: DocxDocument, cv: MasterCV, tpl: DocxTemplate) -> None:
+def _header(
+    doc: DocxDocument, cv: MasterCV, tpl: DocxTemplate, headline_options: list[str]
+) -> None:
+    """Name, headline (then any suggested headlines, for the user to keep or delete), contact."""
     align = WD_ALIGN_PARAGRAPH.CENTER if tpl.centered_header else WD_ALIGN_PARAGRAPH.LEFT
     b = cv.basics
     dt.add_text(
         doc, b.name, size_pt=tpl.name_pt, bold=True, color=tpl.accent, align=align, space_after_pt=0
     )
-    if b.headline:
-        dt.add_text(doc, b.headline, size_pt=tpl.body_pt + 1, align=align, space_after_pt=0)
+    headlines = [b.headline] if b.headline else []
+    headlines += [h for h in headline_options if h.strip() and h not in headlines]
+    for headline in headlines:
+        dt.add_text(doc, headline, size_pt=tpl.body_pt + 1, align=align, space_after_pt=0)
     contact = [x for x in (b.location, b.email, b.phone) if x]
     contact += [link.url for link in b.links]
     if contact:
@@ -210,7 +216,9 @@ def _languages(doc: DocxDocument, cv: MasterCV, tpl: DocxTemplate) -> None:
 def export_cover_letter(
     letter: CoverLetter, cv: MasterCV, path: Path, template: str = "classic"
 ) -> Path:
-    """Write a guarded cover letter to `path` (.docx), styled like the CV template."""
+    """Write a guarded cover letter to `path` (.docx), styled like the CV template ("original",
+    a CV in its own Word design, gives the letter the classic style)."""
+    template = "classic" if template == "original" else template
     if template not in TEMPLATES:
         raise ValueError(f"Unknown template {template!r}. Choose from {sorted(TEMPLATES)}")
     tpl = TEMPLATES[template]

@@ -27,17 +27,24 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr
 
-from src.agents import chat
+from src.agents import chat, mcp
 from src.core import progress
 from src.core.config import PROJECT_ROOT, LLMProviderName
 from src.core.llm import LLMConfig, LLMError, ModelUsage, available_models, claude_code_backend
 from src.core.llm.catalog import ModelInfo
 from src.core.llm.codex_backend import codex_status, codex_usage, start_login
-from src.cv.models import MasterCV, TailoredCVEdits, TailoredDocument
+from src.cv.models import MasterCV, TailoredCV, TailoredCVEdits, TailoredDocument
 from src.jobs.fetcher import SELECTABLE_SOURCES, SOURCE_CATALOG, build_sources
 from src.jobs.models import (
     JobPosting,
@@ -88,6 +95,8 @@ def _llm_view() -> dict[str, Any]:
         "key_set": cfg.api_key is not None,
         "ready": ws.llm_ready(),
         "profile_ready": ws.provider_ready(cfg.profile_provider_for()),
+        "cv_ready": ws.provider_ready(cfg.provider_for("cv")),
+        "letter_ready": ws.provider_ready(cfg.provider_for("letter")),
     }
 
 
@@ -294,14 +303,26 @@ class LLMUpdate(BaseModel):
     profile_model: str = ""  # empty: the profile uses the quality model
     profile_effort: Effort = "high"
     profile_provider: LLMProviderName | None = None  # None: the main provider
+    cv_model: str = ""  # empty: tailored CVs use the quality model
+    cv_effort: Effort = "high"
+    cv_provider: LLMProviderName | None = None  # None: the main provider
+    letter_model: str = ""  # empty: letters use the CV model, else the quality model
+    letter_effort: Effort = "high"
+    letter_provider: LLMProviderName | None = None  # None: the main provider
     api_key: str | None = None
     profile_api_key: str | None = None
+    cv_api_key: str | None = None
+    letter_api_key: str | None = None
 
 
 @app.put("/api/llm")
 def update_llm(body: LLMUpdate) -> dict[str, Any]:
     get_workspace().set_llm_config(
-        body.model_dump(exclude={"api_key", "profile_api_key"}), body.api_key, body.profile_api_key
+        body.model_dump(exclude={"api_key", "profile_api_key", "cv_api_key", "letter_api_key"}),
+        body.api_key,
+        body.profile_api_key,
+        body.cv_api_key,
+        body.letter_api_key,
     )
     return _llm_view()
 
@@ -322,10 +343,7 @@ def llm_models(provider: LLMProviderName) -> list[ModelInfo]:
 def chat_providers() -> dict[str, bool]:
     """Credential availability for providers offered in the assistant picker."""
     ws = get_workspace()
-    return {
-        provider: ws.provider_ready(provider)
-        for provider in {ws.llm.provider, "claude_code"}
-    }
+    return {provider: ws.provider_ready(provider) for provider in {ws.llm.provider, "claude_code"}}
 
 
 @app.get("/api/codex/status")
@@ -625,8 +643,8 @@ def _stream(work: Callable[[Any, Any], Awaitable[Any]]) -> StreamingResponse:
         item = {
             "type": "model_usage",
             "agent": "search",
-            "provider": get_workspace().llm.provider,
             **u.model_dump(),
+            "provider": u.provider or get_workspace().llm.provider,
         }
         loop.call_soon_threadsafe(queue.put_nowait, item)
 
@@ -731,15 +749,49 @@ def stop_search(run_id: str) -> dict[str, bool]:
 
 
 class TailorRequest(BaseModel):
-    template: Literal["classic", "modern", "compact"] = "classic"
+    template: Literal["original", "classic", "modern", "compact"] = "original"
     result: MatchResult | None = None
     tailored_cv_id: str | None = None
     emphasis: Literal["auto", "leadership", "hands_on"] = "auto"
     level: Literal["auto", "senior", "junior"] = "auto"
+    length: Literal["auto", "full", "junior"] = "auto"
+
+
+def _tailor_report(tailored: TailoredCV, document_id: str | None, url: str) -> dict[str, Any]:
+    """What tailoring did (coverage, keywords, headlines, rejections), shown under the job."""
+    return {
+        "document_id": document_id,
+        "headline": tailored.cv.basics.headline,
+        "headline_options": tailored.headline_options,
+        "download_url": url,
+        "keyword_coverage": tailored.keyword_coverage,
+        "missing_keywords": tailored.missing_keywords,
+        "restored_keywords": tailored.restored_keywords,
+        "critique": tailored.critique,
+        "ats": tailored.ats,
+        "source_ats_keyword_coverage": tailored.source_ats_keyword_coverage,
+        "trim": tailored.trim,
+        "left_out": [c.original for c in tailored.changes if c.accepted and not c.tailored],
+        "document_notes": tailored.document_notes,
+        "rejected": sum(not c.accepted for c in tailored.changes),
+        "rejections": [
+            {"source_id": c.source_id, "reason": c.reason}
+            for c in tailored.changes
+            if not c.accepted
+        ],
+    }
 
 
 def _tailored_view(document: TailoredDocument) -> dict[str, Any]:
-    """Return the editable CV and download link without duplicating its source snapshot."""
+    """Return the editable CV, download link and tailoring report (kept with the draft, so it
+    is shown again after a reload), without duplicating its source snapshot."""
+    cvs_dir = get_workspace().output_dir / "cvs"
+    url = _file_url(
+        cvs_dir / document.filename
+        if (cvs_dir / document.filename).exists()
+        else get_workspace().output_dir / document.filename
+    )
+    report = None if document.imported else _tailor_report(document.tailored, document.id, url)
     return {
         "id": document.id,
         "job_id": document.job_id,
@@ -748,16 +800,15 @@ def _tailored_view(document: TailoredDocument) -> dict[str, Any]:
         "created_at": document.created_at,
         "updated_at": document.updated_at,
         "template": document.template,
-        "download_url": _file_url(
-            get_workspace().output_dir / "cvs" / document.filename
-            if (get_workspace().output_dir / "cvs" / document.filename).exists()
-            else get_workspace().output_dir / document.filename
-        ),
+        "download_url": url,
         "cv": document.tailored.cv,
+        "original_headline": document.source_cv.basics.headline,
+        "headline_options": document.tailored.headline_options,
         "ats": document.tailored.ats,
         "source_ats_keyword_coverage": document.tailored.source_ats_keyword_coverage,
         "reviewed": document.reviewed,
         "imported": document.imported,
+        "report": report,
     }
 
 
@@ -863,24 +914,12 @@ async def tailor_job(
                 result=result,
                 emphasis=body.emphasis,
                 level=body.level,
+                length=body.length,
             )
     except (ValueError, LLMError) as exc:
         raise HTTPException(422, str(exc)) from exc
     return {
-        "document_id": tailored.document_id,
-        "download_url": _file_url(path),
-        "keyword_coverage": tailored.keyword_coverage,
-        "missing_keywords": tailored.missing_keywords,
-        "restored_keywords": tailored.restored_keywords,
-        "critique": tailored.critique,
-        "ats": tailored.ats,
-        "source_ats_keyword_coverage": tailored.source_ats_keyword_coverage,
-        "rejected": sum(not c.accepted for c in tailored.changes),
-        "rejections": [
-            {"source_id": c.source_id, "reason": c.reason}
-            for c in tailored.changes
-            if not c.accepted
-        ],
+        **_tailor_report(tailored, tailored.document_id, _file_url(path)),
         "tracking": tracker.tracking_for(ws, result.job),
     }
 
@@ -1289,10 +1328,40 @@ async def chat_ws(websocket: WebSocket) -> None:
                         float(msg.get("threshold", 60)),
                         bool(msg.get("widen", False)),
                         msg.get("profile_key"),
+                        _mcp_base(websocket),
                     )
                 )
     except WebSocketDisconnect:
         chat.cancel(session)
+
+
+def _mcp_base(websocket: WebSocket) -> str | None:
+    """This backend's own address, where a native model reaches the app's tools."""
+    server = websocket.scope.get("server")
+    if not server:
+        return None
+    host, port = server
+    host = "127.0.0.1" if host in ("0.0.0.0", "::", "localhost") else host
+    return f"http://{host}:{port}/api/mcp"
+
+
+@app.post("/api/mcp/{token}", response_model=None)
+async def mcp_endpoint(token: str, request: Request) -> Response:
+    """The assistant's tools for a native run in progress (MCP over streamable HTTP)."""
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse(mcp.parse_error(), status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse(mcp.parse_error(), status_code=400)
+    reply = await mcp.handle(token, body)
+    return Response(status_code=202) if reply is None else JSONResponse(reply)
+
+
+@app.api_route("/api/mcp/{token}", methods=["GET", "DELETE"], response_model=None)
+async def mcp_stream(token: str) -> Response:
+    """No server-initiated stream or session state: every reply is a plain JSON response."""
+    return Response(status_code=405)
 
 
 # ------------------------------------------------------------------ SPA

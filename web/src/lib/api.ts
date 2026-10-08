@@ -12,7 +12,6 @@ import type {
   LabelReview,
   LearningState,
   UserLabel,
-  ATSReport,
   FamilyYield,
   OutcomeReview,
   OutcomeStage,
@@ -36,6 +35,7 @@ import type {
   SearchOutcome,
   SearchQuery,
   TailoredCVView,
+  TailorReport,
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -154,8 +154,16 @@ export const api = {
     profile_model: string;
     profile_effort: Effort;
     profile_provider: Provider | null;
+    cv_model: string;
+    cv_effort: Effort;
+    cv_provider: Provider | null;
+    letter_model: string;
+    letter_effort: Effort;
+    letter_provider: Provider | null;
     api_key?: string;
     profile_api_key?: string;
+    cv_api_key?: string;
+    letter_api_key?: string;
   }) => request<LLMView>("/api/llm", json("PUT", body)),
   codexStatus: () => request<CodexStatus>("/api/codex/status"),
   codexUsage: () => request<CodexUsage>("/api/codex/usage"),
@@ -253,22 +261,11 @@ export const api = {
   sourceYield: () => request<SourceYield[]>("/api/sources/yield"),
   tailor: (jobId: string, template: string, result?: MatchResult,
     emphasis: "auto" | "leadership" | "hands_on" = "auto",
-    level: "auto" | "senior" | "junior" = "auto", progressId?: string) =>
-    request<{
-      document_id: string;
-      download_url: string;
-      keyword_coverage: number;
-      missing_keywords: string[];
-      restored_keywords: string[];
-      critique: string[];
-      ats: ATSReport | null;
-      source_ats_keyword_coverage: number | null;
-      rejected: number;
-      rejections: Rejection[];
-      tracking: JobTracking | null;
-    }>(
+    level: "auto" | "senior" | "junior" = "auto",
+    length: "auto" | "full" | "junior" = "auto", progressId?: string) =>
+    request<TailorReport & { tracking: JobTracking | null }>(
       tracked(`/api/jobs/${encodeURIComponent(jobId)}/tailor`, progressId),
-      json("POST", { template, result, emphasis, level }),
+      json("POST", { template, result, emphasis, level, length }),
     ),
   tailoredCVs: (jobId: string) =>
     request<TailoredCVView[]>(`/api/jobs/${encodeURIComponent(jobId)}/tailored-cvs`),

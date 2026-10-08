@@ -6,8 +6,9 @@
 **Frontend (`web/`):** React 18 · TypeScript (strict) · Vite · Tailwind (CSS tokens in `index.css`) · Zustand · TanStack Query · Lucide · react-resizable-panels
 **Conda env:** `job_search`. Always activate it before running Python commands.
 **LLMs:** Claude (Anthropic SDK), OpenAI or OpenRouter (Chat Completions), selected in the UI. Separate
-quality model (CV and letters, second opinions, assistant), screening model (job matching) and an
-optional profile model (profile summary; blank = quality model; may use another provider), each with its own effort. All model access goes through `src/core/llm/`.
+quality model (CV reading, second opinions, assistant), screening model (job matching) and optional
+profile, CV writing and cover letter models (blank = quality model; a blank letter model uses the
+CV model; each may use another provider, so writing is independent of search), each with its own effort. All model access goes through `src/core/llm/`.
 **Scope (user preference):** keep it simple. No audit or trace infrastructure. Effort goes into
 search quality and profile matching.
 
@@ -48,7 +49,9 @@ src/
   core/        config.py (Settings) · llm_provider.py (protocols, embedder, factory)
                progress.py (live task steps + in-flight model calls, polled by the UI)
     llm/       types.py · anthropic_backend.py · openai_backend.py (OpenAI + OpenRouter)
-  cv/          models.py · master_cv_manager.py · tailor.py (guards + review) · cover_letter.py
+               claude_code_backend.py · codex_backend.py · native.py (CLI agent loops over MCP)
+  cv/          models.py · master_cv_manager.py · tailor.py (guards + review + trim rule) · cover_letter.py
+               docx_original.py (tailored CV = a copy of the original Word CV) · edits.py
                ats.py (docx read-back) · docx_exporter.py
   jobs/        models.py · fetcher.py · matcher.py + scorer.py (pre-filter)
                profile_memory.py (summary, role families, memory) · screener.py (job_matcher)
@@ -57,6 +60,7 @@ src/
                public_boards.py (LinkedIn public search, Totaljobs, jobs.ac.uk, NHS Jobs)
                companies.py (Greenhouse, Lever, Ashby, Workable, SmartRecruiters, Recruitee, Personio,
                Teamtailor, Pinpoint, Workday, iCIMS, BambooHR, careers pages) · directories.py (BioPharmGuy)
+               career_sites.py (SuccessFactors, Phenom, Oracle, Jobvite, Radancy CWS careers sites)
                inbox.py (LinkedIn/Indeed alerts, saved postings)
                pages.py (a posting's own page: JSON-LD full text, robots.txt kept)
                browser.py (headless signed-out Chrome for postings still too thin)
@@ -73,7 +77,8 @@ src/
                model_compare.py (CLI: score model setups against your labels) · compare_usage.py
                (its cost per model, plan usage and progress bar)
                company_discovery.py (directory -> data/companies.json; run by searches + Update button)
-  agents/      the assistant: registry.py · runtime.py (loop) · tools.py · definitions.py · prompts/assistant.md · chat.py
+  agents/      the assistant: registry.py · runtime.py (loop; native runs) · mcp.py (tools for the Claude Code
+               and Codex loops) · tools.py · definitions.py · prompts/assistant.md · chat.py
   web/         app.py (REST + /api/ws/chat + serves web/dist)
 web/src/       App.tsx · components/ · stores/ (zustand) · lib/ (api.ts, types.ts mirror the models)
 .agent/skills/ SKILL.md + generated JSON schemas + thin CLI entrypoints
@@ -106,7 +111,9 @@ data/examples/ committed fixtures · data/* and output/ are git-ignored (persona
    saving and tracking remain implemented in `src/services/`. Buttons call them directly;
    the assistant (`src/agents/`) uses thin tools over those same services. New assistant
    actions belong in `actions.py`, `actions_more.py` or `tools.py` and are registered in
-   `definitions.py`. New CV facts still go through the evidence review queue. Frontend types
+   `definitions.py`. The assistant carries out the user's instructions: it makes targeted CV edits
+   (`edit_cv`, `src/cv/edits.py`) and edits profiles as asked, never adding facts the user did not give.
+   Facts read from documents still go through the evidence review queue. Frontend types
    in `web/src/lib/types.ts` mirror backend events and models. Update both together.
 
 ## No-Fabrication Contract (MANDATORY)
@@ -119,13 +126,45 @@ A CV is a factual document. Tailoring may rephrase and reorder. It may never inv
   `missing_keywords` to the user.
 - New facts go into the Master CV (after the user confirms them), never straight into a tailored CV.
 
+## Tailored CV Rules (MANDATORY, user's decision 2026-10-07)
+
+Every tailored CV is written the same way (`tailor.apply_plan`, `cv/docx_original.py`):
+- **Same design as the original** (template `"original"`, the default). The tailored CV is a copy
+  of the selected Word CV (`write_like_original`); for a PDF or text CV, of its Word version in
+  the library (`cv_service.original_docx`: same name, or nearly the same text); for the
+  structured Master CV, of the library Word CV holding most of its words (`_master_docx`). Layout, fonts,
+  name, section headings and publications are untouched. A template (`docx_exporter.TEMPLATES`)
+  is used only when the user picks one, or when no Word version exists.
+- **The CV keeps its own headline.** The model suggests up to 4 role-specific headlines
+  (`headline_options`, each passing the headline guards). They are written into the Word file
+  under the CV's own headline, in its formatting, for the user to delete the ones they do not
+  want (user's decision 2026-10-07); picking one in the app saves a version with only that one.
+  Publications are never edited.
+- **Nothing is removed.** Content is rephrased (under the no-fabrication guards) and reordered:
+  the bullets that fit the post lead each role, the rest follow at the bottom of that role;
+  relevant skills lead each skills list, the others follow. Nothing is dropped. Tailoring starts
+  from the document's own wording (`docx_original.align_to_document`), and a rewrite that drops
+  a number or most of its line is rejected (`tailor._loss_reason`).
+- **Length is the user's choice** (`length`): "full" keeps every line, "junior" trims for a junior
+  role, "auto" (default) trims only when code (`tailor.assess_trim`, never the model) finds the
+  job clearly more junior: its stated level at least two steps below the highest title held, or
+  one step below while asking for at most half the candidate's years; unknown level, no trim.
+  When trimming, at least two bullets stay per role; roles, education and publications stay;
+  every left-out line is recorded and shown to the user.
+- Anything the Word writer cannot place safely is left as in the original and reported
+  (`TailoredCV.document_notes`).
+Changing these rules means updating `tailor.py`, `docx_original.py`, the cv_writer SKILL.md and
+the tests together.
+
 ## Job Sources (MANDATORY)
 
 Personal job-search tool: public job pages may be read, within reason.
 
 - Official APIs (Reed, CV-Library), public ATS feeds (Greenhouse, Lever, Ashby, Workable,
   SmartRecruiters, Recruitee, Personio, Teamtailor RSS, Pinpoint), JSON endpoints that a careers site's own pages call
-  (Workday `/wday/cxs/`, iCIMS job lists, BambooHR `/careers/list`) **when that host's `robots.txt` allows them**, or
+  (Workday `/wday/cxs/`, iCIMS job lists, BambooHR `/careers/list`, SuccessFactors `/search/`, Phenom
+  `search-results`, Oracle `hcmRestApi` requisitions, Jobvite job lists, the jobs API a Radancy CWS page
+  names) **when that host's `robots.txt` allows them**, or
   JSON-LD from careers pages whose `robots.txt` allows us. All HTTP goes through
   `sources.base.HttpFetcher` (User-Agent, per-host delay, robots checks); careers-site endpoints
   always pass `check_robots=True`. Open postings one by one only for titles that fit the search,

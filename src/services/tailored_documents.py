@@ -8,7 +8,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from src.cv.ats import check_docx
-from src.cv.docx_exporter import export_docx
+from src.cv.docx_exporter import TEMPLATES, export_docx
+from src.cv.docx_original import write_like_original
 from src.cv.models import (
     JDAnalysis,
     MasterCV,
@@ -21,6 +22,9 @@ from src.jobs.models import JobPosting
 from src.services.workspace import Workspace
 
 DOCUMENT_ID = re.compile(r"[a-f0-9]{24}")
+
+
+ORIGINAL = "original"  # template name: a copy of the CV's own Word file
 
 
 def _directory(ws: Workspace) -> Path:
@@ -48,6 +52,7 @@ def create(
     posting: JobPosting | None = None,
     reviewed: bool = True,
     imported: bool = False,
+    original_file: Path | None = None,
 ) -> TailoredDocument:
     """Keep the exact CV and source evidence used for an exported Word draft."""
     now = datetime.now(UTC).isoformat()
@@ -65,6 +70,7 @@ def create(
         updated_at=now,
         template=template,
         filename=path.name,
+        original_file=str(original_file) if original_file else None,
         source_cv=source_cv,
         jd=jd,
         tailored=tailored,
@@ -86,8 +92,7 @@ def list_all(ws: Workspace) -> list[TailoredDocument]:
     if not directory.exists():
         return []
     documents = [
-        TailoredDocument.model_validate_json(path.read_text())
-        for path in directory.glob("*.json")
+        TailoredDocument.model_validate_json(path.read_text()) for path in directory.glob("*.json")
     ]
     return sorted(documents, key=lambda d: d.updated_at, reverse=True)
 
@@ -136,7 +141,17 @@ def edit(ws: Workspace, document_id: str, edits: TailoredCVEdits) -> TailoredDoc
     while path.exists():
         path = directory / f"{original_path.stem}_edited_{number}.docx"
         number += 1
-    export_docx(revised, path, document.template)
+    original = Path(document.original_file) if document.original_file else None
+    # Suggested headlines stay in the file until the user picks one.
+    options = [] if edits.headline is not None else revised.headline_options
+    if document.template == ORIGINAL and original is not None and original.is_file():
+        write_like_original(original, document.source_cv, revised.cv, path, options)
+    else:
+        export_docx(
+            revised.model_copy(update={"headline_options": options}),
+            path,
+            document.template if document.template in TEMPLATES else "classic",
+        )
     keywords = revised.matched_keywords + revised.missing_keywords
     revised = revised.model_copy(update={"ats": check_docx(path, revised.cv, keywords)})
     updated = document.model_copy(

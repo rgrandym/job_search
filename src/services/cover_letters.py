@@ -139,8 +139,7 @@ def _read_legacy(path: Path) -> SavedLetter:
 
 def _stored(ws: Workspace) -> list[SavedLetter]:
     return [
-        SavedLetter.model_validate_json(path.read_text())
-        for path in _directory(ws).glob("*.json")
+        SavedLetter.model_validate_json(path.read_text()) for path in _directory(ws).glob("*.json")
     ]
 
 

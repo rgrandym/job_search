@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import type { CVAsset } from "../lib/types";
 
-/** The stored CV exactly as saved. Word files are shown as Word's own PDF rendering. */
+/** The CV, including edits saved in Word and the assistant's edits. Word files are shown as Word's own PDF rendering. */
 export function CVDocument({ asset }: { asset: CVAsset }) {
   const open = useMutation({ mutationFn: (app: "default" | "word") => api.openCVSource(asset.id, app) });
   const name = asset.filename.toLowerCase();
@@ -27,8 +27,8 @@ export function CVDocument({ asset }: { asset: CVAsset }) {
     <div className="flex h-full flex-col">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-border bg-surface px-4 py-2 text-[12px]">
         <p className="min-w-0 flex-1 text-muted">
-          Your CV exactly as saved; the stored file is never changed. Buttons open its copy in output/cvs, so
-          anything you save there (in Word, a PDF converted to .docx) stays in that folder and appears in your CV library.
+          Your CV, kept as one document: edits you save in Word and changes the assistant makes update this CV
+          (its file in output/cvs stays identical to it). Buttons open that file.
         </p>
         {open.isPending && <Loader2 size={13} className="animate-spin text-muted" />}
         {pdf && (

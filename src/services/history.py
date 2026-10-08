@@ -25,7 +25,8 @@ YIELD_SIZE = 200  # searches kept in the source-yield log (it holds counts only)
 # Company feeds report one source per board ("greenhouse:acme"); yield groups them.
 COMPANY_FEEDS = {
     "greenhouse", "lever", "ashby", "workable", "smartrecruiters", "recruitee", "personio",
-    "teamtailor", "workday", "icims", "careers",
+    "teamtailor", "workday", "icims", "careers", "bamboohr", "pinpoint", "successfactors",
+    "phenom", "oracle", "jobvite", "cws",
 }  # fmt: skip
 
 
@@ -207,6 +208,22 @@ def remove_job(ws: Workspace, entry_id: str, job_id: str) -> bool:
     entry["matches"] = len(report.matches)
     _save(ws, entries)
     return True
+
+
+def remove_job_everywhere(ws: Workspace, job_id: str) -> int:
+    """Drop one posting from every retained search (a job the user deleted stays deleted when
+    another search is reopened). Returns how many searches held it."""
+    entries = _entries(ws)
+    changed = 0
+    for entry in entries:
+        report = MatchReport.model_validate(entry["outcome"]["report"])
+        if drop_job(report, job_id):
+            entry["outcome"]["report"] = report.model_dump(mode="json")
+            entry["matches"] = len(report.matches)
+            changed += 1
+    if changed:
+        _save(ws, entries)
+    return changed
 
 
 def drop_job(report: MatchReport, job_id: str) -> bool:

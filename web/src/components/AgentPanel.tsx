@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bot, Check, ChevronDown, Loader2, RefreshCw, RotateCcw, Send, Square } from "lucide-react";
+import { Bot, Check, ChevronDown, Loader2, RefreshCw, Send, Square, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -117,8 +117,41 @@ function ClaudeAccount({ usage, loading, error, refresh }: { usage?: ClaudeCodeU
   );
 }
 
+const PROVIDER_NAMES: Record<Provider, string> = {
+  anthropic: "Claude API",
+  claude_code: "Claude Code",
+  codex: "Codex",
+  openai: "OpenAI API",
+  openrouter: "OpenRouter",
+};
+
+interface RoleModel {
+  label: string;
+  model: string;
+  effort: string;
+  provider: Provider;
+  purpose: string;
+}
+
+/** Each task's model, effort and provider, resolved like `LLMConfig._own` on the backend. */
+function roleModels(llm: LLMView): RoleModel[] {
+  const own = (model: string, effort: string, provider: Provider | null) => ({ model, effort, provider: provider ?? llm.provider });
+  const quality = own(llm.quality_model, llm.quality_effort, null);
+  const cv = llm.cv_model ? own(llm.cv_model, llm.cv_effort, llm.cv_provider) : quality;
+  return [
+    { label: "Quality", ...quality, purpose: "CV reading, second opinions, assistant default" },
+    { label: "Screening", ...own(llm.screening_model, llm.screening_effort, null), purpose: "First-pass job matching, or chat when selected" },
+    { label: "Profile", ...(llm.profile_model ? own(llm.profile_model, llm.profile_effort, llm.profile_provider) : quality), purpose: "Profile summary every match is judged against" },
+    { label: "CV writing", ...cv, purpose: "Tailored CVs" },
+    { label: "Cover letters", ...(llm.letter_model ? own(llm.letter_model, llm.letter_effort, llm.letter_provider) : cv), purpose: "Cover letters" },
+  ];
+}
+
 function UsagePanel({ llm, chatProvider }: { llm: LLMView; chatProvider: Provider | null }) {
   const chat = useChat();
+  const roles = roleModels(llm);
+  const uses = (provider: Provider) =>
+    roles.some((role) => role.provider === provider) || chatProvider === provider || Object.values(chat.modelUsage).some((usage) => usage.provider === provider);
   const models = useQuery({
     queryKey: ["models", llm.provider],
     queryFn: () => api.models(llm.provider),
@@ -133,13 +166,13 @@ function UsagePanel({ llm, chatProvider }: { llm: LLMView; chatProvider: Provide
   const account = useQuery({
     queryKey: ["codex-usage"],
     queryFn: api.codexUsage,
-    enabled: llm.provider === "codex",
+    enabled: uses("codex"),
     refetchInterval: 60_000,
   });
   const claude = useQuery({
     queryKey: ["claude-code-usage"],
     queryFn: api.claudeCodeUsage,
-    enabled: llm.provider === "claude_code" || chatProvider === "claude_code" || Object.values(chat.modelUsage).some((usage) => usage.provider === "claude_code"),
+    enabled: uses("claude_code"),
     refetchInterval: 15_000,
   });
   const catalog = new Map((models.data ?? []).map((model) => [model.id, model]));
@@ -161,18 +194,12 @@ function UsagePanel({ llm, chatProvider }: { llm: LLMView; chatProvider: Provide
       <summary className="cursor-pointer text-muted">Models, limits & live usage</summary>
       <div className="mt-2 space-y-3">
         <div className="space-y-1 rounded-md bg-surface p-2">
-          <ModelPurpose
-            label={`Quality · ${llm.quality_effort}`}
-            model={llm.quality_model}
-            purpose="CV and cover letters, second opinions, assistant default"
-          />
-          <ModelPurpose label={`Screening · ${llm.screening_effort}`} model={llm.screening_model} purpose="First-pass job matching, or chat when selected" />
-          <p className="text-faint">Provider: {llm.provider}</p>
+          {roles.map((role) => <ModelPurpose key={role.label} role={role} />)}
         </div>
-        {(llm.provider === "claude_code" || chatProvider === "claude_code" || session.some((usage) => usage.provider === "claude_code")) && (
+        {uses("claude_code") && (
           <ClaudeAccount usage={claude.data} loading={claude.isPending} error={claude.error as Error | null} refresh={() => claude.refetch()} />
         )}
-        {llm.provider === "codex" && (
+        {uses("codex") && (
           <CodexAccount usage={account.data} loading={account.isPending} error={account.error as Error | null} refresh={() => account.refetch()} />
         )}
         <div className="space-y-1.5">
@@ -185,15 +212,22 @@ function UsagePanel({ llm, chatProvider }: { llm: LLMView; chatProvider: Provide
           ) : (
             session.map((usage) => <ModelSession key={`${usage.provider ?? "current"}:${usage.model}`} usage={usage} model={modelFor(usage)} />)
           )}
-          {llm.provider === "codex" && <p className="text-faint">Codex CLI token counts are estimates; account-limit percentages above are reported by OpenAI.</p>}
+          {uses("codex") && <p className="text-faint">Codex CLI token counts are estimates; account-limit percentages above are reported by OpenAI.</p>}
         </div>
       </div>
     </details>
   );
 }
 
-function ModelPurpose({ label, model, purpose }: { label: string; model: string; purpose: string }) {
-  return <p><span className="font-medium text-fg">{label}:</span> {model}<br /><span className="text-faint">{purpose}</span></p>;
+function ModelPurpose({ role }: { role: RoleModel }) {
+  return (
+    <p>
+      <span className="font-medium text-fg">{role.label} · {role.effort}:</span> {role.model}{" "}
+      <span className="text-muted">({PROVIDER_NAMES[role.provider]})</span>
+      <br />
+      <span className="text-faint">{role.purpose}</span>
+    </p>
+  );
 }
 
 function CodexAccount({ usage, loading, error, refresh }: { usage?: CodexUsage; loading: boolean; error: Error | null; refresh: () => void }) {
@@ -222,7 +256,7 @@ function ModelSession({ usage, model }: { usage: SessionModelUsage; model?: Mode
   const remaining = model?.context_length == null ? null : Math.max(0, model.context_length - usage.latestContext);
   return (
     <div className="rounded-md bg-surface p-2">
-      <div className="flex justify-between"><span className="font-medium text-fg">{usage.model}{usage.provider === "claude_code" ? " · Claude Code" : ""}</span><span>{usage.estimated && "≈"}{tokens(usage.input + usage.output)} tokens</span></div>
+      <div className="flex justify-between"><span className="font-medium text-fg">{usage.model}{usage.provider ? ` · ${PROVIDER_NAMES[usage.provider]}` : ""}</span><span>{usage.estimated && "≈"}{tokens(usage.input + usage.output)} tokens</span></div>
       <p className="text-faint">{tokens(usage.input)} input · {tokens(usage.output)} output{remaining != null ? ` · ${tokens(remaining)} latest context left` : ""}</p>
       <p className="text-faint">{usage.agents.join(", ")} · {usage.purposes.join(", ")}</p>
     </div>
@@ -241,10 +275,10 @@ export function AgentPanel({ ready, llm, hasCv }: { ready: boolean; llm?: LLMVie
   const { query, useCv, smart, threshold, widen, profileKey } = useSearch();
   const qc = useQueryClient();
   const running = chat.running;
-  // A finished turn may have changed the intent, the CV's preferences or proposed CV facts.
+  // A finished turn may have changed the intent, the CV (and its Word copy), profiles or documents.
   useEffect(() => {
     if (running) return;
-    for (const key of ["intent", "profiles", "evidence", "state", "history", "saved", "tracker", "labels", "learning", "tailored-cvs", "cover-letters", "company-boards", "codex-usage", "claude-code-usage"]) void qc.invalidateQueries({ queryKey: [key] });
+    for (const key of ["intent", "profiles", "evidence", "state", "cv-preview", "history", "saved", "tracker", "labels", "learning", "tailored-cvs", "cover-letters", "company-boards", "codex-usage", "claude-code-usage"]) void qc.invalidateQueries({ queryKey: [key] });
   }, [running, qc]);
   const [draft, setDraft] = useState("");
   const [chatChoice, setChatChoice] = useState("quality");
@@ -328,9 +362,6 @@ export function AgentPanel({ ready, llm, hasCv }: { ready: boolean; llm?: LLMVie
           {chat.tokens.input + chat.tokens.output > 0 && (
             <span>{((chat.tokens.input + chat.tokens.output) / 1000).toFixed(1)}k tok</span>
           )}
-          <button title="New conversation" className="hover:text-fg disabled:opacity-50" disabled={chat.running} onClick={chat.reset}>
-            <RotateCcw size={13} />
-          </button>
         </div>
       </header>
 
@@ -393,7 +424,19 @@ export function AgentPanel({ ready, llm, hasCv }: { ready: boolean; llm?: LLMVie
 
       <div className="shrink-0 border-t border-border p-2.5">
         {llm && <div ref={pickerRef} className="relative mb-2">
-          <span className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-faint">Chat model</span>
+          <div className="mb-1 flex items-center justify-between gap-2">
+            <span className="text-[10px] font-medium uppercase tracking-wide text-faint">Chat model</span>
+            <button
+              type="button"
+              className="flex items-center gap-1 rounded border border-border px-2 py-0.5 text-[11px] text-muted hover:border-accent hover:text-fg disabled:opacity-50"
+              title={chat.running ? "Stop the current run first" : "Clear the conversation and start a new one"}
+              disabled={chat.running || chat.items.length === 0}
+              onClick={chat.reset}
+            >
+              <Trash2 size={11} />
+              Clear chat
+            </button>
+          </div>
           <button
             ref={pickerButtonRef}
             type="button"

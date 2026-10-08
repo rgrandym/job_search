@@ -68,7 +68,7 @@ posted no later than the alert that lists it).
 | **CV-Library** | Official API (partner key). Verify the field mapping in `CVLibrarySource._to_posting`. | `JOBSEARCH_CV_LIBRARY_API_KEY` |
 | **Adzuna** | Official UK API; descriptions are snippets. Its distance parameter uses kilometres, converted from the UI's miles. | `JOBSEARCH_ADZUNA_APP_ID`, `JOBSEARCH_ADZUNA_APP_KEY` |
 | **Biotechnology Jobs** | Official public JSON Feed (`/jobs.json`): the latest 50 active UK biotech jobs, each with schema.org JobPosting data. CC BY 4.0: every job shows a link back to biotechnologyjobs.co.uk. Polled at most hourly (cached in `data/feed_cache/`). Filtered locally by the user's titles/keywords; UK only | none |
-| **Company sites** | Public ATS feeds (Greenhouse, Lever incl. EU, Ashby, Workable, SmartRecruiters, Recruitee, Personio, Teamtailor RSS on its own or the company's domain, Pinpoint); careers-site JSON endpoints within robots.txt (Workday, used by most big pharma; iCIMS; BambooHR); schema.org JSON-LD for other careers pages. Boards are read in parallel (`company_workers`). Workday/iCIMS/SmartRecruiters/BambooHR list first, filter by country server-side where the board allows, and open at most `company_max_details` postings per company whose title fits the search. One entry per board (GSK and ViiV share one) | none: the app finds the boards (see below); add your own companies in the sidebar ("Your companies": name + website, careers page or ATS link; kept across updates) |
+| **Company sites** | Public ATS feeds (Greenhouse, Lever incl. EU, Ashby, Workable, SmartRecruiters, Recruitee, Personio, Teamtailor RSS on its own or the company's domain, Pinpoint); careers-site JSON endpoints within robots.txt (Workday, used by most big pharma; iCIMS; BambooHR); careers sites read through their own search (`career_sites.py`: SuccessFactors `/search/` pages, Phenom's embedded results, Oracle Recruiting's API, Jobvite lists, Radancy CWS's jobs API), filtered by country where the site allows and otherwise by each row's location (a row with no location is kept only when the site filtered); schema.org JSON-LD for other careers pages. Boards are read in parallel (`company_workers`). Workday/iCIMS/SmartRecruiters/BambooHR and the careers sites list first, filter by country server-side where the board allows, and open at most `company_max_details` postings per company whose title fits the search. One entry per board (GSK and ViiV share one) | none: the app finds the boards (see below); add your own companies in the sidebar ("Your companies": name + website, careers page or ATS link; kept across updates) |
 | **LinkedIn** (`linkedin_search`) | Public logged-out job search (`jobs-guest` fragments): per term and place up to `linkedin_max_pages` (3) pages of 10 cards, one request per `linkedin_delay_s` (2.5 s), date window as `f_TPR`, radius as `distance`; with 1-2 accepted arrangements, one pass each (`f_WT`) so cards carry LinkedIn's own workplace type. Cards only; `enrich` opens at most `linkedin_max_details` (60) shortlisted postings. At most `linkedin_max_search_requests` (12) search pages per search. It waits when asked to slow down (429/999, honouring Retry-After; `linkedin_cooldown_s`, at most `linkedin_max_cooldowns` per search) and only then gives up, keeping what was found. Same ids as LinkedIn alerts (`linkedin:<id>`), so they merge. | none |
 | **Totaljobs** | Public search page's embedded result list, page 1 per term and place (robots.txt disallows paging a radius search). Snippets (~300 chars); posting pages refused connections when checked, so `enrich` gives up after one failure. | none |
 | **jobs.ac.uk** | Public search (UK-wide: its location filter needs a Google place id), 2 pages of 25 per term; cards carry "Date Placed" and "Closes" (day + month; the year is inferred). `enrich` reads the posting's JSON-LD. | none |
@@ -103,13 +103,30 @@ de-duplication), `failed` (with the error) or `skipped` (with the reason), and t
 ### Company discovery (BioPharmGuy), run by the app
 
 `services/company_discovery` reads the BioPharmGuy UK list (~1,000 life-science companies) and
-finds each company's job feed: known big-pharma Workday boards (`KNOWN_BOARDS`), else the
+finds each company's job feed: a hand-verified employer (`_KNOWN`, matched by name or another
+name, e.g. Abcam -> Danaher's board), else the
 homepage and up to two hops of careers links (robots.txt checked; single-, double- or unquoted
 links) scanned for an ATS link or embed (`detect_boards`); a homepage without a careers link gets
 /careers, /jobs, /join-us and /vacancies tried. A board is kept only if it answers; a page with
 schema.org JobPosting JSON-LD for at least two jobs is the fallback. Companies without a careers
-page are left alone. **Your companies** (`add_company`, sidebar) go through the same search at
-once, are kept with no `origin` (never overwritten by discovery) and can be removed.
+page are left alone. SuccessFactors, Phenom and Radancy CWS careers sites are recognised by the
+assets they load, Oracle and Jobvite by their links; a page on a platform the app cannot read
+(an older SuccessFactors site, Avature, Taleo, Eightfold, Salesforce, a recruiter's talent
+community) is named in the note.
+**Your companies** (`add_company`, sidebar) go through the same search at
+once, are kept with no `origin` (never overwritten by discovery) and can be removed. When nothing
+readable is found, the error says why (platform, talent community, site refusing automated
+reading) and asks for the link of the job list behind one of the company's postings.
+
+**Hand-verified UK employers** (`_KNOWN`, ~55: big pharma, CROs, tools and diagnostics makers,
+including Bayer, Boehringer, Astellas, UCB, Merck KGaA, Siemens Healthineers, Oxford Nanopore,
+BioMarin and Charles River on their own careers sites;
+checked 2026-10-08 to answer, allow robots.txt and list UK jobs) join the watch-list on their
+own (origin `"known"`, `add_known_boards`: before each company search, after discovery, and when
+the sidebar lists boards), whether or not the directory lists them. A company already on the
+list with the same board or name keeps its entry. On a group's shared Workday board each posting
+is labelled with its own brand from the logo's alt text (`workday_brand`: Abcam, Cytiva, Sciex
+on Danaher's), so a cover letter names the right employer.
 
 - **Search:** when "Company career sites" is on and some directory companies were never checked
   (first use, or a pass that was stopped), the search runs discovery first (`mode="new"`,

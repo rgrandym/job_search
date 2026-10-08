@@ -62,16 +62,25 @@ class Workspace:
         return cfg
 
     def set_llm_config(
-        self, update: dict[str, Any], api_key: str | None = None, profile_api_key: str | None = None
+        self,
+        update: dict[str, Any],
+        api_key: str | None = None,
+        profile_api_key: str | None = None,
+        cv_api_key: str | None = None,
+        letter_api_key: str | None = None,
     ) -> LLMConfig:
         """Change provider/models (and optionally store an API key for that provider, and for
-        the profile's own provider)."""
+        the profile's, CV model's and letter model's own providers)."""
         keys = self._saved_keys
         provider: LLMProviderName = update.get("provider", self.llm.provider)
         if api_key:
             keys[provider] = api_key
         if profile_api_key and update.get("profile_provider"):
             keys[update["profile_provider"]] = profile_api_key
+        if cv_api_key and update.get("cv_provider"):
+            keys[update["cv_provider"]] = cv_api_key
+        if letter_api_key and update.get("letter_provider"):
+            keys[update["letter_provider"]] = letter_api_key
         cfg = LLMConfig.from_settings(self.settings, provider)
         merged = {**self.llm.model_dump(exclude={"api_key", "provider"}), **update}
         cfg = cfg.model_copy(update={k: v for k, v in merged.items() if k != "api_key"})
@@ -99,12 +108,12 @@ class Workspace:
         )
 
     def llm_ready(self) -> bool:
-        """Models chosen and credentials available, for the profile's provider too."""
+        """Models chosen and credentials available, for every role's provider."""
         if not (self.llm.quality_model and self.llm.screening_model):
             return False
-        return self.provider_ready(self.llm.provider) and self.provider_ready(
-            self.llm.profile_provider_for()
-        )
+        own: tuple[Role, ...] = ("profile", "cv", "letter")
+        providers = {self.llm.provider, *(self.llm.provider_for(r) for r in own)}
+        return all(self.provider_ready(provider) for provider in providers)
 
     def provider_ready(self, provider: LLMProviderName) -> bool:
         """Credentials available for `provider` (Anthropic may use env/CLI credentials)."""
@@ -140,8 +149,8 @@ class Workspace:
         purpose: str = "structured output",
     ) -> LLMProvider:
         cfg = self.llm
-        if role == "profile":
-            cfg = self.provider_config(cfg.profile_provider_for())
+        if role in ("profile", "cv", "letter"):
+            cfg = self.provider_config(cfg.provider_for(role))
         return make_structured(cfg, role, usage_sink, purpose)
 
     def chat(

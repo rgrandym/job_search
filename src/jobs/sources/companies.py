@@ -14,6 +14,12 @@ Public feeds published for embedding (no key needed):
 JSON endpoints behind a careers site (most big pharma), used within the site's robots.txt:
     Workday          POST https://{tenant}.wdN.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs
     iCIMS            https://{host}.icims.com/jobs/search (HTML list) + JSON-LD on each job page
+Careers sites read through their own search pages or JSON (`career_sites.py`), within robots.txt:
+    SuccessFactors   {site}/search/ (HTML) + {site}/job/... pages
+    Phenom           {site}/search-results (embedded JSON) + job pages' JSON-LD
+    Oracle           https://{host}.oraclecloud.com/hcmRestApi/... (candidate site API)
+    Jobvite          https://jobs.jobvite.com/{token}/jobs + job pages' JSON-LD
+    Radancy CWS      the jobs API a careers page names in its `cws_opts`
 For any other careers page, `careers_page` reads schema.org `JobPosting` JSON-LD
 (which most sites embed for Google Jobs), after checking robots.txt.
 
@@ -54,9 +60,11 @@ from src.jobs.sources.base import (
     extract_jsonld_jobs,
     html_to_text,
     infer_arrangement,
+    located_in,
     parse_date,
     posting_from_jsonld,
 )
+from src.jobs.sources.career_sites import CareerSiteFeeds, phenom_site
 
 AtsKind = Literal[
     "greenhouse",
@@ -72,6 +80,11 @@ AtsKind = Literal[
     "icims",
     "bamboohr",
     "pinpoint",
+    "successfactors",
+    "phenom",
+    "oracle",
+    "jobvite",
+    "cws",
     "careers_page",
 ]
 URL_KINDS = (
@@ -79,6 +92,10 @@ URL_KINDS = (
     "workday",
     "icims",
     "teamtailor",
+    "successfactors",
+    "phenom",
+    "oracle",
+    "cws",
 )  # boards identified by a URL, not a slug
 WORKDAY_PAGE = 20  # Workday's maximum page size
 WORKDAY_MAX_LISTED = 200  # per search term; titles are shortlisted before opening any
@@ -157,6 +174,11 @@ _DETECT: list[tuple[AtsKind, re.Pattern[str]]] = [
     ("teamtailor", re.compile(r"(https://[\w-]+\.teamtailor\.com)")),
     ("bamboohr", re.compile(r"([\w-]+)\.bamboohr\.com")),
     ("pinpoint", re.compile(r"([\w-]+)\.pinpointhq\.com")),
+    ("oracle", re.compile(
+        r"https://[\w-]+\.fa\.[\w-]+\.oraclecloud\.com/hcmUI/CandidateExperience/[a-z]{2}/sites/"
+        r"[\w-]+"
+    )),
+    ("jobvite", re.compile(r"jobs\.jobvite\.com/([\w-]+)")),
 ]  # fmt: skip
 # Path segments or subdomains that are part of the ATS's own site, never a company's board.
 _NOT_A_BOARD = {
@@ -173,16 +195,12 @@ def detect_boards(
     Teamtailor site on the company's own domain (it loads teamtailor-cdn assets) be found."""
     text = html.unescape(page_html)
     found: dict[str, CompanyBoard] = {}
-    if page_url and "teamtailor-cdn.com" in text:
-        parts = urlsplit(page_url)
-        own = CompanyBoard(
-            name=company, ats="teamtailor", url=f"{parts.scheme}://{parts.netloc}", origin=origin
-        )
+    for own in _site_boards(text, company, origin, page_url) if page_url else []:
         found[own.key] = own
     for ats, pattern in _DETECT:
         for m in pattern.finditer(text):
-            if ats == "workday":
-                if m["site"].lower() in _NOT_A_BOARD:
+            if ats in ("workday", "oracle"):
+                if ats == "workday" and m["site"].lower() in _NOT_A_BOARD:
                     continue
                 board = CompanyBoard(name=company, ats=ats, url=m.group(0), origin=origin)
             elif ats in ("icims", "teamtailor"):
@@ -199,10 +217,26 @@ def detect_boards(
     return list(found.values())
 
 
+def _site_boards(text: str, company: str, origin: str | None, page_url: str) -> list[CompanyBoard]:
+    """Boards a careers site serves on its own domain, known by the assets it loads."""
+    parts = urlsplit(page_url)
+    site = f"{parts.scheme}://{parts.netloc}"
+    kinds: list[tuple[AtsKind, str]] = []
+    if "teamtailor-cdn.com" in text:
+        kinds.append(("teamtailor", site))
+    if "rmkcdn.successfactors.com" in text:
+        kinds.append(("successfactors", site))
+    if "phApp.ddo" in text or "cdn.phenompeople.com" in text:
+        kinds.append(("phenom", phenom_site(page_url)))
+    if "cws_opts" in text and "m-cloud.io" in text:
+        kinds.append(("cws", page_url))
+    return [CompanyBoard(name=company, ats=a, url=u, origin=origin) for a, u in kinds]
+
+
 # ------------------------------------------------------------------ the source
 
 
-class CompanyCareersSource:
+class CompanyCareersSource(CareerSiteFeeds):
     """Fetches every company in the watch-list via its ATS feed or careers page."""
 
     name = "company"
@@ -646,7 +680,7 @@ class CompanyCareersSource:
         return JobPosting(
             id=f"workday:{tenant}:{info.get('jobReqId') or info['id']}",
             title=info.get("title", ""),
-            company=c.name,
+            company=workday_brand(info, c.name),
             location=location,
             work_arrangement=infer_arrangement(info.get("remoteType"), info.get("title"), location),
             description=text,
@@ -713,14 +747,14 @@ def workday_location_facets(
     (Location_Country, locationCountry, locations, primarylocation), so match value labels.
     {} = no usable facet (search unfiltered); None = a country facet exists but lacks the place.
     """
-    pattern = re.compile(r"\b(" + "|".join(map(re.escape, places)) + r")\b", re.IGNORECASE)
+    in_places = located_in(places)
     best: tuple[str, list[str]] | None = None
     country_facet = False
     for param, values in _leaf_facets(facets):
         low = param.lower()
         if "location" not in low and "country" not in low:
             continue
-        ids = [str(v["id"]) for v in values if pattern.search(str(v.get("descriptor", "")))]
+        ids = [str(v["id"]) for v in values if in_places(str(v.get("descriptor", "")))]
         if "country" in low:
             country_facet = True
             if ids:
@@ -732,12 +766,21 @@ def workday_location_facets(
     return None if country_facet else {}
 
 
+def workday_brand(info: dict[str, Any], company: str) -> str:
+    """The employer a posting names on a group's shared board (Danaher's carries Abcam, Cytiva,
+    Sciex ... jobs), read from its logo's alt text ("Abcam Logo"); else the board's company.
+    Single-brand boards leave it empty; a short code ("BED Logo") is not trusted as a name."""
+    alt = str((info.get("logoImage") or {}).get("alt") or "")
+    brand = re.sub(r"\s*\blogo\s*$", "", alt, flags=re.IGNORECASE).strip()
+    return brand if len(brand) > 3 and brand.lower() not in ("company", "careers") else company
+
+
 def _pick_location(locations: list[str], places: list[str]) -> str | None:
     """The posting's location that is in the searched area, else its primary location."""
     if places:
-        pattern = re.compile(r"\b(" + "|".join(map(re.escape, places)) + r")\b", re.IGNORECASE)
+        in_places = located_in(places)
         for loc in locations:
-            if pattern.search(loc):
+            if in_places(loc):
                 return loc
     return locations[0] if locations else None
 

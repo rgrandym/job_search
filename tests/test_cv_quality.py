@@ -30,8 +30,9 @@ from src.cv.models import (
     RewrittenBullet,
     TailoredCVEdits,
     TailoringPlan,
+    TrimAssessment,
 )
-from src.cv.tailor import apply_plan, tailor
+from src.cv.tailor import apply_plan, assess_trim, tailor
 from src.jobs.models import JobPosting, SearchIntent
 from src.services import cover_letters, cv_service, intent, tailored_documents
 from src.services.workspace import Workspace
@@ -59,18 +60,25 @@ def test_skill_from_another_bullet_is_rejected(master_cv: MasterCV) -> None:
     assert not change.accepted and "Kubernetes" in (change.reason or "").title()
 
 
-def test_headline_is_capped_at_the_level_and_roles_held(master_cv: MasterCV) -> None:
-    def headline(text: str) -> Any:
-        out = apply_plan(master_cv, TailoringPlan(headline=text), JD)
-        return out.cv.basics.headline, out.changes[0]
-
-    kept, change = headline("Staff Machine Learning Engineer")
-    assert kept == master_cv.basics.headline and not change.accepted
-    assert change.source_id == "headline" and "higher level (staff)" in (change.reason or "")
-    kept, change = headline("Senior Data Scientist")
-    assert kept == master_cv.basics.headline and "scientist" in (change.reason or "")
-    kept, change = headline("Senior Machine Learning Engineer, NLP and recommenders")
-    assert change.accepted and kept == "Senior Machine Learning Engineer, NLP and recommenders"
+def test_headline_suggestions_are_checked_capped_and_the_cvs_own_is_kept(
+    master_cv: MasterCV,
+) -> None:
+    proposed = [
+        "Staff Machine Learning Engineer",  # above any title held
+        "Senior Data Scientist",  # a role the CV does not show
+        "Senior Machine Learning Engineer, NLP and recommenders",
+        "Senior Machine Learning Engineer | Recommender Systems",
+        "Senior Machine Learning Engineer, PyTorch",
+        "Senior Machine Learning Engineer, NLP",
+        "Senior Machine Learning Engineer, Python",  # a fifth good one: over the cap
+        master_cv.basics.headline or "",  # the CV's own: not a suggestion
+    ]
+    out = apply_plan(master_cv, TailoringPlan(headline_options=proposed), JD)
+    assert out.cv.basics.headline == master_cv.basics.headline
+    assert out.headline_options == proposed[2:6]
+    rejected = [c for c in out.changes if c.source_id == "headline"]
+    assert [c.tailored for c in rejected] == proposed[:2] and not any(c.accepted for c in rejected)
+    assert "higher level (staff)" in (rejected[0].reason or "")
 
 
 def test_summary_may_not_name_skills_the_cv_lacks(master_cv: MasterCV) -> None:
@@ -84,7 +92,7 @@ def test_summary_may_not_name_skills_the_cv_lacks(master_cv: MasterCV) -> None:
 
 def test_new_cv_claims_reject_stock_superlatives(master_cv: MasterCV) -> None:
     plan = TailoringPlan(
-        headline="Visionary Senior Machine Learning Engineer",
+        headline_options=["Visionary Senior Machine Learning Engineer"],
         summary="World-class ML engineer with PyTorch experience.",
         rewritten_bullets=[
             RewrittenBullet(source_id="nimbus-1", text="Built a best-in-class recommender.")
@@ -96,18 +104,47 @@ def test_new_cv_claims_reject_stock_superlatives(master_cv: MasterCV) -> None:
     assert out.cv.bullet_index()["nimbus-1"].text == master_cv.bullet_index()["nimbus-1"].text
 
 
-def test_a_dropped_bullet_carrying_a_jd_keyword_is_put_back(master_cv: MasterCV) -> None:
+def test_nothing_is_left_out_unless_trimming_is_allowed(master_cv: MasterCV) -> None:
+    plan = TailoringPlan(bullet_order={"nimbus": ["nimbus-3"]})  # lists one of three
+    kept = apply_plan(master_cv, plan, JD)
+    assert [b.id for b in kept.cv.experience[0].bullets] == ["nimbus-3", "nimbus-1", "nimbus-2"]
+    assert kept.cv.all_skills() == master_cv.all_skills()
+
+    trim = TrimAssessment(allowed=True, reason="a junior-level role")
+    trimmed = apply_plan(master_cv, TailoringPlan(bullet_order={"nimbus": ["nimbus-3"]}), JD, trim)
+    assert len(trimmed.cv.experience[0].bullets) >= 2  # at least two kept per role
+    plan = TailoringPlan(bullet_order={"nimbus": ["nimbus-1", "nimbus-2"]})  # leaves nimbus-3
+    trimmed = apply_plan(master_cv, plan, JD, trim)
+    assert [b.id for b in trimmed.cv.experience[0].bullets] == ["nimbus-1", "nimbus-2"]
+    left_out = [c for c in trimmed.changes if c.tailored == ""]
+    assert [c.source_id for c in left_out] == ["nimbus-3"]
+    assert "junior-level role" in (left_out[0].reason or "")
+
+
+def test_a_trimmed_bullet_carrying_a_jd_keyword_is_put_back(master_cv: MasterCV) -> None:
     plan = TailoringPlan(bullet_order={"nimbus": ["nimbus-1", "nimbus-3"]})  # drops nimbus-2
-    out = apply_plan(master_cv, plan, JD)
+    trim = TrimAssessment(allowed=True, reason="a junior-level role")
+    out = apply_plan(master_cv, plan, JD, trim)
     assert [b.id for b in out.cv.experience[0].bullets] == ["nimbus-1", "nimbus-3", "nimbus-2"]
     assert out.restored_keywords == ["MLOps"]  # Kubernetes is still in the skills section
     assert out.missing_keywords == ["Spark"]  # the only true gap
 
 
-def test_tailoring_keeps_two_bullets_per_role(master_cv: MasterCV) -> None:
-    out = apply_plan(master_cv, TailoringPlan(bullet_order={"nimbus": ["nimbus-1"]}), JD)
-    assert len(out.cv.experience[0].bullets) >= 2
-    assert len({b.id for b in out.cv.experience[0].bullets}) == len(out.cv.experience[0].bullets)
+def test_trimming_only_for_a_clearly_more_junior_role(master_cv: MasterCV) -> None:
+    def jd(seniority: str | None) -> JDAnalysis:
+        return JD.model_copy(update={"seniority": seniority})
+
+    # The example CV: highest title Senior (level 3), working since 2017 (about 9 years).
+    assert not assess_trim(master_cv, jd(None), "").allowed  # level unknown
+    assert not assess_trim(master_cv, jd("senior"), "").allowed
+    assert not assess_trim(master_cv, jd("staff"), "").allowed
+    assert assess_trim(master_cv, jd("junior"), "").allowed  # two steps below
+    assert not assess_trim(master_cv, jd("mid"), "5+ years of experience").allowed
+    assert assess_trim(master_cv, jd("mid"), "2+ years of experience").allowed
+    assert not assess_trim(master_cv, jd("mid"), "").allowed
+    # The user's choice decides when made.
+    assert assess_trim(master_cv, jd("senior"), "", length="junior").allowed
+    assert not assess_trim(master_cv, jd("junior"), "", length="full").allowed
 
 
 # ---------------------------------------------------------------- guidance and review
@@ -137,11 +174,13 @@ def test_matcher_guidance_reaches_the_plan_and_review_drives_one_revision(
 
 def test_tailoring_emphasis_reaches_initial_and_revised_plans(master_cv: MasterCV) -> None:
     plans = iter([TailoringPlan(), TailoringPlan()])
-    llm = FakeLLM({
-        JDAnalysis: JD,
-        TailoringPlan: lambda _: next(plans),
-        CVCritique: CVCritique(order_notes=["Retain evidenced leadership in the summary"]),
-    })
+    llm = FakeLLM(
+        {
+            JDAnalysis: JD,
+            TailoringPlan: lambda _: next(plans),
+            CVCritique: CVCritique(order_notes=["Retain evidenced leadership in the summary"]),
+        }
+    )
     tailor(master_cv, "JD text", llm, emphasis="leadership", level="senior")
     prompts = [prompt for prompt, model in llm.calls if model is TailoringPlan]
     assert len(prompts) == 2
@@ -161,6 +200,21 @@ def test_ats_check_reads_contact_keywords_and_length(master_cv: MasterCV, tmp_pa
     doc.add_table(rows=1, cols=2)
     doc.save(str(path))
     assert any("table" in w for w in check_docx(path, master_cv, []).warnings)
+
+
+def test_ats_reads_a_name_in_capitals_and_never_asks_to_shorten(
+    master_cv: MasterCV, tmp_path: Path
+) -> None:
+    doc = Document()
+    doc.add_paragraph(master_cv.basics.name.upper())
+    doc.add_paragraph(f"{master_cv.basics.email}")
+    for _ in range(40):  # far beyond two pages: a full-length CV is the user's choice
+        doc.add_paragraph("Built and validated analysis pipelines for research teams. " * 4)
+    path = tmp_path / "long.docx"
+    doc.save(str(path))
+    report = check_docx(path, master_cv)
+    assert "name" not in report.contact_missing
+    assert report.est_pages > 2 and not any("page" in w for w in report.warnings)
 
 
 # ---------------------------------------------------------------- cover letters
@@ -427,9 +481,7 @@ def test_letter_motivation_comes_only_from_the_career_intent(
             text="I would welcome a conversation about the role.", source_ids=["nimbus"]
         ),
     )
-    llm = FakeLLM(
-        {JDAnalysis: JD, LetterSections: draft}
-    )
+    llm = FakeLLM({JDAnalysis: JD, LetterSections: draft})
     monkeypatch.setattr(ws, "structured", lambda *a, **k: llm)
     job = JobPosting(id="j", title="Senior ML Engineer", company="Orbit AI", description="ML")
     letter, path = asyncio.run(cv_service.write_cover_letter(ws, job))
@@ -482,9 +534,7 @@ def test_saved_tailored_cv_edits_feed_letter_after_restart(
             text="I would welcome a conversation about the role.", source_ids=["nimbus-1"]
         ),
     )
-    llm = FakeLLM(
-        {JDAnalysis: JD, LetterSections: draft}
-    )
+    llm = FakeLLM({JDAnalysis: JD, LetterSections: draft})
     monkeypatch.setattr(restarted, "structured", lambda *a, **k: llm)
     letter, path = asyncio.run(
         cv_service.write_cover_letter(restarted, job, tailored_cv_id=document.id)
@@ -495,10 +545,13 @@ def test_saved_tailored_cv_edits_feed_letter_after_restart(
 
     monkeypatch.setattr(webapp, "get_workspace", lambda: restarted)
     client = TestClient(webapp.app)
-    assert any(item["id"] == document.id for item in client.get("/api/tailored-cvs").json())
-    response = client.post(
-        f"/api/jobs/{job.id}/cover-letter", json={"tailored_cv_id": document.id}
-    )
+    [listed] = [d for d in client.get("/api/tailored-cvs").json() if d["id"] == document.id]
+    # The tailoring report is kept with the draft, so a reload shows it again.
+    report = listed["report"]
+    assert report["document_id"] == document.id and report["download_url"] == listed["download_url"]
+    assert report["missing_keywords"] == tailored.missing_keywords
+    assert report["rejected"] == sum(not c.accepted for c in tailored.changes)
+    response = client.post(f"/api/jobs/{job.id}/cover-letter", json={"tailored_cv_id": document.id})
     assert response.status_code == 200, response.json()
 
 
@@ -566,6 +619,7 @@ def test_older_word_cv_requires_review_before_it_can_feed_letter(
     assert attached.status_code == 200, attached.json()
     linked = attached.json()
     assert linked["job_id"].startswith("linked:") and not linked["reviewed"]
+    assert linked["report"] is None  # an imported Word CV was not tailored here
     assert client.put(f"/api/tailored-cvs/{linked['id']}", json={}).json()["reviewed"]
     response = client.post(
         f"/api/jobs/{linked['job_id']}/cover-letter", json={"tailored_cv_id": linked["id"]}
@@ -611,9 +665,7 @@ def test_cover_letters_have_their_own_library_editor_and_exports(
     saved = cover_letters.create(
         ws, job, letter, master_cv, "Senior ML Engineer role", "classic", letter_path
     )
-    legacy = export_cover_letter(
-        letter, master_cv, settings.output_dir / "older_cover_letter.docx"
-    )
+    legacy = export_cover_letter(letter, master_cv, settings.output_dir / "older_cover_letter.docx")
     older_cv = export_docx(master_cv, settings.output_dir / "older_cv.docx")
     assert legacy.exists() and older_cv.exists()
     assets = cv_service.list_cvs(ws)

@@ -175,16 +175,51 @@ class RewrittenBullet(_Strict):
     keywords_used: list[str] = Field(default_factory=list)
 
 
+class RoleOrder(_Strict):
+    """One role's bullet ids, most relevant first. A list, not a dict: strict structured
+    output schemas (Codex, OpenAI) cannot carry free-form dict keys."""
+
+    experience_id: str
+    bullet_ids: list[str] = Field(default_factory=list)
+
+
 class TailoringPlan(_Strict):
     """LLM output: what to change. Applied deterministically by `tailor.apply_plan`."""
 
-    headline: str | None = None
+    headline_options: list[str] = Field(
+        default_factory=list,
+        description="Up to 4 alternative headlines for this job; the CV keeps its own headline "
+        "and the user may choose one of these",
+    )
     summary: str | None = None
     rewritten_bullets: list[RewrittenBullet] = Field(default_factory=list)
-    bullet_order: dict[str, list[str]] = Field(
-        default_factory=dict, description="experience id -> ordered bullet ids to keep"
+    bullet_order: list[RoleOrder] = Field(
+        default_factory=list,
+        description="For every role: its experience id and bullet ids, most relevant first. "
+        "Bullets not listed move to the end of their role; they are left out only when "
+        "trimming is allowed",
     )
     skills_priority: list[str] = Field(default_factory=list)
+
+    @field_validator("bullet_order", mode="before")
+    @classmethod
+    def _order_from_dict(cls, value: object) -> object:
+        """Also accept {experience id: [bullet ids]}."""
+        if isinstance(value, dict):
+            return [{"experience_id": k, "bullet_ids": v} for k, v in value.items()]
+        return value
+
+    def order_by_role(self) -> dict[str, list[str]]:
+        """experience id -> bullet ids, most relevant first."""
+        return {o.experience_id: o.bullet_ids for o in self.bullet_order}
+
+
+class TrimAssessment(_Strict):
+    """Whether this tailoring may leave bullets out. Only for a clearly more junior role (decided
+    in code by `tailor.assess_trim`); otherwise every bullet is kept and only reordered."""
+
+    allowed: bool
+    reason: str
 
 
 class ChangeRecord(_Strict):
@@ -262,6 +297,15 @@ class TailoredCV(_Strict):
     ats: ATSReport | None = None
     source_ats_keyword_coverage: float | None = Field(default=None, ge=0, le=1)
     document_id: str | None = None
+    trim: TrimAssessment | None = None
+    headline_options: list[str] = Field(
+        default_factory=list,
+        description="Checked headline suggestions for this job; the CV keeps its own headline",
+    )
+    document_notes: list[str] = Field(
+        default_factory=list,
+        description="How the Word file was written (same design as the original CV, or why not)",
+    )
 
 
 class TailoredDocument(_Strict):
@@ -276,8 +320,11 @@ class TailoredDocument(_Strict):
     job_location: str | None = None
     created_at: str
     updated_at: str
-    template: str
+    template: str = Field(description='A template name, or "original": a copy of the CV\'s file')
     filename: str
+    original_file: str | None = Field(
+        default=None, description="The original Word CV the document was written from"
+    )
     source_cv: MasterCV
     jd: JDAnalysis
     tailored: TailoredCV

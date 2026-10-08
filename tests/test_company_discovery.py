@@ -14,7 +14,7 @@ import pytest
 from src.core.config import Settings
 from src.jobs import fetcher
 from src.jobs.models import JobPosting, SearchQuery
-from src.jobs.sources.base import HttpFetcher
+from src.jobs.sources.base import HttpFetcher, country_names, located_in
 from src.jobs.sources.companies import (
     CompanyBoard,
     CompanyCareersSource,
@@ -22,6 +22,7 @@ from src.jobs.sources.companies import (
     load_companies,
     save_companies,
     workday_age_days,
+    workday_brand,
     workday_location_facets,
 )
 from src.jobs.sources.directories import BIOPHARMGUY_UK, parse_biopharmguy
@@ -149,6 +150,19 @@ def test_workday_location_facets_match_labels_not_names() -> None:
     assert workday_location_facets([], uk) == {}  # no location facet: search unfiltered
 
 
+def test_a_place_named_like_the_country_elsewhere_is_not_in_it() -> None:
+    uk = country_names("United Kingdom")
+    msd = [{"facetParameter": "locations", "values": [
+        {"descriptor": "USA - Pennsylvania - North Wales (Upper Gwynedd)", "id": "us", "count": 90},
+        {"descriptor": "GBR - London", "id": "gb1", "count": 4},
+        {"descriptor": "Belfast, Northern Ireland", "id": "gb2", "count": 1},
+        {"descriptor": "Dublin, Ireland", "id": "ie", "count": 2},
+    ]}]  # fmt: skip
+    assert workday_location_facets(msd, uk) == {"locations": ["gb1", "gb2"]}
+    in_uk = located_in(uk)
+    assert in_uk("Cardiff, Wales") and not in_uk("USA - Pennsylvania - North Wales")
+
+
 def test_workday_lists_filters_and_opens_matching_titles(settings: Settings) -> None:
     bodies: list[dict[str, Any]] = []
 
@@ -184,6 +198,7 @@ def test_workday_lists_filters_and_opens_matching_titles(settings: Settings) -> 
     assert bodies[1]["appliedFacets"] == {"locations": ["uk1", "uk2"]}
     assert bodies[1]["searchText"] == "Scientist"
     assert job.id == "workday:acme:R1" and job.location == "UK - Cambridge"
+    assert job.company == "Acme"  # no brand logo: the board's own company
     assert job.work_arrangement == "hybrid" and job.description == "Antibody engineering"
     assert not any("Sales_R2" in str(r.url) for r in seen)  # off-target titles never opened
 
@@ -294,15 +309,22 @@ def _site_routes() -> dict[str, Route]:
     }
 
 
+def _found(settings: Settings) -> list[CompanyBoard]:
+    """Watch-list entries discovery found (the hand-verified employers left out)."""
+    boards = load_companies(settings.companies_path)
+    return [b for b in boards if b.origin != cd.KNOWN_ORIGIN]
+
+
 def test_discover_companies_writes_watch_list_and_caches(settings: Settings) -> None:
     assert cd.needs_discovery(settings)  # never run: the directory was never read
     http, seen = _http(settings, _site_routes())
     report = discover_companies(settings, "biopharmguy-uk", mode="new", http=http, workers=2)
     assert (report.companies, report.checked, report.without_feed) == (2, 2, 1)
     assert report.boards == {"greenhouse": 1}
-    [board] = load_companies(settings.companies_path)
+    [board] = _found(settings)
     assert (board.name, board.key, board.origin) == ("Oncimmune", "greenhouse:oncimmune",
                                                      "biopharmguy-uk")  # fmt: skip
+    assert len(load_companies(settings.companies_path)) == 1 + len(cd.known_boards())
     assert any(str(r.url) == BIOPHARMGUY_UK for r in seen)
     assert not cd.needs_discovery(settings)
     status = cd.status(settings)
@@ -310,7 +332,7 @@ def test_discover_companies_writes_watch_list_and_caches(settings: Settings) -> 
 
     seen.clear()  # a second pass needs no request: the listing and every company are cached
     again = discover_companies(settings, "biopharmguy-uk", http=http, workers=2)
-    assert again.checked == 0 and len(load_companies(settings.companies_path)) == 1
+    assert again.checked == 0 and len(_found(settings)) == 1
     assert seen == []
 
 
@@ -675,3 +697,89 @@ def test_your_companies_are_added_kept_over_discovery_and_removed(settings: Sett
 
     assert cd.remove_company(settings, "beta") and not cd.remove_company(settings, "Beta")
     assert [c.name for c in cd.your_companies(settings)] == ["Acme"]
+
+
+def test_workday_names_the_brand_on_a_group_board() -> None:
+    def info(alt: str | None) -> dict[str, Any]:
+        return {"logoImage": {"alt": alt}} if alt is not None else {}
+
+    assert workday_brand(info("Abcam Logo"), "Danaher") == "Abcam"  # Danaher's shared board
+    assert workday_brand(info("Worldwide Clinical Trials"), "WCT") == "Worldwide Clinical Trials"
+    assert workday_brand(info("BED Logo"), "Blue Earth Diagnostics") == "Blue Earth Diagnostics"
+    assert workday_brand(info("Company Logo"), "Acme") == "Acme"
+    assert workday_brand(info(None), "Acme") == "Acme"
+
+
+# ------------------------------------------------------------------ hand-verified employers
+
+
+def test_known_employers_join_the_watch_list_once(settings: Settings) -> None:
+    lonza = CompanyBoard(name="Lonza", ats="workday",
+                         url="https://lonza.wd3.myworkdayjobs.com/Lonza_Careers")  # fmt: skip
+    cytiva = CompanyBoard(name="Cytiva", ats="workday", origin="biopharmguy-uk",
+                          url="https://danaher.wd1.myworkdayjobs.com/DanaherJobs")  # fmt: skip
+    save_companies(settings.companies_path, [lonza, cytiva])  # added by hand; from the directory
+    cd.add_known_boards(settings)
+    boards = load_companies(settings.companies_path)
+    assert boards[:2] == [lonza, cytiva]  # theirs kept: the same board is never listed twice
+    names = {b.name for b in boards}
+    assert {"MSD", "IQVIA", "Takeda", "Agilent"} <= names and not {"Danaher"} & names
+    assert len({b.key for b in boards}) == len(boards)
+    before = settings.companies_path.stat().st_mtime_ns
+    cd.add_known_boards(settings)  # nothing new: the file is not rewritten
+    assert settings.companies_path.stat().st_mtime_ns == before
+    assert any(v.companies == ["Agilent"] for v in cd.list_boards(settings))
+
+
+def test_known_employers_answer_by_name_or_other_name(settings: Settings) -> None:
+    http, seen = _http(settings, {})
+    abcam = cd.known_board("Abcam", "biopharmguy-uk")
+    assert abcam is not None and abcam.key == "workday:danaher/danaherjobs"
+    assert abcam.name == "Abcam" and abcam.origin == "biopharmguy-uk"
+    assert cd.known_board("Unknown Bio", None) is None
+    # The talent-community link the user tried: Lonza's verified Workday board is used instead
+    board = cd.add_company(settings, "Lonza", "https://lonza.talent-community.com", http)
+    assert (board.key, board.origin) == ("workday:lonza/lonza_careers", None)
+    assert seen == []
+
+
+def test_search_adds_known_employers_before_any_discovery(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.services.workspace import Workspace
+
+    monkeypatch.setattr(cd, "needs_discovery", lambda _: False)
+
+    async def emit(_: str, __: dict[str, Any]) -> None:
+        return None
+
+    asyncio.run(ENSURE_COMPANY_BOARDS(Workspace(settings), emit))
+    assert len(load_companies(settings.companies_path)) == len(cd.known_boards())
+
+
+def test_adding_a_company_says_why_nothing_was_found(settings: Settings) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        host, path = request.url.host, request.url.path
+        if path == "/robots.txt":
+            return httpx.Response(200, text=ROBOTS_OK)
+        if host == "acme.talent-community.com":
+            return httpx.Response(200, text='<link href="https://talent-pool.com"><p>Join</p>')
+        if host == "beta.com":
+            return httpx.Response(
+                200,
+                text='<a href="/careers">Careers</a>'
+                if path == "/"
+                else '<a href="https://acme.avature.net/careers">Jobs</a>',
+            )
+        return httpx.Response(403)  # gamma.com refuses automated reading
+
+    http = HttpFetcher(settings, httpx.Client(transport=httpx.MockTransport(handler)))
+    hint = "paste the address of the job list"
+    with pytest.raises(ValueError, match="talent community") as err:
+        cd.add_company(settings, "Acme", "https://acme.talent-community.com", http)
+    assert hint in str(err.value)
+    with pytest.raises(ValueError, match="on Avature, which the app cannot read"):
+        cd.add_company(settings, "Beta", "https://beta.com/", http)
+    with pytest.raises(ValueError, match=r"refuses automated reading \(403\)"):
+        cd.add_company(settings, "Gamma", "https://gamma.com/", http)
+    assert cd.your_companies(settings) == []
