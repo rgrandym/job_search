@@ -19,6 +19,7 @@ data/*
 !data/examples/
 output/
 *.docx
+*.pdf
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

@@ -398,12 +398,12 @@ def test_a_pdf_cv_is_tailored_in_its_word_versions_design_unless_a_design_is_cho
 
     ws = Workspace(settings)
     word = _original_cv(master_cv, settings.data_dir / "w.docx")
-    cv_service.store_cv(ws, "Rodrigo CV.docx", word.read_bytes())
-    pdf = cv_service.store_cv(ws, "Rodrigo CV.pdf", b"%PDF-1.4 exported from Word")
+    cv_service.store_cv(ws, "Candidate CV.docx", word.read_bytes())
+    pdf = cv_service.store_cv(ws, "Candidate CV.pdf", b"%PDF-1.4 exported from Word")
     cv_service._parsed_path(ws, pdf.id).parent.mkdir(parents=True, exist_ok=True)
     cv_service._parsed_path(ws, pdf.id).write_text(master_cv.model_dump_json())
     cv_service.select_cv(ws, pdf.id)
-    assert cv_service.original_docx(ws) == settings.data_dir / "cvs" / "Rodrigo CV.docx"
+    assert cv_service.original_docx(ws) == settings.data_dir / "cvs" / "Candidate CV.docx"
 
     jd = JDAnalysis(job_title="ML Engineer")
     monkeypatch.setattr(ws, "structured", lambda *a: None)
@@ -412,7 +412,7 @@ def test_a_pdf_cv_is_tailored_in_its_word_versions_design_unless_a_design_is_cho
     job = JobPosting(id="j2", title="ML Engineer", company="Orbit", description="Build ML.")
     tailored, path = asyncio.run(cv_service.tailor_to_job(ws, job))
     assert any(p.text.startswith("Example A.") for p in Document(str(path)).paragraphs)
-    assert tailored.document_notes[0] == "Written in the design of Rodrigo CV.docx"
+    assert tailored.document_notes[0] == "Written in the design of Candidate CV.docx"
 
     chosen, path = asyncio.run(cv_service.tailor_to_job(ws, job, template="modern"))
     assert not any(p.text.startswith("Example A.") for p in Document(str(path)).paragraphs)
