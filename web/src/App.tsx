@@ -13,7 +13,8 @@ import { cn } from "./lib/utils";
 import { useChat } from "./stores/chatStore";
 import { useSearch } from "./stores/searchStore";
 
-const THEME_KEY = "jobsearch.theme";
+// v2: light became the default (the old key stored the dark default on every load).
+const THEME_KEY = "jobsearch.theme.v2";
 const VIEW_KEY = "jobsearch.view"; // the narrow-screen panel open last
 const WIDE = "(min-width: 1024px)"; // three resizable columns from here; tabs below
 
@@ -54,7 +55,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [summaryProfileKey, setSummaryProfileKey] = useState<string | null>(null);
-  const [theme, setTheme] = useState(() => localStorage.getItem(THEME_KEY) ?? "dark");
+  const [theme, setTheme] = useState(() => localStorage.getItem(THEME_KEY) ?? "light");
   useRestoreLastSearch();
 
   useEffect(() => {

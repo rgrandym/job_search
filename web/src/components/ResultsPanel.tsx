@@ -234,7 +234,14 @@ function SelectionBar({ savedIds, saved, hasCv }: { savedIds: Map<string, string
   const toSave = activeSelected.filter((id) => inResults.has(id) && !savedIds.has(id));
   const toRemove = activeSelected.filter((id) => savedIds.has(id));
   const done = () => void qc.invalidateQueries({ queryKey: ["saved"] });
-  const save = useMutation({ meta: { syncLists: true }, mutationFn: () => api.saveJobs(toSave), onSuccess: done });
+  const save = useMutation({
+    meta: { syncLists: true },
+    mutationFn: () => api.saveJobs(toSave),
+    onSuccess: () => {
+      set({ selected: selected.filter((id) => !toSave.includes(id)) }); // they moved to Saved
+      done();
+    },
+  });
   const remove = useMutation({
     meta: { syncLists: true },
     mutationFn: () => api.removeSaved(toRemove),
@@ -412,17 +419,21 @@ function SearchResults({ hasCv, savedAt, tracked }: { hasCv: boolean; savedAt: M
   const isApplied = (r: MatchResult) => r.tracking?.status === "applied" || applied.some((entry) =>
     entry.job_id === r.job.id || (entry.company.toLowerCase() === r.job.company.toLowerCase() && entry.title.toLowerCase() === r.job.title.toLowerCase()),
   );
-  const items = (rep[tab] ?? []).filter((r) => !isApplied(r));
-  counts.matches = rep.matches.filter((r) => !isApplied(r)).length;
-  counts.to_check = (rep.to_check ?? []).filter((r) => !isApplied(r)).length;
-  counts.below_threshold = rep.below_threshold.filter((r) => !isApplied(r)).length;
-  counts.excluded = rep.excluded.filter((r) => !isApplied(r)).length;
-  counts.dismissed = (rep.dismissed ?? []).filter((r) => !isApplied(r)).length;
+  // Saved and applied jobs move to their own tabs, so the results list only shows the rest.
+  const isMoved = (r: MatchResult) => savedAt.has(r.job.id) || isApplied(r);
+  const movedToSaved = [...rep.matches, ...(rep.to_check ?? []), ...rep.below_threshold, ...rep.excluded, ...(rep.dismissed ?? [])]
+    .filter((r) => savedAt.has(r.job.id) && !isApplied(r)).length;
+  const items = (rep[tab] ?? []).filter((r) => !isMoved(r));
+  counts.matches = rep.matches.filter((r) => !isMoved(r)).length;
+  counts.to_check = (rep.to_check ?? []).filter((r) => !isMoved(r)).length;
+  counts.below_threshold = rep.below_threshold.filter((r) => !isMoved(r)).length;
+  counts.excluded = rep.excluded.filter((r) => !isMoved(r)).length;
+  counts.dismissed = (rep.dismissed ?? []).filter((r) => !isMoved(r)).length;
   const tabs = (Object.keys(TAB_LABEL) as Tab[]).filter(
     (t) => counts[t] > 0 || t === "matches" || t === "below_threshold" || t === "excluded" || t === tab,
   );
-  const fresh = [...rep.matches, ...rep.below_threshold].filter((r) => !isApplied(r) && r.tracking?.status === "new").length;
-  const borderline = [...rep.matches, ...rep.below_threshold].filter((r) => !isApplied(r) && r.verdict?.borderline).length;
+  const fresh = [...rep.matches, ...rep.below_threshold].filter((r) => !isMoved(r) && r.tracking?.status === "new").length;
+  const borderline = [...rep.matches, ...rep.below_threshold].filter((r) => !isMoved(r) && r.verdict?.borderline).length;
   const problems = { ...outcome.skipped_sources, ...outcome.errors };
   const alertProblem = outcome.alert_only && !!problems.gmail_alerts;
   const emptyTitle = alertProblem
@@ -567,23 +578,44 @@ function SearchResults({ hasCv, savedAt, tracked }: { hasCv: boolean; savedAt: M
           </details>
         )}
       </header>
-      <nav className="sticky top-0 z-10 flex flex-wrap gap-1 border-b border-border bg-bg px-4 py-2">
+      {/* A segmented control: a framed strip of buttons, so the lists read as clickable. */}
+      <nav className="sticky top-0 z-10 border-b border-border bg-bg px-4 py-2">
+        <div role="tablist" aria-label="Result lists" className="inline-flex max-w-full flex-wrap gap-1 rounded-lg border border-border bg-surface p-1">
           {tabs.map((t) => (
             <button
               key={t}
+              role="tab"
+              aria-selected={tab === t}
               title={TAB_HINT[t]}
               onClick={() => setTab(t)}
               className={cn(
-                "rounded-md px-2.5 py-1 text-[12px]",
-                tab === t ? "bg-accent-bg text-fg" : "text-muted hover:text-fg",
+                "flex cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1 text-[12px] transition-colors",
+                "outline-none focus-visible:ring-2 focus-visible:ring-accent",
+                tab === t
+                  ? "border-border bg-panel font-medium text-fg shadow-sm"
+                  : "border-transparent text-muted hover:border-border hover:bg-panel hover:text-fg",
               )}
             >
-              {TAB_LABEL[t]} <span className="text-faint">{counts[t]}</span>
+              {TAB_LABEL[t]}
+              <span
+                className={cn(
+                  "rounded-full px-1.5 text-[11px] tabular-nums",
+                  tab === t ? "bg-accent-bg font-semibold text-accent" : "bg-bg text-faint",
+                )}
+              >
+                {counts[t]}
+              </span>
             </button>
           ))}
+        </div>
       </nav>
       <div className="space-y-2.5 p-4">
         {TAB_HINT[tab] && items.length > 0 && <p className="text-[11px] text-faint">{TAB_HINT[tab]}.</p>}
+        {movedToSaved > 0 && (
+          <p className="text-[11px] text-faint">
+            {movedToSaved} job{movedToSaved === 1 ? "" : "s"} from this search {movedToSaved === 1 ? "is" : "are"} in <b>Saved</b>.
+          </p>
+        )}
         {items.length === 0 ? (
           <Empty title={emptyTitle}>
             {tab === "matches" && outcome.fetched > 0 &&

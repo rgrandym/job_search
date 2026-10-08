@@ -209,11 +209,11 @@ The results panel has tabs for **Search results**, **Saved**, **Applied**, **Doc
 ### Save jobs and remove them, step by step
 
 1. In **Search results**, tick the box at the left of each job you want to keep.
-2. Click **Save** in the bar that appears at the top. The jobs appear under **Saved** and stay there across new searches.
+2. Click **Save** in the bar that appears at the top. The jobs move to **Saved**: they leave the search results (a note shows how many) and stay in **Saved** across new searches.
 3. To remove one saved job, open **Saved** and click the red **Delete** button at the top right of its card.
 4. To remove several, tick them in **Saved** and click **Remove N from saved** in the top bar.
 
-Deleting a saved job keeps its status, note and any application record.
+Deleting a saved job keeps its status, note and any application record. If that job is still in the search on screen, it goes back to the search results.
 
 ### Record an application, step by step
 
