@@ -109,12 +109,14 @@ def _reported(
 
 
 def _stamped(usage_sink: UsageSink | None, provider: str, switched_from: str | None) -> UsageSink:
-    """Every call goes into the spend ledger, then to the caller's sink, if any."""
+    """Every call goes into the spend ledger and the running task's token count, then to the
+    caller's sink, if any."""
 
     def sink(used: ModelUsage) -> None:
         usage.record_spend(
             provider, used.model, used.input_tokens, used.output_tokens, used.estimated
         )
+        progress.add_tokens(used.input_tokens, used.output_tokens, used.estimated)
         if usage_sink is not None:
             usage_sink(
                 used.model_copy(update={"provider": provider, "switched_from": switched_from})

@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import { clockLabel } from "../lib/labels";
+import { clockLabel, tokenCount } from "../lib/labels";
 import type { Connection, ConnectionsView, PlanWindow } from "../lib/types";
 import { cn } from "../lib/utils";
 import { spendLine } from "./ConnectionsPanel";
@@ -58,15 +58,19 @@ function WindowLine({ win, now, threshold }: { win: PlanWindow; now: number; thr
   return (
     <div className="flex items-center gap-2 text-[11px]">
       <span className="w-14 shrink-0 text-faint">{WINDOW_LABEL[win.name] ?? win.name}</span>
-      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface" title={win.used_percent != null ? `${Math.round(win.used_percent)}% used` : "The plan reports its share only near the limit"}>
+      <div
+        className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface"
+        title={`${win.used_percent != null ? `${Math.round(win.used_percent)}% used` : "The plan reports its share only near the limit"}${win.tokens ? ` · this app used ${win.tokens.toLocaleString()} tokens in this window` : ""}`}
+      >
         {/* Unknown share: a neutral full track, so it never reads as an empty allowance. */}
         <div
           className={cn("h-full rounded-full", share == null ? "bg-border" : spent ? "bg-bad" : low ? "bg-warn" : "bg-good")}
           style={{ width: `${share == null ? 100 : share}%` }}
         />
       </div>
-      <span className={cn("w-40 shrink-0 text-right tabular-nums", spent ? "text-bad" : low ? "text-warn" : "text-faint")}>
+      <span className={cn("w-52 shrink-0 text-right tabular-nums", spent ? "text-bad" : low ? "text-warn" : "text-faint")}>
         {text}
+        {!!win.tokens && <span title="This app's tokens inside this window"> · {tokenCount(win.tokens)} tok</span>}
         {win.resets_at != null && win.resets_at > now && <span title={`Resets ${clockLabel(win.resets_at)}`}> · resets in {until(win.resets_at - now)}</span>}
       </span>
     </div>

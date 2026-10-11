@@ -34,6 +34,8 @@ export interface PlanWindow {
   used_percent: number | null;
   resets_at: number | null;
   status: string | null;
+  /** This app's tokens (input + output) inside the window so far. */
+  tokens: number | null;
 }
 
 export interface PlanWindows {
@@ -693,6 +695,12 @@ export interface TaskProgress {
   waiting_on: string | null;
   waiting_since: number | null;
   completed: string[];
+  /** Model calls finished so far and their tokens (input includes cache reads and writes). */
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  /** Some calls only had an estimate. */
+  tokens_estimated: boolean;
   finished: boolean;
   error: string | null;
   /** Server clock at snapshot time (seconds), for elapsed times. */

@@ -5,7 +5,8 @@ A route opens a task with `track(task_id, title, total)`. Code anywhere below it
 `asyncio.to_thread` carries into worker threads, so domain code needs no extra parameters.
 Without an open task every call is a no-op. The UI polls `snapshot(task_id)` about once a
 second: `done / total` is real step progress, and `waiting_on` / `waiting_since` show which
-model call is running and for how long, so a slow call is visible as a slow call.
+model call is running and for how long, so a slow call is visible as a slow call. Every model
+call made inside adds its tokens (`add_tokens`), so a task shows what it has used so far.
 
 `run(task_id, title, work)` also makes the task stoppable: `stop(task_id)` (the UI's Stop
 button) ends it at once. The work is cancelled, its model calls are killed or cut off
@@ -45,6 +46,10 @@ class TaskProgress(BaseModel):
     waiting_on: str | None = None  # the model call in flight, e.g. "CV tailoring (gpt-5)"
     waiting_since: float | None = None
     completed: list[str] = Field(default_factory=list)  # finished steps, oldest first
+    calls: int = 0  # model calls finished so far
+    input_tokens: int = 0  # including cache reads and writes, as the provider reports them
+    output_tokens: int = 0
+    tokens_estimated: bool = False  # some calls only had an estimate
     finished: bool = False
     error: str | None = None
     now: float = 0.0  # server clock at snapshot time, so the UI can measure elapsed time
@@ -137,6 +142,26 @@ def model_call(purpose: str, model: str) -> Iterator[None]:
         yield
     finally:
         _update(waiting_on=None, waiting_since=None)
+
+
+def add_tokens(input_tokens: int, output_tokens: int, estimated: bool = False) -> None:
+    """Count one finished model call against the open task (no-op without one)."""
+    task_id = _CURRENT.get()
+    if task_id is None:
+        return
+    with _LOCK:
+        task = _TASKS.get(task_id)
+        if task is None:
+            return
+        _TASKS[task_id] = task.model_copy(
+            update={
+                "calls": task.calls + 1,
+                "input_tokens": task.input_tokens + int(input_tokens),
+                "output_tokens": task.output_tokens + int(output_tokens),
+                "tokens_estimated": task.tokens_estimated or estimated,
+                "updated_at": time.time(),
+            }
+        )
 
 
 def snapshot(task_id: str) -> TaskProgress | None:

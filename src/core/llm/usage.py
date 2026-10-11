@@ -4,11 +4,16 @@ other model error.
 A wrong classification either strands the user (a limit read as an ordinary error, so no
 switch or wait is offered) or switches provider on an ordinary error; the patterns are tested
 against recorded messages. Nothing here makes a model call: Claude Code reports its windows
-in the `rate_limit_event`s of every call, Codex through `codex app-server`.
+through `claude -p /usage` (a local command; its calls' `rate_limit_event`s state a share only
+near a limit), Codex through `codex app-server`. Both are read at most once a minute, and again
+soon after a call on that plan.
 
-Persistence (`data/usage_claude.json`, `data/model_spend.json`) starts once the workspace
-calls `configure(data_dir)`; until then everything stays in memory, so tests and CLIs never
-write into the user's data folder by accident.
+Each plan window also shows the tokens this app spent inside it (`tokens`), from a short log
+of recent calls: the plans state only a percentage, never a token allowance.
+
+Persistence (`data/usage_claude.json`, `data/model_spend.json`, `data/usage_recent.json`)
+starts once the workspace calls `configure(data_dir)`; until then everything stays in memory,
+so tests and CLIs never write into the user's data folder by accident.
 """
 
 from __future__ import annotations
@@ -57,6 +62,7 @@ class UsageWindow(BaseModel):
     used_percent: float | None = None  # None: the plan did not say (Claude, far from the limit)
     resets_at: float | None = None  # epoch seconds
     status: str | None = None  # Claude: "allowed", "allowed_warning", "rejected"
+    tokens: int | None = None  # this app's tokens (input + output) inside the window so far
 
 
 class UsageWindows(BaseModel):
@@ -127,6 +133,7 @@ _dir: Path | None = None
 _claude: dict[str, Any] = {}
 _spend: dict[str, dict[str, dict[str, Any]]] = {}  # day -> "provider|model" -> counters
 _exhausted: dict[str, tuple[float, str]] = {}  # provider -> (until, message)
+_recent: dict[str, list[list[float]]] = {}  # plan provider -> [[time, input, output], ...]
 
 
 def configure(data_dir: Path | None) -> None:
@@ -137,8 +144,11 @@ def configure(data_dir: Path | None) -> None:
         _claude.clear()
         _spend.clear()
         _exhausted.clear()
+        _recent.clear()
+        _claude_cli.clear()
         _claude.update(_read("usage_claude.json"))
         _spend.update(_read("model_spend.json"))
+        _recent.update(_read("usage_recent.json"))
 
 
 def _read(name: str) -> dict[str, Any]:
@@ -187,6 +197,22 @@ def record_claude_limit(info: dict[str, Any]) -> None:
         _write("usage_claude.json", _claude)
 
 
+def record_claude_reading(kind: str, percent_used: float, resets_at: float | None) -> None:
+    """Store a window's share used as a Claude Code session reports it (the dev pane passes
+    these on): unlike `rate_limit_event`s, it is stated far from the limit too."""
+    if kind not in _CLAUDE_NAMES:
+        return
+    with _lock:
+        win = dict(_claude.get(kind) or {})
+        win["utilization"] = max(0.0, min(float(percent_used), 100.0)) / 100  # a fraction
+        if resets_at:
+            win["resetsAt"] = resets_at
+        win.setdefault("status", "allowed")
+        _claude[kind] = win
+        _claude["observed_at"] = time.time()
+        _write("usage_claude.json", _claude)
+
+
 def claude_windows(now: float | None = None) -> UsageWindows:
     """The Claude plan's windows as last reported. A window past its reset reads as unused."""
     now = time.time() if now is None else now
@@ -222,6 +248,8 @@ def claude_windows(now: float | None = None) -> UsageWindows:
 
 _codex_cache: dict[str, Any] = {}
 CODEX_TTL_S = 60
+CLAUDE_TTL_S = 60
+CODEX_STALE_S = 15  # after a Codex call, windows older than this are read again
 
 
 def codex_windows(view: dict[str, Any]) -> UsageWindows:
@@ -252,7 +280,9 @@ def codex_windows(view: dict[str, Any]) -> UsageWindows:
 def codex_plan_windows(ttl: float = CODEX_TTL_S) -> UsageWindows:
     """ChatGPT plan windows, cached for a minute: reading them starts a process."""
     hit = _codex_cache.get("value")
-    if isinstance(hit, UsageWindows) and time.time() - _codex_cache.get("at", 0) < ttl:
+    age = time.time() - _codex_cache.get("at", 0)
+    stale = _codex_cache.get("stale") and age >= CODEX_STALE_S
+    if isinstance(hit, UsageWindows) and age < ttl and not stale:
         return hit
     from src.core.llm.codex_backend import codex_usage
     from src.core.llm.types import LLMError
@@ -261,17 +291,123 @@ def codex_plan_windows(ttl: float = CODEX_TTL_S) -> UsageWindows:
         value = codex_windows(codex_usage())
     except (LLMError, OSError, ValueError) as exc:
         return UsageWindows(note=f"Could not read Codex usage: {exc}")
-    _codex_cache.update(value=value, at=time.time())
+    _codex_cache.update(value=value, at=time.time(), stale=False)
     return value
 
 
+_claude_cli: dict[str, Any] = {}  # when `/usage` was last read, and whether calls moved it
+_USAGE_LINE = re.compile(
+    r"^\s*Current (session|week)(?: \(([^)]*)\))?:\s*(\d+(?:\.\d+)?)% used(?:\s*·\s*resets (.+))?$",
+    re.I | re.M,
+)
+_RESETS = re.compile(
+    r"(?:([A-Z][a-z]{2}) (\d{1,2})(?:,? (\d{4}))? at )?(\d{1,2})(?::(\d{2}))?\s*([ap]m)"
+    r"(?:\s*\(([^)]+)\))?",
+    re.I,
+)
+
+
+def parse_claude_usage(
+    text: str, now: float | None = None
+) -> list[tuple[str, float, float | None]]:
+    """(window kind, share used, reset epoch) per line of Claude Code's `/usage` text, e.g.
+    "Current session: 76% used · resets Oct 11 at 2:10pm (Europe/London)"."""
+    out = []
+    for m in _USAGE_LINE.finditer(text):
+        scope = (m.group(2) or "").lower()
+        if m.group(1).lower() == "session":
+            kind = "five_hour"
+        elif "opus" in scope:
+            kind = "seven_day_opus"
+        elif "sonnet" in scope:
+            kind = "seven_day_sonnet"
+        else:
+            kind = "seven_day"
+        out.append((kind, float(m.group(3)), _reset_epoch(m.group(4) or "", now)))
+    return out
+
+
+def _reset_epoch(text: str, now: float | None = None) -> float | None:
+    """ "Oct 11 at 2:10pm (Europe/London)" or "3pm (UTC)" as epoch seconds; the next such
+    time when no date (or no year) is given."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    m = _RESETS.search(text)
+    if not m:
+        return None
+    month, day, year, hour, minute, half, zone = m.groups()
+    try:
+        tz = ZoneInfo(zone) if zone else None
+    except (ZoneInfoNotFoundError, ValueError):
+        tz = None
+    base = datetime.fromtimestamp(time.time() if now is None else now, tz)
+    hour24 = int(hour) % 12 + (12 if half.lower() == "pm" else 0)
+    try:
+        if month:
+            stamp = datetime.strptime(f"{month} {day} {year or base.year}", "%b %d %Y")
+            when = stamp.replace(hour=hour24, minute=int(minute or 0), tzinfo=tz)
+            if not year and when < base - timedelta(days=1):
+                when = when.replace(year=when.year + 1)  # "Jan 2" read in late December
+        else:
+            when = base.replace(hour=hour24, minute=int(minute or 0), second=0, microsecond=0)
+            if when <= base:
+                when += timedelta(days=1)
+    except ValueError:
+        return None
+    return when.timestamp()
+
+
+def claude_plan_windows(ttl: float = CLAUDE_TTL_S) -> UsageWindows:
+    """The Claude plan's windows, refreshed from `/usage` once a minute (sooner after calls
+    on the plan); what the calls reported stands when it cannot be read."""
+    age = time.time() - float(_claude_cli.get("at") or 0)
+    stale = _claude_cli.get("stale") and age >= CODEX_STALE_S
+    if age >= ttl or stale:
+        _claude_cli.update(at=time.time(), stale=False)  # one reader at a time
+        from src.core.llm.claude_code_backend import claude_usage_text
+        from src.core.llm.types import LLMError
+
+        try:
+            readings = parse_claude_usage(claude_usage_text())
+        except (LLMError, OSError, ValueError):
+            readings = []
+        for kind, used, resets in readings:
+            record_claude_reading(kind, used, resets)
+    return claude_windows()
+
+
 def plan_windows(provider: str, fresh: bool = False) -> UsageWindows | None:
-    """The plan windows of a plan provider; None for providers billed per token."""
+    """The plan windows of a plan provider, each with this app's tokens inside it; None for
+    providers billed per token."""
     if provider == "claude_code":
-        return claude_windows()
-    if provider == "codex":
-        return codex_plan_windows(ttl=0 if fresh else CODEX_TTL_S)
-    return None
+        found = claude_plan_windows(ttl=0 if fresh else CLAUDE_TTL_S)
+    elif provider == "codex":
+        found = codex_plan_windows(ttl=0 if fresh else CODEX_TTL_S)
+    else:
+        return None
+    windows = [w.model_copy(update={"tokens": window_tokens(provider, w)}) for w in found.windows]
+    return found.model_copy(update={"windows": windows})
+
+
+def _window_seconds(name: str) -> float | None:
+    """A window's length from its name ("5h", "7d Opus"); None when it names none."""
+    m = re.match(r"(\d+)\s*([hd])", name)
+    return int(m.group(1)) * (3600 if m.group(2) == "h" else 86400) if m else None
+
+
+def window_tokens(provider: str, win: UsageWindow, now: float | None = None) -> int | None:
+    """This app's tokens on `provider` since `win` opened (its reset minus its length, or the
+    last window-length when the reset is unknown); None when the window has no length."""
+    length = _window_seconds(win.name)
+    if length is None:
+        return None
+    now = time.time() if now is None else now
+    end = win.resets_at if win.resets_at and win.resets_at > now else now
+    start = end - length
+    with _lock:
+        rows = list(_recent.get(provider, []))
+    return int(sum(r[1] + r[2] for r in rows if r[0] >= start))
 
 
 def over_threshold(usage: UsageWindows | None, threshold: float) -> UsageWindow | None:
@@ -332,6 +468,24 @@ def record_spend(
         for old in [d for d in _spend if d < cutoff]:
             del _spend[old]
         _write("model_spend.json", _spend)
+        if provider in PLAN_PROVIDERS:
+            _log_recent(provider, int(input_tokens), int(output_tokens))
+    if provider == "codex":
+        _codex_cache["stale"] = True  # its windows moved: read them again soon
+    elif provider == "claude_code":
+        _claude_cli["stale"] = True
+
+
+RECENT_S = 8 * 86400  # longer than the longest plan window (7 days)
+
+
+def _log_recent(provider: str, input_tokens: int, output_tokens: int) -> None:
+    """Add a call to the recent log (caller holds `_lock`), dropping calls past `RECENT_S`."""
+    now = time.time()
+    rows = [r for r in _recent.get(provider, []) if now - r[0] < RECENT_S]
+    rows.append([round(now, 1), input_tokens, output_tokens])
+    _recent[provider] = rows
+    _write("usage_recent.json", _recent)
 
 
 def spend(days: int = 1) -> list[SpendRow]:

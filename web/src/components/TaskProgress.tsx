@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, CheckCircle2, CircleStop, Loader2, Square } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
+import { tokenCount } from "../lib/labels";
 import { cn } from "../lib/utils";
 import { useActivity } from "../stores/activityStore";
 
@@ -133,6 +134,14 @@ export function TaskProgress({ id, className, onStop }: { id: string | null; cla
           </span>
         </p>
         <span className="flex shrink-0 items-center gap-2">
+          {task.calls > 0 && (
+            <span
+              className="tabular-nums text-faint"
+              title={`${task.calls} model call${task.calls === 1 ? "" : "s"}: ${task.input_tokens.toLocaleString()} input, ${task.output_tokens.toLocaleString()} output tokens${task.tokens_estimated ? " (partly estimated)" : ""}`}
+            >
+              {task.tokens_estimated ? "~" : ""}{tokenCount(task.input_tokens + task.output_tokens)} tok
+            </span>
+          )}
           <span className="tabular-nums text-faint">{duration(now - task.started_at)}</span>
           {!task.finished && stop}
         </span>

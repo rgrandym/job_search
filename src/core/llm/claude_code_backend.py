@@ -70,6 +70,39 @@ def claude_binary() -> str | None:
     return next((str(p) for p in candidates if p.exists()), None)
 
 
+USAGE_TIMEOUT_S = 30
+
+
+def claude_usage_text() -> str:
+    """The plan usage Claude Code reports for `/usage` (its share of each window and when it
+    resets). A local command: `claude -p /usage` answers without a model call or tokens."""
+    binary = claude_binary()
+    if binary is None:
+        raise LLMError("Claude Code CLI not found")
+    cmd = [binary, "-p", "/usage", "--output-format", "json", "--no-session-persistence"]
+    cmd += ["--tools", "", "--strict-mcp-config", "--setting-sources", ""]
+    with tempfile.TemporaryDirectory(prefix="jobsearch-claude-") as workdir:
+        try:
+            out = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=USAGE_TIMEOUT_S,
+                cwd=workdir,
+                env=subscription_env(),
+                stdin=subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise LLMError(f"Could not read Claude Code usage: {exc}") from exc
+    try:
+        data = json.loads(out.stdout)
+    except json.JSONDecodeError as exc:
+        raise LLMError(f"Claude Code usage was not JSON (exit {out.returncode})") from exc
+    if not isinstance(data, dict) or data.get("is_error") or not data.get("result"):
+        raise LLMError("Claude Code did not report its usage")
+    return str(data["result"])
+
+
 def claude_code_status() -> dict[str, Any]:
     """Installed? Signed in with a Claude plan? (No email or org is returned.)"""
     binary = claude_binary()

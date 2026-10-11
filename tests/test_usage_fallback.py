@@ -92,6 +92,121 @@ def test_claude_windows_persist_across_restarts(tmp_path: Path) -> None:
     assert usage.claude_windows().windows[0].name == "7d"
 
 
+def test_a_session_reading_gives_claude_windows_their_share(tmp_path: Path) -> None:
+    """Far from the limit the CLI states no share; a Claude Code session's reading does."""
+    usage.configure(tmp_path)
+    usage.record_claude_limit(
+        {"rateLimitType": "five_hour", "status": "allowed", "resetsAt": 1999999999}
+    )
+    assert usage.claude_windows(now=1999990000).windows[0].used_percent is None
+    usage.record_claude_reading("five_hour", 0.5, None)
+    usage.record_claude_reading("unknown_window", 50, None)
+    usage.configure(tmp_path)
+    win = usage.claude_windows(now=1999990000).windows[0]
+    assert (win.name, win.used_percent, win.resets_at, win.status) == (
+        "5h",
+        0.5,
+        1999999999,
+        "allowed",
+    )
+
+
+USAGE_TEXT = """You are currently using your subscription to power your Claude Code usage
+
+Current session: 76% used · resets Oct 11 at 2:10pm (Europe/London)
+Current week (all models): 79% used · resets Oct 12 at 2pm (Europe/London)
+Current week (Opus): 12.5% used
+
+What's contributing to your limits usage?
+Last 24h · 735 requests · 6 sessions
+"""
+
+
+def test_claude_usage_text_is_parsed() -> None:
+    now = 1791711600.0  # 2026-10-11 10:40 London
+    found = usage.parse_claude_usage(USAGE_TEXT, now=now)
+    assert [(k, p) for k, p, _ in found] == [
+        ("five_hour", 76.0),
+        ("seven_day", 79.0),
+        ("seven_day_opus", 12.5),
+    ]
+    assert found[0][2] == 1791724200.0  # Oct 11 14:10 BST
+    assert found[1][2] == 1791810000.0  # Oct 12 14:00 BST
+    assert found[2][2] is None
+    assert usage._reset_epoch("3pm (UTC)", now=now) == 1791730800.0  # later the same day
+    assert usage._reset_epoch("9am (UTC)", now=now) == 1791795600.0  # next morning
+    assert usage._reset_epoch("soon") is None
+    assert usage.parse_claude_usage("Not signed in") == []
+
+
+def test_claude_windows_are_read_from_usage_and_again_after_a_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.llm import claude_code_backend
+
+    reads: list[int] = []
+
+    def text() -> str:
+        reads.append(1)
+        return f"Current session: {10 * len(reads)}% used · resets 11:59pm (UTC)"
+
+    monkeypatch.setattr(claude_code_backend, "claude_usage_text", text)
+    first = usage.plan_windows("claude_code")
+    assert first is not None and first.windows[0].used_percent == 10.0
+    assert usage.plan_windows("claude_code").windows[0].used_percent == 10.0  # type: ignore[union-attr]
+    usage.record_spend("claude_code", "opus", 10, 1)
+    usage._claude_cli["at"] -= usage.CODEX_STALE_S
+    assert usage.plan_windows("claude_code").windows[0].used_percent == 20.0  # type: ignore[union-attr]
+    assert len(reads) == 2
+
+
+def test_an_unreadable_usage_keeps_what_the_calls_reported() -> None:
+    usage.record_claude_limit(
+        {"rateLimitType": "seven_day", "status": "allowed_warning", "utilization": 0.77}
+    )
+    found = usage.plan_windows("claude_code")  # conftest: `/usage` cannot be read
+    assert found is not None and found.windows[0].used_percent == 77.0
+
+
+def test_plan_windows_count_this_apps_tokens_inside_each_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = time.time()
+    usage.record_spend("claude_code", "opus", 1000, 100)
+    usage.record_spend("anthropic", "opus", 999, 999)  # billed per token: not a plan window
+    resets = now + 3600
+    usage.record_claude_limit(
+        {"rateLimitType": "five_hour", "status": "allowed", "resetsAt": resets}
+    )
+    usage.record_claude_limit(
+        {"rateLimitType": "seven_day", "status": "allowed", "resetsAt": now + 86400}
+    )
+    with usage._lock:  # an older call: inside the 7-day window, before this 5-hour one
+        usage._recent["claude_code"].insert(0, [now - 6 * 3600, 5000, 0])
+    windows = {w.name: w.tokens for w in usage.plan_windows("claude_code").windows}  # type: ignore[union-attr]
+    assert windows == {"5h": 1100, "7d": 6100}
+    assert usage.window_tokens("claude_code", usage.UsageWindow(name="other")) is None
+
+
+def test_a_codex_call_makes_its_cached_windows_stale(monkeypatch: pytest.MonkeyPatch) -> None:
+    reads: list[int] = []
+
+    def read() -> dict[str, Any]:
+        reads.append(1)
+        return {"primary": {"used_percent": 10 * len(reads), "window_minutes": 300}}
+
+    import src.core.llm.codex_backend as codex
+
+    monkeypatch.setattr(codex, "codex_usage", read)
+    usage._codex_cache.clear()
+    assert usage.codex_plan_windows().windows[0].used_percent == 10
+    assert usage.codex_plan_windows().windows[0].used_percent == 10  # cached
+    usage.record_spend("codex", "gpt", 10, 1)
+    usage._codex_cache["at"] -= usage.CODEX_STALE_S  # the stale read is old enough
+    assert usage.codex_plan_windows().windows[0].used_percent == 20
+    assert len(reads) == 2
+
+
 def test_spend_ledger_adds_up_and_persists(tmp_path: Path) -> None:
     usage.configure(tmp_path)
     usage.record_spend("anthropic", "claude-opus-5", 100, 10)

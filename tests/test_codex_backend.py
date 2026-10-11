@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
+from pathlib import Path
 from typing import Any
 
 import pytest
 from pydantic import BaseModel
 
-from src.core.llm import ChatMessage, LLMConfig, ToolSpec
+from src.core.llm import ChatMessage, LLMConfig, ModelUsage, ToolSpec
 from src.core.llm import codex_backend as backend
 
 
@@ -110,18 +112,20 @@ def test_codex_structured_validates_cli_output(monkeypatch: pytest.MonkeyPatch) 
 
     seen: dict[str, Any] = {}
 
-    def fake_run(cfg: LLMConfig, model: str, prompt: str, schema: dict[str, Any]) -> dict[str, str]:
+    def fake_run(cfg: LLMConfig, model: str, prompt: str, schema: dict[str, Any]) -> Any:
         seen.update(model=model, prompt=prompt, schema=schema)
-        return {"value": "ready"}
+        return {"value": "ready"}, (1200, 40)
 
     monkeypatch.setattr(backend, "run_codex", fake_run)
 
-    result = backend.CodexStructured(_config()).generate(
+    used: list[ModelUsage] = []
+    result = backend.CodexStructured(_config(), usage_sink=used.append).generate(
         system="Follow the rules", prompt="Return a result", output_model=Answer
     )
 
     assert result.value == "ready"
     assert seen["model"] == "gpt-test"
+    assert (used[0].input_tokens, used[0].output_tokens, used[0].estimated) == (1200, 40, False)
     assert "Follow the rules" in seen["prompt"]
 
 
@@ -131,9 +135,9 @@ def test_codex_structured_repairs_invalid_output_once(monkeypatch: pytest.Monkey
 
     prompts: list[str] = []
 
-    def fake_run(cfg: LLMConfig, model: str, prompt: str, schema: dict[str, Any]) -> dict[str, str]:
+    def fake_run(cfg: LLMConfig, model: str, prompt: str, schema: dict[str, Any]) -> Any:
         prompts.append(prompt)
-        return {"wrong": "field"} if len(prompts) == 1 else {"value": "ready"}
+        return ({"wrong": "field"} if len(prompts) == 1 else {"value": "ready"}), None
 
     monkeypatch.setattr(backend, "run_codex", fake_run)
     result = backend.CodexStructured(_config()).generate(
@@ -150,11 +154,11 @@ def test_codex_structured_repairs_invalid_json_once(monkeypatch: pytest.MonkeyPa
 
     prompts: list[str] = []
 
-    def fake_run(cfg: LLMConfig, model: str, prompt: str, schema: dict[str, Any]) -> dict[str, str]:
+    def fake_run(cfg: LLMConfig, model: str, prompt: str, schema: dict[str, Any]) -> Any:
         prompts.append(prompt)
         if len(prompts) == 1:
             raise backend.LLMError("Codex returned invalid JSON: malformed")
-        return {"value": "ready"}
+        return {"value": "ready"}, None
 
     monkeypatch.setattr(backend, "run_codex", fake_run)
     assert (
@@ -172,7 +176,7 @@ def test_codex_structured_does_not_retry_timeout(monkeypatch: pytest.MonkeyPatch
 
     calls = 0
 
-    def fake_run(cfg: LLMConfig, model: str, prompt: str, schema: dict[str, Any]) -> dict[str, str]:
+    def fake_run(cfg: LLMConfig, model: str, prompt: str, schema: dict[str, Any]) -> Any:
         nonlocal calls
         calls += 1
         raise backend.LLMError("codex exec timed out after 600s")
@@ -186,13 +190,12 @@ def test_codex_structured_does_not_retry_timeout(monkeypatch: pytest.MonkeyPatch
 
 
 def test_codex_chat_decodes_emulated_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_run(
-        cfg: LLMConfig, model: str, prompt: str, schema: dict[str, Any]
-    ) -> dict[str, Any]:
-        return {
+    async def fake_run(cfg: LLMConfig, model: str, prompt: str, schema: dict[str, Any]) -> Any:
+        turn = {
             "message": "I will search.",
             "tool_calls": [{"name": "search_jobs", "arguments_json": '{"limit": 3}'}],
         }
+        return turn, (900, 30)
 
     monkeypatch.setattr(backend, "run_codex_async", fake_run)
     response = asyncio.run(
@@ -212,3 +215,39 @@ def test_codex_chat_decodes_emulated_tool_calls(monkeypatch: pytest.MonkeyPatch)
     assert response.stop_reason == "tool_use"
     assert response.message.tool_calls[0].name == "search_jobs"
     assert response.message.tool_calls[0].arguments == {"limit": 3}
+    assert (response.input_tokens, response.output_tokens) == (900, 30)
+    assert not response.usage_estimated
+
+
+def test_codex_exec_reports_its_tokens_and_error_messages(tmp_path: Path) -> None:
+    """`codex exec --json`: the usage of `turn.completed`; a failure names its error event."""
+    cmd = backend._command("codex", _config(), "m", tmp_path, tmp_path / "s", tmp_path / "o")
+    assert "--json" in cmd
+    log = "\n".join(
+        [
+            json.dumps({"type": "thread.started", "thread_id": "t"}),
+            "not json",
+            json.dumps(
+                {
+                    "type": "turn.completed",
+                    "usage": {
+                        "input_tokens": 5100,
+                        "cached_input_tokens": 4000,
+                        "output_tokens": 77,
+                    },
+                }
+            ),
+        ]
+    )
+    out = tmp_path / "out.json"
+    out.write_text('{"value": "x"}')
+    assert backend._result(tmp_path, out, 0, log) == ({"value": "x"}, (5100, 77))
+    assert backend._tokens("no events") is None
+    failed = json.dumps({"type": "turn.failed", "error": {"message": "usage limit reached"}})
+    with pytest.raises(backend.LLMError, match="usage limit reached"):
+        backend._result(tmp_path, tmp_path / "missing.json", 1, failed)
+
+
+def test_codex_without_reported_usage_falls_back_to_an_estimate() -> None:
+    used = backend._usage("m", None, "x" * 400, {"value": "y"})
+    assert used.estimated and used.input_tokens == 100

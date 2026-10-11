@@ -56,6 +56,18 @@ def settings(tmp_path: Path) -> Settings:
 
 
 @pytest.fixture(autouse=True)
+def _no_claude_usage_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Plan windows would run the real `claude -p /usage`; tests stay offline."""
+    from src.core.llm import claude_code_backend
+    from src.core.llm.types import LLMError
+
+    def unavailable() -> str:
+        raise LLMError("Claude Code usage is not read in tests")
+
+    monkeypatch.setattr(claude_code_backend, "claude_usage_text", unavailable)
+
+
+@pytest.fixture(autouse=True)
 def _no_company_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
     """Searches with company sites would discover ~1,000 live websites on first use."""
 

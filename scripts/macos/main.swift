@@ -1,8 +1,9 @@
 // Job Search: the Dock app for the local web app (macOS).
 //
-// One window showing the app's UI. It reuses a backend already answering on the port (one
-// started by scripts/dev.sh or a terminal), otherwise runs scripts/start.sh and stops that
-// backend on quit. macOS keeps one copy of an app running, so clicking the Dock icon brings
+// One window showing the app's UI. It reuses an up-to-date backend already answering on the
+// port (one started by scripts/dev.sh or a terminal), otherwise runs scripts/start.sh, which
+// also replaces a backend running older code (so reopening the app picks up every change), and
+// stops that backend on quit. macOS keeps one copy of an app running, so clicking the Dock icon brings
 // this window back (un-minimised) instead of opening another. Built by make_app.sh, which
 // writes the repository path, the PATH of the shell that built it and the port into Info.plist.
 
@@ -29,7 +30,7 @@ struct Config {
     }
 }
 
-enum Backend { case ready, devOnly, down }
+enum Backend { case ready, stale, devOnly, down }
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate,
@@ -100,6 +101,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         for _ in 0..<1200 {  // up to 10 minutes: a first start installs and builds
             switch await probe() {
             case .ready: webView.load(URLRequest(url: config.home)); return
+            case .stale where launched && server?.isRunning != true:  // start.sh kept it
+                webView.load(URLRequest(url: config.home)); return
             case .devOnly where await reachable(config.devUI):
                 webView.load(URLRequest(url: config.devUI)); return
             default: break
@@ -126,7 +129,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             body["app"] as? String == "job_search"
         else { return .down }
-        return body["ui"] as? Bool == true ? .ready : .devOnly
+        guard body["ui"] as? Bool == true else { return .devOnly }
+        return body["stale"] as? Bool == true ? .stale : .ready
     }
 
     func reachable(_ url: URL) async -> Bool {

@@ -3,7 +3,7 @@
 We never read or reuse the tokens in `~/.codex/auth.json`. Every call runs
 `codex exec` (non-interactive mode), and the CLI handles sign-in. Structured output uses
 `--output-schema`; each such call is a fresh, ephemeral, read-only session in an empty temp
-directory.
+directory, run with `--json` so its `turn.completed` event reports the tokens it used.
 
 The assistant runs natively (`run_native`): Codex runs its own agent loop with real tool calls
 to the app's MCP endpoint, its built-in shell, browser, plugin and similar tools switched off,
@@ -298,6 +298,7 @@ def _command(
     cmd = [
         binary,
         "exec",
+        "--json",  # events on stdout; `turn.completed` carries the call's token usage
         "--ephemeral",
         "--skip-git-repo-check",
         "--ignore-user-config",
@@ -319,6 +320,38 @@ def _command(
     return cmd
 
 
+Tokens = tuple[int, int] | None  # (input, output) as Codex reported them; None: not reported
+
+
+def _tokens(log: str) -> Tokens:
+    """The usage of the last `turn.completed` event in `codex exec --json` output."""
+    for line in reversed(log.splitlines()):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "turn.completed":
+            u = event.get("usage") or {}
+            return int(u.get("input_tokens") or 0), int(u.get("output_tokens") or 0)
+    return None
+
+
+def _failure(log: str) -> str:
+    """What a failed run said: its error event's message, else the last lines of output."""
+    for line in reversed(log.splitlines()):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("type") in ("turn.failed", "error"):
+            detail = event.get("error") or event.get("message")
+            if isinstance(detail, dict):
+                detail = detail.get("message")
+            if detail:
+                return str(detail)
+    return "\n".join(log.strip().splitlines()[-8:])
+
+
 def _prepare(schema: dict[str, Any]) -> tuple[Path, Path, Path]:
     workdir = Path(tempfile.mkdtemp(prefix="jobsearch-codex-"))
     schema_path, out_path = workdir / "schema.json", workdir / "out.json"
@@ -326,20 +359,21 @@ def _prepare(schema: dict[str, Any]) -> tuple[Path, Path, Path]:
     return workdir, schema_path, out_path
 
 
-def _result(workdir: Path, out_path: Path, returncode: int, log: str) -> Any:
+def _result(workdir: Path, out_path: Path, returncode: int, log: str) -> tuple[Any, Tokens]:
     try:
         if returncode != 0 or not out_path.exists():
-            tail = "\n".join(log.strip().splitlines()[-8:])
-            raise LLMError(f"codex exec failed (exit {returncode}): {tail}")
-        return json.loads(out_path.read_text(encoding="utf-8"))
+            raise LLMError(f"codex exec failed (exit {returncode}): {_failure(log)}")
+        return json.loads(out_path.read_text(encoding="utf-8")), _tokens(log)
     except json.JSONDecodeError as exc:
         raise LLMError(f"Codex returned invalid JSON: {exc}") from exc
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def run_codex(cfg: LLMConfig, model: str, prompt: str, schema: dict[str, Any]) -> Any:
-    """Blocking `codex exec` returning the parsed JSON answer."""
+def run_codex(
+    cfg: LLMConfig, model: str, prompt: str, schema: dict[str, Any]
+) -> tuple[Any, Tokens]:
+    """Blocking `codex exec` returning the parsed JSON answer and the tokens it used."""
     binary = codex_binary()
     if binary is None:
         raise LLMError("Codex CLI not found")
@@ -359,7 +393,9 @@ def run_codex(cfg: LLMConfig, model: str, prompt: str, schema: dict[str, Any]) -
     return _result(workdir, out_path, proc.returncode, proc.stdout + proc.stderr)
 
 
-async def run_codex_async(cfg: LLMConfig, model: str, prompt: str, schema: dict[str, Any]) -> Any:
+async def run_codex_async(
+    cfg: LLMConfig, model: str, prompt: str, schema: dict[str, Any]
+) -> tuple[Any, Tokens]:
     """Non-blocking variant for the agent loop."""
     binary = codex_binary()
     if binary is None:
@@ -402,22 +438,16 @@ class CodexStructured:
         full = f"{NO_TOOLS_NOTE}\n\n{system}\n\n{prompt}"
         for attempt in range(2):
             try:
-                data = run_codex(self.cfg, self.model, full, output_model.model_json_schema())
+                data, tokens = run_codex(
+                    self.cfg, self.model, full, output_model.model_json_schema()
+                )
             except LLMError as exc:
                 if attempt or not str(exc).startswith("Codex returned invalid JSON:"):
                     raise
                 full += "\n\nYour previous response was invalid JSON. Return valid schema JSON."
                 continue
             if self.usage_sink:
-                self.usage_sink(
-                    ModelUsage(
-                        model=self.model,
-                        input_tokens=_estimate_tokens(full),
-                        output_tokens=_estimate_tokens(json.dumps(data)),
-                        estimated=True,
-                        purpose=self.purpose,
-                    )
-                )
+                self.usage_sink(_usage(self.model, tokens, full, data, self.purpose))
             try:
                 return output_model.model_validate(_drop_nulls(data))
             except ValidationError as exc:
@@ -446,14 +476,15 @@ class CodexChat:
         self, *, system: str, messages: list[ChatMessage], tools: list[ToolSpec]
     ) -> ChatResponse:
         prompt = render_turn(system, messages, tools)
-        data = await run_codex_async(self.cfg, self.model, prompt, turn_schema(tools))
+        data, tokens = await run_codex_async(self.cfg, self.model, prompt, turn_schema(tools))
         message = parse_turn(data)
+        used = _usage(self.model, tokens, prompt, data)
         return ChatResponse(
             message=message,
             stop_reason="tool_use" if message.tool_calls else "end_turn",
-            input_tokens=_estimate_tokens(prompt),
-            output_tokens=_estimate_tokens(json.dumps(data)),
-            usage_estimated=True,
+            input_tokens=used.input_tokens,
+            output_tokens=used.output_tokens,
+            usage_estimated=used.estimated,
         )
 
     async def run_native(
@@ -513,8 +544,23 @@ def parse_turn(data: Any) -> ChatMessage:
     return ChatMessage(role="assistant", content=turn.message, tool_calls=calls)
 
 
+def _usage(model: str, tokens: Tokens, prompt: str, data: Any, purpose: str = "") -> ModelUsage:
+    """The call's reported tokens, or an estimate when Codex reported none."""
+    if tokens is not None:
+        return ModelUsage(
+            model=model, input_tokens=tokens[0], output_tokens=tokens[1], purpose=purpose
+        )
+    return ModelUsage(
+        model=model,
+        input_tokens=_estimate_tokens(prompt),
+        output_tokens=_estimate_tokens(json.dumps(data)),
+        estimated=True,
+        purpose=purpose,
+    )
+
+
 def _estimate_tokens(text: str) -> int:
-    """Conservative display estimate for Codex CLI, which does not expose usage."""
+    """Rough fallback for a run whose `turn.completed` event reported no usage."""
     return max(1, (len(text) + 3) // 4)
 
 

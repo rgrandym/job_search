@@ -11,6 +11,13 @@ export const PROVIDER_LABEL: Record<Provider, string> = {
 
 export const routeLabel = (r: { provider: Provider; model: string }) => `${PROVIDER_LABEL[r.provider]} ${r.model}`;
 
+/** A token count as "850", "12.3k" or "1.2M". */
+export function tokenCount(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
 export const clockLabel = (epochSeconds: number) =>
   new Date(epochSeconds * 1000).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
 

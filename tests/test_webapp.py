@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -582,6 +583,19 @@ def client(ws: Workspace, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     return TestClient(webapp.app)
 
 
+def test_api_records_claude_session_readings(client: TestClient) -> None:
+    from src.core.llm import usage
+
+    readings = [{"kind": "five_hour", "percent_used": 23.5, "resets_at": 4102444800}]
+    assert client.post("/api/usage/claude", json=readings).json() == {"recorded": 1}
+    win = usage.claude_windows().windows[0]
+    assert (win.name, win.used_percent, win.resets_at) == ("5h", 23.5, 4102444800)
+    assert (
+        client.post("/api/usage/claude", json=[{"kind": "x", "percent_used": -1}]).status_code
+        == 422
+    )
+
+
 def test_api_company_boards_status_and_update(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -611,10 +625,28 @@ def test_api_health_names_the_app_and_its_ui(
 ) -> None:
     from src.web import app as webapp
 
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "a.py").write_text("")
+    (root / "web" / "src").mkdir(parents=True)
+    (root / "web" / "src" / "App.tsx").write_text("")
+    os.utime(root / "src" / "a.py", (1, 1))
+    os.utime(root / "web" / "src" / "App.tsx", (1, 1))
+    monkeypatch.setattr(webapp, "PROJECT_ROOT", root)
     monkeypatch.setattr(webapp, "DIST", tmp_path / "missing")
-    assert client.get("/api/health").json() == {"app": "job_search", "ui": False}
-    monkeypatch.setattr(webapp, "DIST", tmp_path)  # the Dock app loads the UI only when built
-    assert client.get("/api/health").json() == {"app": "job_search", "ui": True}
+    fresh = {"app": "job_search", "ui": False, "stale": False}
+    assert client.get("/api/health").json() == fresh
+    dist = root / "web" / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("")
+    monkeypatch.setattr(webapp, "DIST", dist)  # the Dock app loads the UI only when built
+    assert client.get("/api/health").json() == {**fresh, "ui": True}
+    # A UI source newer than the build, or code newer than the server: reopening replaces it.
+    os.utime(root / "web" / "src" / "App.tsx", (2e9, 2e9))
+    assert client.get("/api/health").json()["stale"] is True
+    os.utime(root / "web" / "src" / "App.tsx", (1, 1))
+    os.utime(root / "src" / "a.py", (webapp.STARTED_AT + 60,) * 2)
+    assert client.get("/api/health").json()["stale"] is True
 
 
 def test_api_state_and_search(client: TestClient) -> None:

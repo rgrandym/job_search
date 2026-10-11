@@ -2,6 +2,8 @@
 """One JSON line describing what the job-search workspace is doing, for live views.
 
     python3 scripts/live_status.py status [--plans] [--backend URL] [--frontend URL]
+    python3 scripts/live_status.py claude-limits '[{"kind": "five_hour", "percent_used": 23.5,
+        "resets_at": 1791724200}]' [--backend URL]
 
 The Claude Code pane (`.claude/mods/job-search-live`) polls this every few seconds; anything
 else (a terminal, Codex) can call it too, so every view agrees. Standard library only, never
@@ -9,8 +11,12 @@ raises (a broken probe reads as "down"), and never prints CV text, keys or email
 only counts, task titles and steps, and plan percentages.
 
 Fields: backend / frontend (bool), searches (running), tasks (running app tasks with their
-steps), gate (the last `.claude/hooks/gate.py` result), git_dirty (changed paths), and with
-`--plans` the plan windows and spent plans from `GET /api/connections`.
+steps, model calls and tokens so far), gate (the last `.claude/hooks/gate.py` result), git_dirty
+(changed paths), and with `--plans` each plan's windows (share used, reset, this app's tokens
+inside the window), today's tokens and spent plans, from `GET /api/connections`.
+
+`claude-limits` passes the Claude plan windows a Claude Code session reads to the app
+(`POST /api/usage/claude`): the CLI calls the app makes state the share used only near a limit.
 """
 
 from __future__ import annotations
@@ -67,7 +73,20 @@ def _git_dirty() -> int:
 
 
 def _task(t: dict[str, Any]) -> dict[str, Any]:
-    keep = ("title", "step", "done", "total", "completed", "waiting_on", "started_at", "now")
+    keep = (
+        "title",
+        "step",
+        "done",
+        "total",
+        "completed",
+        "waiting_on",
+        "started_at",
+        "now",
+        "calls",
+        "input_tokens",
+        "output_tokens",
+        "tokens_estimated",
+    )
     return {k: t.get(k) for k in keep}
 
 
@@ -80,13 +99,21 @@ def _plans(backend: str) -> list[dict[str, Any]]:
         if c.get("billing") != "plan":
             continue
         windows = (c.get("windows") or {}).get("windows") or []
+        today = c.get("spend_today") or []
         out.append(
             {
+                "id": c.get("id"),
                 "label": c.get("label"),
                 "windows": [
-                    {k: w.get(k) for k in ("name", "used_percent", "resets_at")} for w in windows
+                    {k: w.get(k) for k in ("name", "used_percent", "resets_at", "tokens")}
+                    for w in windows
                 ],
                 "exhausted_until": c.get("exhausted_until"),
+                "tokens_today": sum(
+                    int(r.get("input_tokens") or 0) + int(r.get("output_tokens") or 0)
+                    for r in today
+                ),
+                "calls_today": sum(int(r.get("calls") or 0) for r in today),
             }
         )
     return out
@@ -110,6 +137,22 @@ def status(backend: str = BACKEND, frontend: str = FRONTEND, plans: bool = False
     return out
 
 
+def claude_limits(readings: str, backend: str = BACKEND) -> dict[str, Any]:
+    """POST the session's Claude windows (a JSON list) to the app; never raises."""
+    try:
+        body = json.dumps(json.loads(readings)).encode()
+        req = urllib.request.Request(
+            f"{backend}/api/usage/claude",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:  # noqa: S310 (local URL)
+            return {"ok": True, **json.loads(resp.read().decode() or "{}")}
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 def _arg(argv: list[str], name: str, default: str) -> str:
     return (
         argv[argv.index(name) + 1] if name in argv and argv.index(name) + 1 < len(argv) else default
@@ -117,8 +160,12 @@ def _arg(argv: list[str], name: str, default: str) -> str:
 
 
 def main(argv: list[str]) -> int:
+    if argv[:1] == ["claude-limits"] and len(argv) > 1:
+        print(json.dumps(claude_limits(argv[1], _arg(argv, "--backend", BACKEND))))
+        return 0
     if not argv or argv[0] != "status":
         print("usage: live_status.py status [--plans] [--backend URL] [--frontend URL]")
+        print("       live_status.py claude-limits JSON [--backend URL]")
         return 2
     try:
         data = status(

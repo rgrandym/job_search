@@ -96,7 +96,8 @@ web/src/       App.tsx · components/ · stores/ (zustand) · lib/ (api.ts, type
 .agent/agent_configs/  tool-agnostic agent definitions
 .claude/       settings.json (ask/deny rules, hooks) · hooks/guard_paths.py (protected paths)
                hooks/gate.py (ruff/mypy/tsc after edits, pytest at turn end; `--all` by hand)
-               mods/job-search-live (Claude Code pane: /live, /gate; reads scripts/live_status.py)
+               mods/job-search-live (Claude Code pane: /live, /gate; reads scripts/live_status.py;
+               tokens per app task and per session, Claude/Codex plan windows with % left)
 data/examples/ committed fixtures · data/* and output/ are git-ignored (personal data)
 ```
 

@@ -5,7 +5,10 @@
 #   bash scripts/start.sh
 #
 # What changed since the last run (e.g. after `git pull`) is rebuilt first: Python dependencies
-# when pyproject.toml changed, the UI when web/ changed. If the backend is already up, it exits.
+# when pyproject.toml changed, the UI when web/ changed. If an up-to-date backend is already up,
+# it exits; one running older code (its /api/health says "stale") is stopped and replaced, so
+# reopening the Dock app always runs the latest code. A dev backend (`--reload`) is kept: it
+# reloads itself, and only the UI is rebuilt.
 # Env overrides: CONDA_ENV (job_search), BACKEND_PORT (8000).
 
 set -euo pipefail
@@ -18,9 +21,28 @@ RUN_DIR="$ROOT/.run"
 log() { printf '[start] %s\n' "$*"; }
 warn() { printf '[start] %s\n' "$*" >&2; }
 
-if curl -fsS --max-time 2 "http://127.0.0.1:$BACKEND_PORT/api/health" >/dev/null 2>&1; then
-  log "Already running → http://localhost:$BACKEND_PORT"
-  exit 0
+KEEP_RUNNING=0
+stop_stale_backend() {  # the out-of-date backend on our port, if it is ours and not a dev one
+  local pid cmd
+  pid="$(lsof -nP -t -iTCP:"$BACKEND_PORT" -sTCP:LISTEN 2>/dev/null | head -n 1)"
+  [[ -n "$pid" ]] || return 1
+  cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
+  [[ "$cmd" == *src.web.app* && "$cmd" != *--reload* ]] || return 1
+  log "Replacing the backend running older code (pid $pid)"
+  kill "$pid" 2>/dev/null || return 1
+  for _ in $(seq 1 40); do  # up to 10 s for it to let go of the port
+    lsof -nP -t -iTCP:"$BACKEND_PORT" -sTCP:LISTEN >/dev/null 2>&1 || return 0
+    sleep 0.25
+  done
+  kill -9 "$pid" 2>/dev/null || true
+}
+
+if health="$(curl -fsS --max-time 2 "http://127.0.0.1:$BACKEND_PORT/api/health" 2>/dev/null)"; then
+  if [[ "$health" != *'"stale":true'* ]]; then
+    log "Already running → http://localhost:$BACKEND_PORT"
+    exit 0
+  fi
+  stop_stale_backend || KEEP_RUNNING=1
 fi
 
 # shellcheck source=lib/conda.sh
@@ -55,6 +77,11 @@ if ui_stale; then
     log "Building the UI"
     (cd web && npm run build --silent)
   fi
+fi
+
+if [[ "$KEEP_RUNNING" == 1 ]]; then
+  log "Already running (it reloads itself) → http://localhost:$BACKEND_PORT"
+  exit 0
 fi
 
 log "Serving → http://localhost:$BACKEND_PORT"

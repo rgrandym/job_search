@@ -1,7 +1,7 @@
 {
   "name": "job-search-live",
   "version": "0.1.0",
-  "description": "Job-search workspace pane: app tasks and searches as a stepper, subagents with elapsed time, the quality gate, plan windows; /live, /gate, and a Master CV check before the cv_writer skill.",
+  "description": "Job-search workspace pane: app tasks and searches as a stepper with their tokens, subagents with elapsed time and tokens, this session's tokens and context, Claude and Codex plan windows (share used and left, reset, the app's tokens in each), the quality gate; /live, /gate, and a Master CV check before the cv_writer skill.",
   "types": "./types/index.d.ts",
   "userConfig": {
     "pane": {

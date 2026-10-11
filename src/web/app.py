@@ -51,6 +51,7 @@ from src.core.llm import (
     claude_code_backend,
     fallback,
 )
+from src.core.llm import usage as plan_usage
 from src.core.llm.calls import call_group, cancel_group
 from src.core.llm.catalog import ModelInfo
 from src.core.llm.codex_backend import codex_status, start_login
@@ -99,10 +100,35 @@ _GMAIL_PENDING: dict[str, tuple[str, float]] = {}
 # ------------------------------------------------------------------ state & config
 
 
+STARTED_AT = time.time()
+# What a restart picks up (scripts/start.sh rebuilds the UI from the same sources).
+UI_SOURCES = ("src", "index.html", "package.json", "package-lock.json", "vite.config.ts")
+
+
+def _newest(paths: list[Path], pattern: str = "*") -> float:
+    """The latest modification time among `paths` (directories searched with `pattern`)."""
+    newest = 0.0
+    for path in paths:
+        files = path.rglob(pattern) if path.is_dir() else [path]
+        for f in files:
+            try:
+                newest = max(newest, f.stat().st_mtime)
+            except OSError:
+                continue
+    return newest
+
+
 @app.get("/api/health")
 def health() -> dict[str, Any]:
-    """Cheap check for the Dock app: is this backend ours, and does it serve the built UI?"""
-    return {"app": "job_search", "ui": DIST.exists()}
+    """Cheap check for the Dock app: is this backend ours, does it serve the built UI, and is
+    it out of date (`stale`: code changed since it started, or UI sources newer than the
+    build), so that reopening the app replaces it (scripts/start.sh)."""
+    code = _newest([PROJECT_ROOT / "src"], "*.py") > STARTED_AT
+    built = DIST / "index.html"
+    ui = built.exists() and _newest([PROJECT_ROOT / "web" / n for n in UI_SOURCES]) > (
+        built.stat().st_mtime
+    )
+    return {"app": "job_search", "ui": DIST.exists(), "stale": code or ui}
 
 
 def _llm_view() -> dict[str, Any]:
@@ -670,6 +696,23 @@ class Activity(BaseModel):
 def activity() -> Activity:
     """What the app is doing now: running searches and tasks (read by scripts/live_status.py)."""
     return Activity(searches=search_service.running_searches(), tasks=progress.active())
+
+
+class ClaudeReading(BaseModel):
+    """One Claude plan window as a Claude Code session reports it."""
+
+    kind: str  # "five_hour", "seven_day", ...
+    percent_used: float = Field(ge=0)
+    resets_at: float | None = None  # epoch seconds
+
+
+@app.post("/api/usage/claude")
+def record_claude_usage(readings: list[ClaudeReading]) -> dict[str, int]:
+    """Claude plan windows read by a Claude Code session (the dev pane passes them on): the
+    CLI's own events state the share used only near a limit."""
+    for r in readings:
+        plan_usage.record_claude_reading(r.kind, r.percent_used, r.resets_at)
+    return {"recorded": len(readings)}
 
 
 @app.exception_handler(progress.TaskStopped)
