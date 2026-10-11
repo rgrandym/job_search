@@ -8,6 +8,7 @@ import { SettingsDialog } from "./components/SettingsDialog";
 import { Sidebar } from "./components/Sidebar";
 import { SummaryDialog } from "./components/SummaryDialog";
 import { ThemePicker } from "./components/ThemePicker";
+import { ZoomControl } from "./components/ZoomControl";
 import { api } from "./lib/api";
 import { useRestoreLastSearch } from "./lib/useRestoreLastSearch";
 import { cn } from "./lib/utils";
@@ -198,6 +199,7 @@ export default function App() {
               ))}
             </div>
           )}
+          <ZoomControl />
           <ThemePicker />
           <button className="shrink-0 text-faint hover:text-fg" title="Settings" onClick={() => setSettingsOpen(true)}>
             <Settings size={15} />

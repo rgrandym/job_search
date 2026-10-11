@@ -75,7 +75,11 @@ cat >"$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
-codesign --force --sign - "$APP" >/dev/null 2>&1 || warn "Could not sign the app locally"
+# Ad-hoc signatures normally identify the app by its hash, so every rebuild would look like a
+# new app to macOS privacy settings. Naming it by bundle id keeps Full Disk Access, granted
+# once, across rebuilds.
+codesign --force --sign - --requirements "=designated => identifier \"$BUNDLE_ID\"" "$APP" \
+  >/dev/null 2>&1 || warn "Could not sign the app locally"
 
 TARGET="$OUT_DIR/$APP_NAME.app"
 mkdir -p "$OUT_DIR"
@@ -92,3 +96,4 @@ mv "$APP" "$TARGET"
 log "Installed $TARGET"
 if pgrep -xq JobSearch; then log "Quit Job Search and open it again to use this build."; fi
 log "Open it, then right-click its Dock icon → Options → Keep in Dock."
+log "On first open it asks once for Full Disk Access (Word previews need it)."
