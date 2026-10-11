@@ -49,7 +49,7 @@ export function useSearchRunner() {
       void qc.invalidateQueries({ queryKey: ["profiles"] }); // a search may store a new profile
       void qc.invalidateQueries({ queryKey: ["history"] });
       void qc.invalidateQueries({ queryKey: ["yield"] });
-      void qc.invalidateQueries({ queryKey: ["claude-code-usage"] });
+      void qc.invalidateQueries({ queryKey: ["connections"] });
     } catch (e) {
       useSearch.setState({ error: (e as Error).message });
     } finally {
@@ -86,9 +86,14 @@ export function useSearchRunner() {
     );
   };
 
-  /** Judge the shortlisted jobs a stopped or partly failed search left unjudged. */
-  const resume = (historyId: string) =>
-    start("Continuing the screening…", (runId) => api.continueStream({ history_id: historyId, run_id: runId }, onEvent), true);
+  /** Judge the shortlisted jobs a stopped or partly failed search left unjudged (`switchPlan`:
+   *  on the other plan's equivalent model, after this plan ran out). */
+  const resume = (historyId: string, switchPlan = false) =>
+    start(
+      switchPlan ? "Continuing on the other plan…" : "Continuing the screening…",
+      (runId) => api.continueStream({ history_id: historyId, run_id: runId, switch: switchPlan }, onEvent),
+      true,
+    );
 
   /** Read the full postings of results whose requirements were not checked (all, or `jobIds`),
    *  or judge one job on its pasted `description`; the other verdicts are kept. */
@@ -101,6 +106,12 @@ export function useSearchRunner() {
       false, // a manual check never chains another one
     );
 
+  /** Search again only the sources that failed in a past search (all, or `sources`), adding
+   *  the jobs they find to its results; the other results stay on screen. */
+  const retry = (historyId: string, sources?: string[]) =>
+    start("Searching the failed sources again…", (runId) =>
+      api.retryStream({ history_id: historyId, run_id: runId, sources }, onEvent), true);
+
   /** Stop the running search; it ends with what it has done so far. */
   const stop = () => {
     const runId = useSearch.getState().runId;
@@ -109,5 +120,5 @@ export function useSearchRunner() {
     api.stopSearch(runId).catch((e: Error) => useSearch.setState({ error: e.message }));
   };
 
-  return { run, resume, recheck, stop };
+  return { run, resume, recheck, retry, stop };
 }

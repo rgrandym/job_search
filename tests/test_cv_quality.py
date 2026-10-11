@@ -24,6 +24,7 @@ from src.cv.models import (
     JDAnalysis,
     LetterOpening,
     LetterParagraph,
+    LetterReview,
     LetterSections,
     MasterCV,
     MissedRequirement,
@@ -252,7 +253,7 @@ def test_cover_letter_keeps_only_backed_paragraphs(master_cv: MasterCV, tmp_path
 
 def test_letter_requires_role_introduction_and_one_page_length(master_cv: MasterCV) -> None:
     def generate(draft: LetterSections) -> None:
-        llm = FakeLLM({LetterSections: draft})
+        llm = FakeLLM({LetterReview: LetterReview(), LetterSections: draft})
         write_letter(master_cv, JD, "Senior ML Engineer role", llm)
 
     evidence = LetterParagraph(text="I built recommenders at Nimbus.", source_ids=["nimbus"])
@@ -316,7 +317,12 @@ def test_letter_rejects_skill_not_evidenced_by_approved_cv(master_cv: MasterCV) 
         ),
     )
     with pytest.raises(ValueError, match="names a skill its sources do not evidence"):
-        write_letter(master_cv, jd, "Functional genomics role", FakeLLM({LetterSections: draft}))
+        write_letter(
+            master_cv,
+            jd,
+            "Functional genomics role",
+            FakeLLM({LetterReview: LetterReview(), LetterSections: draft}),
+        )
 
 
 def test_letter_retries_rejected_section_with_specific_feedback(master_cv: MasterCV) -> None:
@@ -326,7 +332,7 @@ def test_letter_retries_rejected_section_with_specific_feedback(master_cv: Maste
     )
     good = LetterParagraph(text="I built recommenders at Nimbus.", source_ids=["nimbus"])
     kube = LetterParagraph(text="I moved training to Kubernetes.", source_ids=["nimbus-2"])
-    unsupported = LetterParagraph(text="I led 40 engineers.", source_ids=["nimbus-1"])
+    unsupported = LetterParagraph(text="I trained 40 engineers.", source_ids=["nimbus-1"])
     close = LetterParagraph(
         text="I would welcome a conversation about the role.", source_ids=["nimbus"]
     )
@@ -334,7 +340,7 @@ def test_letter_retries_rejected_section_with_specific_feedback(master_cv: Maste
         LetterSections(opening=opening, evidence=[good, unsupported], conclusion=close),
         LetterSections(opening=opening, evidence=[good, kube], conclusion=close),
     ]
-    llm = FakeLLM({LetterSections: lambda prompt: drafts.pop(0)})
+    llm = FakeLLM({LetterReview: LetterReview(), LetterSections: lambda prompt: drafts.pop(0)})
 
     letter = write_letter(master_cv, JD, "Senior ML Engineer role", llm)
 
@@ -408,7 +414,7 @@ def test_letter_can_use_older_research_from_the_full_cv(
         ],
         conclusion=close,
     )
-    llm = FakeLLM({LetterSections: draft})
+    llm = FakeLLM({LetterReview: LetterReview(), LetterSections: draft})
     jd = JDAnalysis(job_title="Senior Scientist", company="Cell Therapies")
 
     letter = write_letter(cv, jd, "Develop new cell therapies.", llm)
@@ -434,12 +440,12 @@ def test_letter_accepts_valid_draft_without_an_evidence_review(master_cv: Master
             text="I would welcome a conversation about the role.", source_ids=["nimbus"]
         ),
     )
-    llm = FakeLLM({LetterSections: draft})
+    llm = FakeLLM({LetterReview: LetterReview(), LetterSections: draft})
 
     letter = write_letter(master_cv, JD, "Senior ML Engineer role", llm)
 
     assert len(letter.paragraphs) == 4
-    assert [model for _, model in llm.calls] == [LetterSections]
+    assert [model for _, model in llm.calls] == [LetterSections, LetterReview]
 
 
 def test_cover_letter_rejects_unsourced_personal_claims_and_job_numbers(
@@ -448,7 +454,7 @@ def test_cover_letter_rejects_unsourced_personal_claims_and_job_numbers(
     draft = CoverLetterDraft(
         paragraphs=[
             LetterParagraph(text="I managed multiple teams.", source_ids=[]),
-            LetterParagraph(text="I led 40 engineers.", source_ids=["nimbus-1"]),
+            LetterParagraph(text="I trained 40 engineers.", source_ids=["nimbus-1"]),
             LetterParagraph(text="I am a proven leader.", source_ids=["nimbus"]),
             LetterParagraph(text="Your team has 40 engineers.", source_ids=[]),
         ]
@@ -481,7 +487,7 @@ def test_letter_motivation_comes_only_from_the_career_intent(
             text="I would welcome a conversation about the role.", source_ids=["nimbus"]
         ),
     )
-    llm = FakeLLM({JDAnalysis: JD, LetterSections: draft})
+    llm = FakeLLM({JDAnalysis: JD, LetterReview: LetterReview(), LetterSections: draft})
     monkeypatch.setattr(ws, "structured", lambda *a, **k: llm)
     job = JobPosting(id="j", title="Senior ML Engineer", company="Orbit AI", description="ML")
     letter, path = asyncio.run(cv_service.write_cover_letter(ws, job))
@@ -508,7 +514,7 @@ def test_saved_tailored_cv_edits_feed_letter_after_restart(
     new_text = "Built a recommendation service in Python and PyTorch serving 4M users."
     with pytest.raises(ValueError, match="40"):
         tailored_documents.edit(
-            ws, document.id, TailoredCVEdits(bullets={"nimbus-1": "I led 40 engineers."})
+            ws, document.id, TailoredCVEdits(bullets={"nimbus-1": "I trained 40 engineers."})
         )
     edited = tailored_documents.edit(
         ws, document.id, TailoredCVEdits(bullets={"nimbus-1": new_text})
@@ -534,7 +540,7 @@ def test_saved_tailored_cv_edits_feed_letter_after_restart(
             text="I would welcome a conversation about the role.", source_ids=["nimbus-1"]
         ),
     )
-    llm = FakeLLM({JDAnalysis: JD, LetterSections: draft})
+    llm = FakeLLM({JDAnalysis: JD, LetterReview: LetterReview(), LetterSections: draft})
     monkeypatch.setattr(restarted, "structured", lambda *a, **k: llm)
     letter, path = asyncio.run(
         cv_service.write_cover_letter(restarted, job, tailored_cv_id=document.id)
@@ -583,6 +589,7 @@ def test_older_word_cv_requires_review_before_it_can_feed_letter(
         {
             MasterCV: changed,
             JDAnalysis: JD,
+            LetterReview: LetterReview(),
             LetterSections: draft,
         }
     )

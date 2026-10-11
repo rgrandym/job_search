@@ -25,6 +25,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from src.core.llm.calls import call_group, cancel_group
+from src.core.llm.fallback import served_by
 from src.core.llm_provider import LLMError, LLMProvider
 from src.jobs.models import (
     FIT_WEIGHTS,
@@ -330,10 +331,15 @@ class VerdictCache:
 
 def matcher_profile(summary: ProfileSummary) -> str:
     """The summary as the job_matcher sees it: families code rejected as unrealistic are left
-    out, so they never vouch for a posting."""
+    out, so they never vouch for a posting; the pitch, expansion routes and family
+    positioning (presentation, not evidence) are left out too."""
     kept = [f for f in summary.role_families if f.rejected is None]
     return summary.model_copy(update={"role_families": kept}).model_dump_json(
-        exclude={"role_families": {"__all__": {"rejected"}}}
+        exclude={  # the pitch and expansion routes are for the user and CV writing
+            "pitch": True,
+            "expansion": True,
+            "role_families": {"__all__": {"rejected", "positioning"}},
+        }
     )
 
 
@@ -380,20 +386,23 @@ def _constraints(query: SearchQuery | None, base: str = "") -> str:
     return "; ".join(parts) or "none"
 
 
+def _call(llm: LLMProvider, prompt: str) -> tuple[ScreeningBatch, str | None]:
+    """One matcher call and the "provider:model" that served it (a spent plan may have
+    handed it to the other plan's model)."""
+    out = llm.generate(system=MATCHER_SYSTEM, prompt=prompt, output_model=ScreeningBatch)
+    return out, served_by.get()
+
+
 async def _assess(
     llm: LLMProvider, prompt: str, group: str | None, timeout: float, stop: asyncio.Event | None
-) -> ScreeningBatch:
+) -> tuple[ScreeningBatch, str | None]:
     """One batch call under its own cancellable group. It ends at whichever comes first: the
     answer, `stop`, or `timeout`; on the last two its CLI process (if any) is killed and a
     still-running API call is abandoned (its late answer is ignored)."""
     token = call_group.set(group)
     try:
         # The task copies the context, so the call's CLI process joins `group`.
-        call = asyncio.ensure_future(
-            asyncio.to_thread(
-                llm.generate, system=MATCHER_SYSTEM, prompt=prompt, output_model=ScreeningBatch
-            )
-        )
+        call = asyncio.ensure_future(asyncio.to_thread(_call, llm, prompt))
     finally:
         call_group.reset(token)
     stopper = asyncio.ensure_future(stop.wait()) if stop is not None else None
@@ -457,9 +466,14 @@ class _Runner:
         self.parent = call_group.get()
         self.errors: list[str] = []
         self._calls = 0
+        # "provider:model" that judged each posting, and the configured one: a posting judged
+        # by a replacement model (a spent plan) is labelled, and not remembered as this one's.
+        self.served: dict[str, str] = {}
+        self.primary = getattr(llm, "primary_label", None)
+        self.limit: LLMError | None = None  # a spent limit: later batches are not started
 
     def _stopped(self) -> bool:
-        return self.stop is not None and self.stop.is_set()
+        return self.limit is not None or (self.stop is not None and self.stop.is_set())
 
     async def run(
         self,
@@ -491,15 +505,21 @@ class _Runner:
         async with self.sem:
             for attempt in (1, 2):
                 if self._stopped():
-                    self.errors.append(f"batch {batch[0].id}..: stopped before screening")
+                    why = f"plan limit ({self.limit})" if self.limit else "stopped"
+                    self.errors.append(f"batch {batch[0].id}..: {why} before screening")
                     break
                 group = f"{self.parent}/b{index}.{attempt}" if self.parent else None
                 try:
-                    out = await _assess(self.llm, prompt, group, self.timeout, self.stop)
+                    out, served = await _assess(self.llm, prompt, group, self.timeout, self.stop)
+                    for job in batch:
+                        self.served[job.id] = served or ""
                     break
                 except (LLMError, OSError) as exc:
+                    if isinstance(exc, LLMError) and exc.kind == "limit":
+                        self.limit = self.limit or exc  # retrying a spent plan cannot help
                     if attempt == 2 or self._stopped():
                         self.errors.append(f"batch {batch[0].id}..: {exc}")
+                        break
         wanted = {j.id for j in batch}
         return [v for v in out.verdicts if v.job_id in wanted]
 
@@ -589,14 +609,31 @@ async def screen_jobs(
     if reviewer is not runner:
         runner.errors += reviewer.errors
     by_id = {j.id: j for j in jobs}
+    served, switched = _served(runner, reviewer)
     for job_id, (assessment, reviewed) in final.items():
         checked = checkable(by_id[job_id])
-        if cache is not None and (reviewed or not _needs_review(assessment, threshold, checked)):
+        remember = reviewed or not _needs_review(assessment, threshold, checked)
+        if cache is not None and remember and job_id not in switched:
             cache.put(keys[job_id], assessment, reviewed)  # an unreviewed match is retried
-        verdicts[job_id] = finalize(assessment, threshold, reviewed=reviewed, checked=checked)
+        verdict = finalize(assessment, threshold, reviewed=reviewed, checked=checked)
+        verdicts[job_id] = verdict.model_copy(update={"model": served.get(job_id, "")})
     if cache is not None:
         cache.save()
     return verdicts, runner.errors
+
+
+def _served(*runners: _Runner) -> tuple[dict[str, str], set[str]]:
+    """Who judged each posting (the last reading wins), and the postings any reading of which
+    came from a replacement model rather than the configured one."""
+    served: dict[str, str] = {}
+    switched: set[str] = set()
+    for r in runners:
+        for job_id, label in r.served.items():
+            if label:
+                served[job_id] = label
+            if r.primary and label and label != r.primary:
+                switched.add(job_id)
+    return served, switched
 
 
 def apply_verdicts(report: MatchReport, verdicts: dict[str, JobVerdict], threshold: float) -> None:

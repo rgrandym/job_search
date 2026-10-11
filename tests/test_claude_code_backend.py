@@ -10,7 +10,15 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
-from src.core.llm import ChatMessage, LLMConfig, LLMError, ToolSpec, make_chat, make_structured
+from src.core.llm import (
+    ChatMessage,
+    LLMConfig,
+    LLMError,
+    ToolSpec,
+    make_chat,
+    make_structured,
+    usage,
+)
 from src.core.llm import claude_code_backend as backend
 from src.core.llm.catalog import models_for
 
@@ -210,10 +218,8 @@ def test_missing_anthropic_credentials_become_a_readable_error() -> None:
     assert anthropic_backend._llm_error(other) is other  # real bugs are not masked
 
 
-def test_stream_output_yields_result_and_records_plan_limits(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(backend, "_LIMITS", {})
+def test_stream_output_yields_result_and_records_plan_limits() -> None:
+    usage.configure(None)
     limit = {
         "type": "rate_limit_event",
         "rate_limit_info": {
@@ -234,19 +240,35 @@ def test_stream_output_yields_result_and_records_plan_limits(
     )
 
     data = backend._result(0, stdout, "")
-    usage = backend.claude_code_usage()
+    windows = usage.claude_windows(now=1790880000).windows
 
     assert data["structured_output"] == {"a": 1}
-    assert usage["windows"] == [
-        {
-            "window": "five_hour",
-            "status": "allowed_warning",
-            "resets_at": 1790886600,
-            "utilization": 0.82,
-            "using_overage": False,
-            "observed_at": usage["updated_at"],
-        }
+    assert [(w.name, w.used_percent, w.status) for w in windows] == [
+        ("5h", 82.0, "allowed_warning")
     ]
+    # Past its reset time, the window reads as unused again.
+    assert usage.claude_windows(now=1790886601).windows[0].used_percent == 0.0
+
+
+def test_a_refusing_plan_window_is_a_limit_error_with_its_reset() -> None:
+    usage.configure(None)
+    refused = {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+            "status": "rejected",
+            "resetsAt": 1999999999,
+            "rateLimitType": "five_hour",
+        },
+    }
+    result = {"type": "result", "subtype": "success", "is_error": True, "result": "API Error"}
+    stdout = "\n".join([json.dumps(refused), json.dumps(result)])
+
+    with pytest.raises(LLMError) as caught:
+        backend._result(1, stdout, "")
+
+    assert caught.value.kind == "limit"
+    assert caught.value.resets_at == 1999999999
+    assert usage.claude_windows(now=1999999000).windows[0].used_percent == 100.0
 
 
 def test_cli_calls_are_killed_by_their_group() -> None:
@@ -285,3 +307,12 @@ def test_cli_calls_are_killed_by_their_group() -> None:
             calls.call_group.reset(token)
     calls.clear_group("run-1")
     assert not calls.is_cancelled("run-1/b1")
+
+
+def test_cli_env_drops_api_keys_and_marks_the_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.core.llm.anthropic_backend import subscription_env
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    env = subscription_env()
+    assert "ANTHROPIC_API_KEY" not in env
+    assert env["JOB_SEARCH_APP"] == "1"  # the workspace's Claude Code mod stays out

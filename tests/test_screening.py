@@ -249,3 +249,64 @@ def test_an_unmet_core_requirement_blocks_only_when_most_readings_agree(
     v = verdicts["a"]
     assert len(matcher.calls) == len(flags) and v.reviewed
     assert v.match is not blocked and bool(v.essential_unmet) is blocked
+
+
+class _Plan:
+    """A plan-backed matcher: `spent` raises a limit error; otherwise it answers through
+    `matcher` and reports `serves` as the model that did (as `_Reported` does)."""
+
+    def __init__(self, matcher: Matcher, serves: str, primary: str, spent: bool = False) -> None:
+        self.matcher, self.serves, self.primary_label, self.spent = matcher, serves, primary, spent
+        self.calls = 0
+
+    def generate(
+        self, *, system: str, prompt: str, output_model: type[ScreeningBatch]
+    ) -> ScreeningBatch:
+        from src.core.llm import LLMError
+        from src.core.llm.fallback import served_by
+
+        self.calls += 1
+        if self.spent:
+            raise LLMError("You've hit your limit · resets 3pm")
+        served_by.set(self.serves)
+        return self.matcher(prompt)
+
+
+def test_a_spent_plan_stops_screening_without_retrying() -> None:
+    jobs = [_job(str(i), "Principal Scientist") for i in range(6)]
+    plan = _Plan(Matcher({}), "claude_code:opus", "claude_code:opus", spent=True)
+    verdicts, errors = asyncio.run(
+        screen_jobs(SUMMARY, jobs, plan, batch_size=3, concurrency=1)  # type: ignore[arg-type]
+    )
+    assert verdicts == {}
+    assert plan.calls == 1  # no retry of the spent plan, and the second batch never started
+    assert len(errors) == 2 and "plan limit" in errors[1]  # one line per batch
+
+
+def test_verdicts_name_their_model_and_a_replacement_is_not_remembered(tmp_path: Path) -> None:
+    jobs = [_job("a", "Lab Technician")]
+    matcher = Matcher({"Lab Technician": [LOWER]})
+    moved = _Plan(matcher, "codex:gpt-6-sol", "claude_code:claude-opus-5")
+    cache = VerdictCache(tmp_path / "v.json")
+    verdicts, _ = asyncio.run(
+        screen_jobs(SUMMARY, jobs, moved, threshold=60, cache=cache, model="m")  # type: ignore[arg-type]
+    )
+    assert verdicts["a"].model == "codex:gpt-6-sol"
+    again, _ = asyncio.run(
+        screen_jobs(
+            SUMMARY, jobs, moved, threshold=60, cache=VerdictCache(tmp_path / "v.json"), model="m"
+        )  # type: ignore[arg-type]
+    )
+    assert not again["a"].from_memory  # judged afresh: memory holds the configured model's only
+    own = _Plan(matcher, "claude_code:claude-opus-5", "claude_code:claude-opus-5")
+    asyncio.run(
+        screen_jobs(
+            SUMMARY, jobs, own, threshold=60, cache=VerdictCache(tmp_path / "v.json"), model="m"
+        )
+    )  # type: ignore[arg-type]
+    third, _ = asyncio.run(
+        screen_jobs(
+            SUMMARY, jobs, own, threshold=60, cache=VerdictCache(tmp_path / "v.json"), model="m"
+        )  # type: ignore[arg-type]
+    )
+    assert third["a"].from_memory

@@ -20,6 +20,8 @@ conda activate job_search && pip install -e ".[dev]"
 pytest && ruff check src tests .agent && mypy src
 cd web && npm install && npm run typecheck && npm run lint && npm run build
 bash scripts/dev.sh                                  # (re)start backend + frontend → http://localhost:5173
+bash scripts/install.sh                              # new computer: env, deps, UI build, Mac Dock app
+bash scripts/start.sh                                # one server with the built UI → http://localhost:8000
 ```
 
 All tests run offline: the LLM is faked, HTTP is mocked, and the agent chat uses a scripted model.
@@ -56,6 +58,16 @@ another provider than search and matching (e.g. Opus through Claude Code while C
 | **letter** | cover letters (optional; blank = the CV model, else the quality model; `letter_provider`) | per letter |
 | **quality** | CV parsing for search, search-time summary on a cache miss, evidence extraction, second opinions on matches and near the threshold, the assistant's default, and writing tasks without their own model | rare, accuracy-critical |
 | **screening** | the job_matcher's first pass (batches of 3) | hundreds per search |
+
+**Plans and handovers** (`src/core/llm/usage.py`, `fallback.py`, `src/services/connections.py`):
+every model call is classified on failure (`LLMError.kind`: limit, auth, context, network,
+other). When a plan (Claude Code or Codex) runs out, `on_limit` decides: "switch" moves the
+task to the other plan's model of the same standing at the same effort, "ask" offers stop /
+continue on that model / wait for the reset. Providers billed per token are never switched to.
+Plan windows (`data/usage_claude.json`; Codex through `app-server`) and per-provider spend
+(`data/model_spend.json`) are served by `GET /api/connections`. The assistant's handover packet
+(`src/agents/handoff.py`, `prompts/handoff*.md`) is built from recorded data only: the user's
+messages, the actions taken and the last answer; each provider keeps its own CLI session.
 
 ## Buttons and assistant share services
 
@@ -116,9 +128,12 @@ UI filters ─▶ SearchQuery          career intent (services/intent, per CV)
 4 summary     ProfileSummary (saved profile or search quality model)  ◀── ProfileMemory (data/profile_summaries.json)
               from the original CV document ([src-N] lines, publications included) +
               the dated CV extract + career intent; capabilities and publication record;
-              role families (core / progression / adjacent) checked by code (CV or
-              document evidence ids and gap; fit is the matcher's); readable copies in
-              output/profiles/;
+              what sets the level (seniority_evidence), a pitch and expansion routes
+              (where capabilities could lead); role families (core / progression /
+              adjacent, each with positioning) checked by code (CV or document evidence
+              ids and gap; fit is the matcher's); numbers in achievements and pitch checked
+              against the CV (check_claims); pitch, expansion and positioning are left out
+              of what the matcher sees; readable copies in output/profiles/;
               with empty titles the boards search the families (budget 60/20/20, adjacent
               only when requested or `widen`); results are tagged with their family and
               per-family yield logged (data/family_yield.json, "not landing" after 3 searches)
@@ -145,20 +160,42 @@ No LLM configured → steps 4–5 are skipped and the report says it shows pre-f
 ```text
 upload (.pdf/.docx/.md/.txt) ─▶ data/cvs/ (stored unchanged; no parsing or LLM call)
 select CV + request a CV-powered action ─pypdf/python-docx─▶ text ─LLM─▶ MasterCV
-job from results ─▶ tailor.analyze_jd ─▶ propose_plan (LLM, steered by the job_matcher verdict)
-─▶ apply_plan (guards: source ids, no new numbers, skills only from the source bullet, summary
-skills/numbers in the CV; headline kept, up to 4 checked headline_options offered; every bullet
-kept and reordered unless the length choice or assess_trim allows trimming) ─▶ critique_cv (LLM, second reader)
-─▶ revise_plan ─▶ apply_plan ─▶ TailoredCV
+job from results ─▶ tailor.analyze_jd (requirements, level signals, academic?) ─▶ propose_plan
+(LLM: requirement map → positioning → wording; steered by the job_matcher verdict, the stored
+profile, level_note from code and, for an academic post, academic wording)
+─▶ apply_plan (guards: source ids, no new numbers, skills only from the source bullet, no added
+ownership or scope (claims.escalation), job wording only in bullets mapped to that requirement,
+requirement map ids checked (check_requirements), summary skills/numbers in the CV; headline
+kept, up to 4 checked headline_options offered; role_skills only CV skills; every bullet kept
+and reordered unless the length choice or assess_trim allows trimming)
+─▶ critique_cv (LLM, hiring manager + recruiter) ─▶ revise_plan ─▶ apply_plan ─▶ TailoredCV
+─▶ fit_check.compare_fit (LLM reads original and tailored CV blind; before → after)
 ─▶ docx_original.write_like_original (a copy of the CV's Word design, also for a PDF CV's Word
-version; templates only when chosen)
+version, + "Relevant skills for this role" line; academic: sections moved whole into academic
+order; templates only when chosen)
 ─▶ output/cvs/<Name>_<Company>.docx ─▶ ats.check_docx (read-back)
                                                   └─▶ tracker: remember the CV; only the user marks Applied
-job ─▶ cover_letter.draft_letter (LLM; motivation only from the career intent) ─▶ apply_letter
-(each paragraph cites CV ids; numbers/skills from them) ─▶ <Name>_<Company>_cover_letter.docx
+job ─▶ cover_letter.draft_letter (LLM; follows the tailored CV's positioning and requirement
+map; motivation only from the career intent; bridge paragraph for a change of function or
+level) ─▶ apply_letter (each paragraph cites CV ids; numbers/skills from them; no added
+ownership) ─▶ review_letter (LLM, hiring manager) ─▶ one guarded redraft
+─▶ <Name>_<Company>_cover_letter.docx
 document ─▶ enrichment.propose (LLM; quotes checked against the document) ─▶ review queue
 ─▶ the user accepts ─▶ Master CV
 ```
+
+## Stopping work
+
+Every long action can be stopped at once from the UI. Document tasks and profile builds run
+through `progress.run(task_id, ...)` (the task id is also their model-call group);
+`POST /api/progress/{id}/stop` cancels the work, kills CLI model processes and cuts off API
+requests mid-call (`core/llm/calls.py`: `abortable_client` for model calls, `HttpFetcher` for
+job-source requests), and the request ends with 409 "Stopped". Searches stop through
+`POST /api/search/stop/{run_id}` (partial results kept), the assistant through the chat
+socket's `cancel` (the turn's task and its tools' call group), and company discovery through
+`POST /api/companies/discover/stop` (boards found so far kept; a company cut off mid-check is
+checked next time). A stopped group stays cancelled, so threads left behind spend nothing more.
+New long actions use `progress.run` and new HTTP model calls `abortable_client`.
 
 ## Invariants to preserve
 

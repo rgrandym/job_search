@@ -32,3 +32,6 @@ web/*.tsbuildinfo
 
 # dev.sh runtime (pids, logs)
 .run/
+
+# Types the Claude Code engine writes beside a loaded mod
+.claude/mods/*/.claude-plugin/types/

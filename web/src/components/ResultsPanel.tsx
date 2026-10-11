@@ -1,21 +1,24 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { UseQueryResult } from "@tanstack/react-query";
-import { AlertTriangle, Bookmark, BookmarkX, BrainCircuit, ClipboardList, Download, FileText, History, ListChecks, Loader2, Play, Square, X } from "lucide-react";
+import { AlertTriangle, ArrowRightLeft, Bookmark, BookmarkX, BrainCircuit, ClipboardList, Download, FileText, History, ListChecks, Loader2, Mail, Play, RotateCw, Square, X } from "lucide-react";
 import { api } from "../lib/api";
 import { syncLists } from "../lib/queryClient";
+import { useGmail } from "../lib/useGmail";
 import { useSearchRunner } from "../lib/useSearchRunner";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { MatchResult, SavedJob, SourceReport, TailoredCVView, TrackedJob } from "../lib/types";
 import { cn } from "../lib/utils";
+import { useActivity } from "../stores/activityStore";
 import { useSearch } from "../stores/searchStore";
 import { JobCard } from "./JobCard";
+import { LimitOptions } from "./LimitOptions";
 import { CoverLettersPanel } from "./CoverLettersPanel";
 import { ProgressLog, SearchStatus } from "./ProgressLog";
 import { SavedJobs } from "./SavedJobs";
 import { AppliedJobs } from "./AppliedJobs";
 import { TailoredCVPanel } from "./TailoredCVPanel";
-import { ProgressBar, TaskProgress, useTaskId } from "./TaskProgress";
-import { Empty } from "./ui";
+import { ProgressBar, STOPPED, TaskError, TaskProgress, useTaskId } from "./TaskProgress";
+import { Empty, Resizable } from "./ui";
 
 type Tab = "matches" | "to_check" | "below_threshold" | "excluded" | "dismissed";
 
@@ -49,10 +52,72 @@ const SOURCE_NAMES: Record<string, string> = {
   demo: "Demo jobs",
 };
 
-function SourcesUsed({ sources }: { sources: SourceReport[] }) {
+/** A failure the user fixes by signing in again, not by retrying. */
+const needsSignIn = (src: SourceReport) => src.status === "failed" && /reconnect|sign-in|authori[sz]/i.test(src.detail ?? "");
+
+/** What to do about failed sources: reconnect Gmail when its sign-in lapsed, then search only
+ *  the failed sources again (their new jobs join these results), or the whole search. */
+function FailedSourceActions({
+  failed,
+  onRetryFailed,
+  onRunAgain,
+}: {
+  failed: SourceReport[];
+  onRetryFailed: (() => void) | null;
+  onRunAgain: () => void;
+}) {
+  const gmail = useGmail();
+  const gmailLapsed = failed.some((src) => src.name === "gmail_alerts" && needsSignIn(src));
+  const blocked = gmailLapsed && !gmail.healthy && failed.length === 1; // retrying cannot help yet
+  const what = failed.length === 1 ? (SOURCE_NAMES[failed[0].name] ?? failed[0].name) : `the ${failed.length} failed sources`;
+  return (
+    <div className="flex flex-wrap items-center gap-2 pt-1">
+      {gmailLapsed && !gmail.healthy && !gmail.waiting && (
+        <button className="btn-ghost py-0.5 text-[11px]" onClick={gmail.connect}>
+          <Mail size={11} /> Reconnect Gmail
+        </button>
+      )}
+      {gmailLapsed && gmail.waiting && !gmail.healthy && (
+        <span className="flex items-center gap-1 text-[11px] text-muted">
+          <Loader2 size={11} className="animate-spin" /> Finish the Google sign-in in your browser…
+          <button className="text-accent hover:underline" onClick={gmail.cancel}>Cancel</button>
+        </span>
+      )}
+      {gmailLapsed && gmail.healthy && <span className="text-[11px] text-good">Gmail reconnected.</span>}
+      {onRetryFailed && (
+        <button
+          className="btn-primary py-0.5 text-[11px]"
+          disabled={blocked}
+          onClick={onRetryFailed}
+          title={blocked ? "Reconnect Gmail first" : "Search only these sources again; their new jobs are added to these results"}
+        >
+          <RotateCw size={11} /> Retry {what}
+        </button>
+      )}
+      <button
+        className="text-[11px] text-faint hover:text-fg hover:underline"
+        onClick={onRunAgain}
+        title="Run the whole search again. Jobs judged before keep their verdict at no model cost."
+      >
+        or run the whole search again
+      </button>
+    </div>
+  );
+}
+
+function SourcesUsed({
+  sources,
+  onRetryFailed,
+  onRunAgain,
+}: {
+  sources: SourceReport[];
+  onRetryFailed: (() => void) | null;
+  onRunAgain: (() => void) | null;
+}) {
   if (!sources.length) return null;
   const used = sources.filter((src) => src.status === "used");
   const other = sources.filter((src) => src.status !== "used");
+  const failed = other.filter((src) => src.status === "failed");
   const label = (name: string) => SOURCE_NAMES[name] ?? name;
   return (
     <div className="space-y-0.5 break-words text-[11px]">
@@ -79,6 +144,9 @@ function SourcesUsed({ sources }: { sources: SourceReport[] }) {
             </span>
           ))}
         </p>
+      )}
+      {failed.length > 0 && onRunAgain && (
+        <FailedSourceActions failed={failed} onRetryFailed={onRetryFailed} onRunAgain={onRunAgain} />
       )}
     </div>
   );
@@ -160,6 +228,7 @@ function ImportOlderCV() {
   return (
     <details className="rounded-md border border-border bg-panel p-3 text-[12px]">
       <summary className="cursor-pointer font-medium">Attach a tailored Word CV from an older search</summary>
+      <Resizable id="attach-cv">
       <div className="mt-3 space-y-2">
         <p className="text-muted">Choose the Word CV and enter the job details. The quality model extracts its text; review and save it before writing a letter.</p>
         <select className="input w-full" value={assetId} onChange={(e) => setAssetId(e.target.value)}>
@@ -180,6 +249,7 @@ function ImportOlderCV() {
         {attach.error && <p className="text-bad">{(attach.error as Error).message}</p>}
         {attach.data && <p className="text-good">Attached. Open its document below, review the text, and save it to enable cover letters.</p>}
       </div>
+      </Resizable>
     </details>
   );
 }
@@ -198,7 +268,7 @@ function DocumentJob({ jobId, title }: { jobId: string; title: string }) {
       {open && <TailoredCVPanel jobId={jobId} hasCv={false} letterPending={letter.isPending} onLetter={(id) => letter.mutate(id)} />}
       {letter.isPending && <TaskProgress id={letterTask.id} className="mt-2" />}
       {letter.data && <a className="mt-2 block text-accent hover:underline" href={letter.data.download_url}><Download size={11} /> Download cover letter</a>}
-      {letter.error && <p className="mt-2 text-bad">{(letter.error as Error).message}</p>}
+      <TaskError error={letter.error} className="mt-2" />
     </div>
   );
 }
@@ -218,6 +288,7 @@ function SelectionBar({ savedIds, saved, hasCv }: { savedIds: Map<string, string
   const [template, setTemplate] = useState("original");
   const [prepared, setPrepared] = useState<Prepared[]>([]);
   const [working, setWorking] = useState<string | null>(null);
+  const stopBatch = useRef(false);
   const [workingIndex, setWorkingIndex] = useState(0);
   const docTask = useTaskId();
   const report = outcome?.report;
@@ -254,7 +325,9 @@ function SelectionBar({ savedIds, saved, hasCv }: { savedIds: Map<string, string
   // job-description analysis), and a failure on one job does not stop the others.
   const prepare = async () => {
     const out: Prepared[] = [];
+    stopBatch.current = false;
     for (const [index, jobId] of activeSelected.entries()) {
+      if (stopBatch.current) break; // Stop ends the whole batch, not only the current job
       const item: Prepared = { jobId, title: titles.get(jobId) ?? jobId };
       setWorking(item.title);
       setWorkingIndex(index);
@@ -263,7 +336,7 @@ function SelectionBar({ savedIds, saved, hasCv }: { savedIds: Map<string, string
         item.cv = tailored.download_url;
         item.letter = (await api.coverLetter(jobId, template, selectedResults.get(jobId), tailored.document_id, docTask.next())).download_url;
       } catch (e) {
-        item.error = (e as Error).message;
+        item.error = (e as Error).message === STOPPED ? "Stopped" : (e as Error).message;
       }
       out.push(item);
       setPrepared([...out]);
@@ -317,7 +390,7 @@ function SelectionBar({ savedIds, saved, hasCv }: { savedIds: Map<string, string
         <div className="space-y-1.5 py-1">
           <p className="text-muted">Job {workingIndex + 1} of {activeSelected.length}: preparing documents for {working}</p>
           <ProgressBar fraction={workingIndex / Math.max(activeSelected.length, 1)} />
-          <TaskProgress id={docTask.id} />
+          <TaskProgress id={docTask.id} onStop={() => { stopBatch.current = true; }} />
         </div>
       )}
       {prepared.length > 0 && (
@@ -370,6 +443,8 @@ function SearchResults({ hasCv, savedAt, tracked }: { hasCv: boolean; savedAt: M
     </button>
   );
   const [tab, setTab] = useState<Tab>("matches");
+  const [limitDismissed, setLimitDismissed] = useState(false);
+  useEffect(() => setLimitDismissed(false), [outcome?.history_id, outcome?.limit?.resets_at]);
 
   if (!outcome) {
     return (
@@ -527,7 +602,31 @@ function SearchResults({ hasCv, savedAt, tracked }: { hasCv: boolean; savedAt: M
             <span className="text-faint"> (see Profiles for their evidence and results)</span>
           </p>
         )}
-        {!loading && (outcome.cancelled || outcome.unscreened > 0) && (
+        {(outcome.handovers ?? []).map((line) => (
+          <p key={line} className="flex items-center gap-1.5 text-[12px] text-muted">
+            <ArrowRightLeft size={12} className="shrink-0 text-warn" /> {line}
+          </p>
+        ))}
+        {!loading && outcome.limit && outcome.history_id && !limitDismissed && (
+          <LimitOptions
+            what="screening"
+            configured={outcome.limit.configured}
+            resetsAt={outcome.limit.resets_at}
+            replacement={outcome.limit.replacement}
+            onSwitch={() => void runner.resume(outcome.history_id!, true)}
+            onWait={() => {
+              const id = outcome.history_id!;
+              setLimitDismissed(true);
+              useActivity.getState().wait(
+                (outcome.limit!.resets_at + 60) * 1000,
+                `Continue the screening on ${outcome.limit!.configured.model}`,
+                () => void runner.resume(id),
+              );
+            }}
+            onStop={() => setLimitDismissed(true)}
+          />
+        )}
+        {!loading && (outcome.cancelled || outcome.unscreened > 0) && (!outcome.limit || limitDismissed) && (
           <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-surface px-2 py-1.5 text-[12px]">
             <AlertTriangle size={13} className="text-warn" />
             <span className="text-muted">
@@ -553,13 +652,19 @@ function SearchResults({ hasCv, savedAt, tracked }: { hasCv: boolean; savedAt: M
           </div>
         )}
         {error && <p className="break-words text-[12px] text-bad">{error}</p>}
-        <SourcesUsed sources={outcome.sources ?? []} />
+        <SourcesUsed
+          sources={outcome.sources ?? []}
+          onRetryFailed={loading || !outcome.history_id ? null : () => void runner.retry(outcome.history_id!)}
+          onRunAgain={loading ? null : () => void runner.run(outcome.alert_only)}
+        />
         {log.length > 0 && (
           <details className="text-[11px] text-faint">
             <summary className="cursor-pointer">Process log ({log.length} steps)</summary>
+            <Resizable id="process-log">
             <div className="mt-1">
               <ProgressLog log={log} running={false} />
             </div>
+            </Resizable>
           </details>
         )}
         {outcome.smart_unavailable && (

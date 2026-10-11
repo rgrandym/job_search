@@ -13,6 +13,7 @@ from typing import Any, TypeVar
 import httpx
 from pydantic import BaseModel, ValidationError
 
+from src.core.llm.calls import abortable_client
 from src.core.llm.types import (
     ChatMessage,
     ChatResponse,
@@ -91,7 +92,8 @@ class OpenAICompatStructured:
                 "json_schema": {"name": output_model.__name__, "schema": schema, "strict": False},
             },
         }
-        with httpx.Client(timeout=TIMEOUT, headers=_headers(self.cfg)) as client:
+        # Abortable: Stop shuts the request down mid-call (`calls.cancel_group`).
+        with abortable_client(httpx.Client, timeout=TIMEOUT, headers=_headers(self.cfg)) as client:
             resp = client.post(self.url, json=body)
             if resp.status_code == 400:  # model lacks json_schema support: plain JSON mode
                 body["response_format"] = {"type": "json_object"}

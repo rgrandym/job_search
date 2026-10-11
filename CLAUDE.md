@@ -40,6 +40,9 @@ python .agent/skills/cv_writer/docx_templates.py --cv <cv.json> --template class
 # Web app
 bash scripts/dev.sh                    # (re)start backend :8000 + frontend :5173; Ctrl-C stops both
 bash scripts/dev.sh --stop             # stop both · --install forces dependency reinstall
+bash scripts/install.sh                # new computer: env, deps, UI build, Dock app (macOS)
+bash scripts/start.sh                  # one server, built UI, :8000 (what the Dock app runs)
+bash scripts/macos/make_app.sh         # rebuild ~/Applications/Job Search.app (WKWebView wrapper)
 # logs: .run/logs/{backend,frontend}.log
 cd web && npm run typecheck && npm run lint && npm run build
 ```
@@ -49,10 +52,14 @@ cd web && npm run typecheck && npm run lint && npm run build
 ```
 src/
   core/        config.py (Settings) · llm_provider.py (protocols, embedder, factory)
-               progress.py (live task steps + in-flight model calls, polled by the UI)
+               progress.py (live task steps + in-flight model calls, polled by the UI; `run` makes a
+               task stoppable at once: Stop buttons)
     llm/       types.py · anthropic_backend.py · openai_backend.py (OpenAI + OpenRouter)
                claude_code_backend.py · codex_backend.py · native.py (CLI agent loops over MCP)
-  cv/          models.py · master_cv_manager.py · tailor.py (guards + review + trim rule) · cover_letter.py
+               usage.py (error kinds, plan windows, spend ledger) · fallback.py (plan handover)
+               calls.py (call groups: Stop kills CLI calls and cuts off HTTP requests mid-call)
+  cv/          models.py · master_cv_manager.py · tailor.py (requirement map, positioning, guards,
+               review, trim and level rules) · fit_check.py (before/after) · claims.py · cover_letter.py
                docx_original.py (tailored CV = a copy of the original Word CV) · edits.py
                ats.py (docx read-back) · docx_exporter.py
   jobs/        models.py · fetcher.py · matcher.py + scorer.py (pre-filter)
@@ -79,12 +86,17 @@ src/
                model_compare.py (CLI: score model setups against your labels) · compare_usage.py
                (its cost per model, plan usage and progress bar)
                company_discovery.py (directory -> data/companies.json; run by searches + Update button)
+               connections.py (who serves each task, plan windows, spend, spent-plan options)
   agents/      the assistant: registry.py · runtime.py (loop; native runs) · mcp.py (tools for the Claude Code
                and Codex loops) · tools.py · definitions.py · prompts/assistant.md · chat.py
+               handoff.py (+ prompts/handoff*.md: the packet when another plan's model takes over)
   web/         app.py (REST + /api/ws/chat + serves web/dist)
 web/src/       App.tsx · components/ · stores/ (zustand) · lib/ (api.ts, types.ts mirror the models)
 .agent/skills/ SKILL.md + generated JSON schemas + thin CLI entrypoints
 .agent/agent_configs/  tool-agnostic agent definitions
+.claude/       settings.json (ask/deny rules, hooks) · hooks/guard_paths.py (protected paths)
+               hooks/gate.py (ruff/mypy/tsc after edits, pytest at turn end; `--all` by hand)
+               mods/job-search-live (Claude Code pane: /live, /gate; reads scripts/live_status.py)
 data/examples/ committed fixtures · data/* and output/ are git-ignored (personal data)
 ```
 
@@ -137,6 +149,10 @@ Every tailored CV is written the same way (`tailor.apply_plan`, `cv/docx_origina
   structured Master CV, of the library Word CV holding most of its words (`_master_docx`). Layout, fonts,
   name, section headings and publications are untouched. A template (`docx_exporter.TEMPLATES`)
   is used only when the user picks one, or when no Word version exists.
+- **Additions (user's decision 2026-10-10):** one "Relevant skills for this role" line under
+  the summary, in its formatting (only skills the CV names). For an **academic** post
+  (`audience`), the sections the CV already has move whole into the academic order
+  (`docx_original.academic_order`; name and contact lines stay first); nothing else is added.
 - **The CV keeps its own headline.** The model suggests up to 4 role-specific headlines
   (`headline_options`, each passing the headline guards). They are written into the Word file
   under the CV's own headline, in its formatting, for the user to delete the ones they do not
@@ -153,10 +169,18 @@ Every tailored CV is written the same way (`tailor.apply_plan`, `cv/docx_origina
   one step below while asking for at most half the candidate's years; unknown level, no trim.
   When trimming, at least two bullets stay per role; roles, education and publications stay;
   every left-out line is recorded and shown to the user.
+- **Level and adjacent roles:** code decides the level positioning (`tailor.level_note`): for
+  a more junior job, hands-on work leads and senior experience stays as supporting strength;
+  for a higher one, never claim the level. Every plan maps the job's requirements to CV
+  evidence (`check_requirements`); the job's wording goes only into bullets mapped to that
+  requirement, and no rewrite adds ownership or scope (`claims.escalation`).
+- **Every tailored CV gets a before/after fit check** (`fit_check.compare_fit`, user's decision
+  2026-10-10): both CVs read blind for the job; it measures how clearly each shows the fit,
+  never the candidate's actual fit.
 - Anything the Word writer cannot place safely is left as in the original and reported
   (`TailoredCV.document_notes`).
-Changing these rules means updating `tailor.py`, `docx_original.py`, the cv_writer SKILL.md and
-the tests together.
+Changing these rules means updating `tailor.py`, `docx_original.py`, `fit_check.py`, the
+cv_writer SKILL.md and the tests together.
 
 ## Job Sources (MANDATORY)
 
@@ -211,7 +235,10 @@ Personal job-search tool: public job pages may be read, within reason.
 - Ruff (line length 100) is the formatter. Match existing style exactly.
 - **Frontend:** strict TS, function components and hooks, server state in TanStack Query, UI and
   session state in Zustand stores. Colours only via the tokens (`bg-panel`, `text-muted`,
-  `var(--accent)` …), never hard-coded hex. Every view has explicit loading, empty and error states.
+  `var(--accent)` …), never hard-coded hex; the themes set them in `index.css`
+  (`[data-theme]`, listed in `lib/themes.ts`). Windows use `ui.Modal` (edge-resizable,
+  minimisable) and collapsible sections wrap their body in `ui.Resizable`. Every view has
+  explicit loading, empty and error states.
 
 ## Editing Rules
 

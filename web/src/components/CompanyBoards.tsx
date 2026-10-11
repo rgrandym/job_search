@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Loader2, Plus, RefreshCw, X } from "lucide-react";
+import { Loader2, Plus, RefreshCw, Square, X } from "lucide-react";
 import { useState } from "react";
 import { api } from "../lib/api";
 
@@ -15,6 +15,11 @@ export function CompanyBoards({ searching }: { searching: boolean }) {
   });
   const update = useMutation({
     mutationFn: () => api.discoverCompanies("stale"),
+    onMutate: () => stop.reset(), // a new pass: its Stop button starts fresh
+    onSuccess: (data) => qc.setQueryData(["companies-status"], data),
+  });
+  const stop = useMutation({
+    mutationFn: api.stopDiscovery,
     onSuccess: (data) => qc.setQueryData(["companies-status"], data),
   });
 
@@ -29,6 +34,16 @@ export function CompanyBoards({ searching }: { searching: boolean }) {
         <p className="flex items-center gap-1 text-muted">
           <Loader2 size={10} className="shrink-0 animate-spin" />
           <span>Finding job boards: {d.message || "starting"}</span>
+          {!searching && (
+            <button
+              className="ml-auto inline-flex shrink-0 items-center gap-0.5 text-bad hover:underline disabled:opacity-50"
+              disabled={stop.isPending || stop.isSuccess}
+              title="Stop now; the job boards found so far are kept and the rest are checked next time"
+              onClick={() => stop.mutate()}
+            >
+              <Square size={9} /> {stop.isPending || stop.isSuccess ? "Stopping…" : "Stop"}
+            </button>
+          )}
         </p>
       ) : d.unchecked === -1 ? (
         <p>UK life-science companies (BioPharmGuy). Not set up yet: the next search finds their job boards (about 10 minutes, once).</p>
@@ -42,6 +57,7 @@ export function CompanyBoards({ searching }: { searching: boolean }) {
       )}
       {d.error && <p className="text-bad">Last update failed: {d.error}</p>}
       {update.isError && <p className="text-bad">{(update.error as Error).message}</p>}
+      {stop.isError && <p className="text-bad">{(stop.error as Error).message}</p>}
       <YourCompanies />
       {!d.running && (
         <button

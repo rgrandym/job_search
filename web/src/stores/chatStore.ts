@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { PROVIDER_LABEL } from "../lib/labels";
 import { syncLists } from "../lib/queryClient";
 import type { ChatEvent, ModelUsageEvent, Provider, SearchQuery } from "../lib/types";
 import { useSearch } from "./searchStore";
@@ -7,18 +8,25 @@ export type ChatItem =
   | { kind: "user"; text: string }
   | { kind: "assistant"; text: string }
   | { kind: "activity"; agent: string; depth: number; text: string; ok?: boolean; detail?: string }
-  | { kind: "error"; text: string };
+  | { kind: "error"; text: string }
+  /** A model handover (a spent plan moved the work to the other plan). */
+  | { kind: "notice"; text: string }
+  /** The chat model's plan ran out: the user picks stop, switch or wait. */
+  | {
+      kind: "limit";
+      provider: Provider;
+      model: string;
+      resetsAt: number;
+      replacement: { provider: Provider; model: string } | null;
+      text: string;
+      resolved: boolean;
+    };
 
-export interface SessionModelUsage {
-  model: string;
-  provider?: Provider;
-  input: number;
-  output: number;
-  estimated: boolean;
-  latestContext: number;
-  agents: string[];
-  purposes: string[];
-}
+type SendOptions = {
+  smart: boolean; threshold: number; widen: boolean; profileKey: string | null;
+  /** After a spent plan: continue on the other plan's equivalent model. */
+  switchPlan?: boolean;
+};
 
 interface ChatState {
   sessionId: string | null;
@@ -27,29 +35,25 @@ interface ChatState {
   status: string | null;
   connected: boolean;
   tokens: { input: number; output: number };
-  modelUsage: Record<string, SessionModelUsage>;
+  /** Index in `items` where the running (or last) turn began. */
+  turnStart: number;
+  /** When the running (or last) turn started and ended (ms). */
+  turnAt: { start: number; end: number | null } | null;
   socket: WebSocket | null;
   connect: () => void;
-  send: (text: string, filters: SearchQuery, useCv: boolean, chatRole: "quality" | "screening", chatModel: string | null, chatProvider: Provider | null, options: {
-    smart: boolean; threshold: number; widen: boolean; profileKey: string | null;
-  }) => void;
+  send: (text: string, filters: SearchQuery, useCv: boolean, chatRole: "quality" | "screening", chatModel: string | null, chatProvider: Provider | null, options: SendOptions) => void;
+  /** Answer a `limit` item: send its message again, on the other plan when `switchPlan`. */
+  resend: (index: number, switchPlan: boolean) => void;
+  /** Mark a `limit` item answered (stop, or a scheduled wait). */
+  resolve: (index: number) => void;
   cancel: () => void;
   reset: () => void;
   recordUsage: (event: ModelUsageEvent | (Omit<ModelUsageEvent, "depth"> & { depth?: number })) => void;
 }
 
 const SESSION_KEY = "jobsearch.session";
-const USAGE_KEY = "jobsearch.tabUsage";
-const storedUsage = (() => {
-  try {
-    return JSON.parse(sessionStorage.getItem(USAGE_KEY) ?? "null") as {
-      tokens: { input: number; output: number };
-      modelUsage: Record<string, SessionModelUsage>;
-    } | null;
-  } catch {
-    return null;
-  }
-})();
+const ended = (at: ChatState["turnAt"]) => (at && !at.end ? { ...at, end: Date.now() } : at);
+const route = (provider: string, model: string) => `${PROVIDER_LABEL[provider as Provider] ?? provider} ${model}`;
 
 const describeArgs = (args: Record<string, unknown>) => {
   const parts = Object.entries(args)
@@ -60,6 +64,9 @@ const describeArgs = (args: Record<string, unknown>) => {
 
 export const useChat = create<ChatState>()((set, get) => {
   let chatSearchActive = false;
+  // The last message's settings, to send a message again after a spent plan.
+  let lastSend: [SearchQuery, boolean, "quality" | "screening", string | null, Provider | null, SendOptions] | null = null;
+  const announced = new Set<string>(); // structured-call handovers already shown
   const push = (item: ChatItem) => set((s) => ({ items: [...s.items, item] }));
 
   const onEvent = (ev: ChatEvent) => {
@@ -179,13 +186,19 @@ export const useChat = create<ChatState>()((set, get) => {
             input: Math.max(s.tokens.input, ev.tokens.input),
             output: Math.max(s.tokens.output, ev.tokens.output),
           };
-          sessionStorage.setItem(USAGE_KEY, JSON.stringify({ tokens, modelUsage: s.modelUsage }));
-          return { running: false, status: ev.cancelled ? "Stopped" : null, tokens };
+          return { running: false, status: ev.cancelled ? "Stopped" : null, tokens, turnAt: ended(s.turnAt) };
         });
+        break;
+      case "handover":
+        push({ kind: "notice", text: `${route(ev.from.provider, ev.from.model)}'s plan ran out: continuing on ${route(ev.to.provider, ev.to.model)} (same effort).` });
+        break;
+      case "limit_reached":
+        push({ kind: "limit", provider: ev.provider, model: ev.model, resetsAt: ev.resets_at, replacement: ev.replacement, text: ev.text, resolved: false });
+        set((s) => ({ running: false, status: null, turnAt: ended(s.turnAt) }));
         break;
       case "error":
         push({ kind: "error", text: ev.message });
-        set({ running: false, status: null });
+        set((s) => ({ running: false, status: null, turnAt: ended(s.turnAt) }));
         if (chatSearchActive) {
           chatSearchActive = false;
           useSearch.setState({ loading: false, progress: null });
@@ -202,8 +215,9 @@ export const useChat = create<ChatState>()((set, get) => {
     running: false,
     status: null,
     connected: false,
-    tokens: storedUsage?.tokens ?? { input: 0, output: 0 },
-    modelUsage: storedUsage?.modelUsage ?? {},
+    tokens: { input: 0, output: 0 },
+    turnStart: 0,
+    turnAt: null,
     socket: null,
 
     connect: () => {
@@ -228,6 +242,8 @@ export const useChat = create<ChatState>()((set, get) => {
     send: (text, filters, useCv, chatRole, chatModel, chatProvider, options) => {
       const ws = get().socket;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      lastSend = [filters, useCv, chatRole, chatModel, chatProvider, { ...options, switchPlan: false }];
+      set((s) => ({ turnStart: s.items.length, turnAt: { start: Date.now(), end: null } }));
       push({ kind: "user", text });
       set({ running: true, status: "assistant is thinking…" });
       ws.send(JSON.stringify({
@@ -236,8 +252,22 @@ export const useChat = create<ChatState>()((set, get) => {
         chat_provider: chatProvider,
         smart: options.smart, threshold: options.threshold, widen: options.widen,
         profile_key: options.profileKey,
+        switch: !!options.switchPlan,
       }));
     },
+
+    resend: (index, switchPlan) => {
+      const item = get().items[index];
+      if (item?.kind !== "limit" || !lastSend || get().running) return;
+      get().resolve(index);
+      const [filters, useCv, chatRole, chatModel, chatProvider, options] = lastSend;
+      get().send(item.text, filters, useCv, chatRole, chatModel, chatProvider, { ...options, switchPlan });
+    },
+
+    resolve: (index) =>
+      set((s) => ({
+        items: s.items.map((item, i) => (i === index && item.kind === "limit" ? { ...item, resolved: true } : item)),
+      })),
 
     cancel: () => get().socket?.send(JSON.stringify({ type: "cancel" })),
 
@@ -245,32 +275,20 @@ export const useChat = create<ChatState>()((set, get) => {
       get().socket?.send(JSON.stringify({ type: "reset" }));
       set({ items: [], status: null, tokens: { input: 0, output: 0 } });
     },
-    // Tab usage per model, from assistant turns and Search-button runs alike.
-    recordUsage: (ev) =>
-      set((s) => {
-        const key = `${ev.provider ?? "current"}:${ev.model}`;
-        const current = s.modelUsage[key];
-        const next = {
-          tokens: {
-            input: s.tokens.input + ev.input_tokens,
-            output: s.tokens.output + ev.output_tokens,
-          },
-          modelUsage: {
-            ...s.modelUsage,
-            [key]: {
-              model: ev.model,
-              provider: ev.provider,
-              input: (current?.input ?? 0) + ev.input_tokens,
-              output: (current?.output ?? 0) + ev.output_tokens,
-              estimated: (current?.estimated ?? false) || ev.estimated,
-              latestContext: ev.input_tokens + ev.output_tokens,
-              agents: Array.from(new Set([...(current?.agents ?? []), ev.agent])),
-              purposes: Array.from(new Set([...(current?.purposes ?? []), ev.purpose])),
-            },
-          },
-        };
-        sessionStorage.setItem(USAGE_KEY, JSON.stringify(next));
-        return next;
-      }),
+    // Tokens of this tab's work (spend per provider lives in the backend's ledger), and a
+    // notice the first time a spent plan hands calls to the other plan.
+    recordUsage: (ev) => {
+      if (ev.switched_from) {
+        const key = `${ev.switched_from}>${ev.provider}:${ev.model}`;
+        if (!announced.has(key)) {
+          announced.add(key);
+          const [fromProvider, ...fromModel] = ev.switched_from.split(":");
+          push({ kind: "notice", text: `${route(fromProvider, fromModel.join(":"))}'s plan ran out: ${ev.purpose || "work"} continues on ${route(ev.provider ?? "", ev.model)} (same effort).` });
+        }
+      }
+      set((s) => ({
+        tokens: { input: s.tokens.input + ev.input_tokens, output: s.tokens.output + ev.output_tokens },
+      }));
+    },
   };
 });

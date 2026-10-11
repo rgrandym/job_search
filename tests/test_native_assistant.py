@@ -416,7 +416,7 @@ def test_a_pdf_cv_is_tailored_in_its_word_versions_design_unless_a_design_is_cho
 
     chosen, path = asyncio.run(cv_service.tailor_to_job(ws, job, template="modern"))
     assert not any(p.text.startswith("Example A.") for p in Document(str(path)).paragraphs)
-    assert chosen.document_notes == ["Written in the modern design, as you chose"]
+    assert chosen.document_notes[0] == "Written in the modern design, as you chose"
 
 
 def test_the_structured_master_cv_is_tailored_in_its_word_cvs_design(
@@ -441,3 +441,129 @@ def test_the_structured_master_cv_is_tailored_in_its_word_cvs_design(
     tailored, path = asyncio.run(cv_service.tailor_to_job(ws, job))
     assert any(p.text.startswith("Example A.") for p in Document(str(path)).paragraphs)
     assert tailored.document_notes[0] == "Written in the design of Master_CV_2026.docx"
+
+
+class SpentPlan(FakeClaudeCode):
+    """Runs its tool calls over MCP, then refuses with a spent plan (as Claude Code does)."""
+
+    async def run_native(self, **kw: Any) -> NativeTurn:  # type: ignore[override]
+        token = kw["mcp_url"].rsplit("/", 1)[-1]
+        self.seen.append({"prompt": kw["prompt"], "session_id": kw["session_id"]})
+        for name, arguments in self.calls:
+            params = {"name": name, "arguments": arguments}
+            await mcp.handle(
+                token, {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": params}
+            )
+        raise LLMError("You've hit your limit · resets 3pm")
+
+
+def _plans(ws: Workspace, monkeypatch: pytest.MonkeyPatch, claude: Any, codex_model: Any) -> None:
+    from src.core.llm import fallback, usage
+    from src.core.llm.fallback import Candidate
+
+    usage.configure(None)
+    ws.llm = ws.llm.model_copy(
+        update={"provider": "claude_code", "quality_model": "claude-opus-5", "api_key": None}
+    )
+    monkeypatch.setattr(
+        fallback,
+        "candidates",
+        lambda p: (
+            [Candidate(id="claude-opus-5-5"), Candidate(id="claude-opus-5")]
+            if p == "claude_code"
+            else [Candidate(id="gpt-6.1-sol"), Candidate(id="gpt-6-sol")]
+        ),
+    )
+    monkeypatch.setattr(ws, "provider_ready", lambda provider: True)
+    monkeypatch.setattr(
+        ws,
+        "chat",
+        lambda role, model=None, provider=None: codex_model if provider == "codex" else claude,
+    )
+
+
+def test_a_spent_plan_hands_the_turn_to_the_other_plan_with_a_packet(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claude = SpentPlan([("read_cv", {})])
+    other = FakeClaudeCode([])
+    _plans(ws, monkeypatch, claude, other)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    async def emit(kind: str, payload: dict[str, Any]) -> None:
+        events.append((kind, payload))
+
+    session = chat.ChatSession()
+    args = (ws, session, "Tailor my CV for the Acme role", SearchQuery(), True, emit)
+    asyncio.run(chat.handle_user_message(*args, mcp_url="http://127.0.0.1:8000/api/mcp"))
+
+    handed = next(p for k, p in events if k == "handover")
+    assert handed["to"] == {"provider": "codex", "model": "gpt-6-sol"}  # Opus 5 -> sol 6
+    prompt = other.seen[0]["prompt"]
+    assert "Continuing a conversation from another model" in prompt
+    assert "Tailor my CV for the Acme role" in prompt
+    assert "read_cv() -> ok" in prompt  # what already happened is not redone
+    assert ("done", {"tokens": {"input": 5, "output": 0}}) in events
+    assert chat._native_for(session, "codex") == "session-1"
+
+    # The next turn goes straight to Codex while Claude's plan is spent: no refusal, no packet.
+    asyncio.run(chat.handle_user_message(*args, mcp_url="http://127.0.0.1:8000/api/mcp"))
+    assert len(claude.seen) == 1
+    assert other.seen[1]["session_id"] == "session-1"
+    assert "Continuing" not in other.seen[1]["prompt"]
+
+
+def test_in_ask_mode_the_user_is_offered_stop_switch_or_wait(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claude = SpentPlan([])
+    other = FakeClaudeCode([])
+    _plans(ws, monkeypatch, claude, other)
+    ws.llm = ws.llm.model_copy(update={"on_limit": "ask"})
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    async def emit(kind: str, payload: dict[str, Any]) -> None:
+        events.append((kind, payload))
+
+    session = chat.ChatSession()
+    args = (ws, session, "Find roles", SearchQuery(), True, emit)
+    asyncio.run(chat.handle_user_message(*args, mcp_url="http://127.0.0.1:8000/api/mcp"))
+
+    limit = next(p for k, p in events if k == "limit_reached")
+    assert limit["replacement"] == {"provider": "codex", "model": "gpt-6-sol"}
+    assert limit["text"] == "Find roles" and limit["resets_at"]
+    assert session.messages == [] and other.seen == []  # rolled back; nothing ran elsewhere
+
+    # The user picks "continue on gpt-6-sol": the same message, with `switch`.
+    asyncio.run(
+        chat.handle_user_message(*args, mcp_url="http://127.0.0.1:8000/api/mcp", switch=True)
+    )
+    assert other.seen and "Find roles" in other.seen[0]["prompt"]
+
+
+def test_coming_back_resumes_the_old_session_with_a_return_packet(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.core.llm import usage
+
+    claude = FakeClaudeCode([])
+    other = FakeClaudeCode([])
+    _plans(ws, monkeypatch, claude, other)
+    session = chat.ChatSession()
+    url = "http://127.0.0.1:8000/api/mcp"
+    asyncio.run(
+        chat.handle_user_message(ws, session, "Hi", SearchQuery(), True, _ignore, mcp_url=url)
+    )
+    usage.mark_exhausted("claude_code", None)  # Claude's plan runs out
+    asyncio.run(
+        chat.handle_user_message(ws, session, "Save it", SearchQuery(), True, _ignore, mcp_url=url)
+    )
+    assert other.seen  # Codex took the turn
+    usage.clear_exhausted("claude_code")  # the window reset
+    asyncio.run(
+        chat.handle_user_message(ws, session, "Thanks", SearchQuery(), True, _ignore, mcp_url=url)
+    )
+
+    back = claude.seen[-1]
+    assert back["session_id"] == "session-1"  # its own session, resumed
+    assert "Back in this conversation" in back["prompt"] and "Save it" in back["prompt"]

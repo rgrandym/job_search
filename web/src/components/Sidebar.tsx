@@ -3,17 +3,18 @@ import { ChevronRight, Download, Eraser, FileUp, Loader2, Search, Sparkles, Squa
 import { useEffect, useState, type DragEvent } from "react";
 import { api } from "../lib/api";
 import type { AppState, CVAsset, MasterCV } from "../lib/types";
+import { useGmail } from "../lib/useGmail";
 import { useSearchRunner } from "../lib/useSearchRunner";
 import { EMPTY_QUERY, useSearch } from "../stores/searchStore";
 import { SourcePicker } from "./SourcePicker";
 import { ProfileDetails } from "./ProfileDetails";
 import { SummaryDialog } from "./SummaryDialog";
-import { TaskProgress, useTaskId } from "./TaskProgress";
+import { TaskError, TaskProgress, useTaskId } from "./TaskProgress";
 import { SearchHistory } from "./SearchHistory";
 import { TrackerPanel } from "./TrackerPanel";
 import { CVDocument } from "./CVDocument";
 import { CVEditor } from "./CVEditor";
-import { ChipInput, Field, Modal, Toggle } from "./ui";
+import { ChipInput, Field, Modal, Toggle, Resizable } from "./ui";
 
 const DISTANCES = [5, 10, 25, 50, 100];
 const POSTED_WINDOWS: { days: number | null; label: string }[] = [
@@ -54,15 +55,7 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
   const [editingProfile, setEditingProfile] = useState(false);
   const [editingCV, setEditingCV] = useState<CVAsset | null>(null);
   const [editableCV, setEditableCV] = useState<MasterCV | null>(null);
-  const [gmailWaiting, setGmailWaiting] = useState(false);
-  const gmail = useQuery({
-    queryKey: ["gmail-status"],
-    queryFn: api.gmailStatus,
-    // While Google sign-in runs in its own tab, poll so this tab picks up the connection.
-    refetchInterval: gmailWaiting ? 2_000 : false,
-    refetchOnWindowFocus: true,
-  });
-  const gmailConnected = !!gmail.data?.connected;
+  const { status: gmail, healthy: gmailHealthy, waiting: gmailWaiting, connect: connectGmail, cancel: cancelGmail } = useGmail();
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles, enabled: !!state?.cv_files.selected });
   useEffect(() => { setExpandedProfileKey(null); setEditingProfile(false); }, [state?.cv_files.selected]);
   useEffect(() => {
@@ -72,15 +65,6 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
       setEditingCV(replacement ?? null); // follow a repaired output file while its viewer is open
     }
   }, [editingCV, state]);
-  useEffect(() => {
-    if (!gmailWaiting || !gmailConnected) return;
-    setGmailWaiting(false);
-    void qc.invalidateQueries({ queryKey: ["state"] }); // Gmail now appears as a source
-  }, [gmailWaiting, gmailConnected, qc]);
-  const connectGmail = () => {
-    window.open("/api/gmail/connect", "_blank");
-    setGmailWaiting(true);
-  };
 
   const cacheSelection = (asset: CVAsset) => {
     qc.setQueryData<AppState>(["state"], (current) => {
@@ -217,6 +201,7 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
         <summary className="label flex cursor-pointer list-none items-center justify-between [&::-webkit-details-marker]:hidden">
           <span className="flex items-center gap-1"><ChevronRight size={13} className="group-open:rotate-90" /> Profile</span>
         </summary>
+        <Resizable id="sidebar-cv">
         <div className="mt-3 space-y-3">
         <div className="flex items-center justify-end">
           {hasCv && (
@@ -324,7 +309,7 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
               {buildProfile.isPending ? "Building profile…" : profiles.data?.profiles.some((record) => record.role_family === "any") ? "Edit general profile" : "Build profile from selected CV"}
             </button>
             {buildProfile.isPending && <TaskProgress id={buildTask.id} />}
-            {buildProfile.error && <p className="text-[11px] text-bad">{buildProfile.error.message}</p>}
+            <TaskError error={buildProfile.error} className="text-[11px]" />
             {profiles.isPending ? (
               <p className="text-[11px] text-faint">Loading profiles…</p>
             ) : profiles.isError ? (
@@ -389,16 +374,18 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
             <p className="text-[10px] text-faint">Includes every role in the selected CV. Review parsed facts and edit the Word file before applying.</p>
             {generalCV.isPending && <TaskProgress id={generalTask.id} />}
             {generalCV.data && <a className="block text-[11px] text-accent hover:underline" href={generalCV.data.download_url}>Download CV · {generalCV.data.roles} roles</a>}
-            {generalCV.isError && <p className="text-[11px] text-bad">{(generalCV.error as Error).message}</p>}
+            <TaskError error={generalCV.error} className="text-[11px]" />
           </div>
         )}
         <Toggle checked={s.useCv && hasCv} onChange={(v) => s.set({ useCv: v })} label="Match against my CV" />
         </div>
+        </Resizable>
       </details>
 
       {/* Filters */}
       <details className="card group min-w-0 p-3" open>
         <summary className="label flex cursor-pointer list-none items-center gap-1 [&::-webkit-details-marker]:hidden"><ChevronRight size={13} className="group-open:rotate-90" /> Search</summary>
+        <Resizable id="sidebar-search">
         <div className="mt-3 space-y-3">
         <Field label="Sources" hint="Switch a category on or off; click its name to choose its sources.">
           <SourcePicker state={state} hasCv={hasCv} />
@@ -529,11 +516,13 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
           <Eraser size={12} /> Clear filters and results
         </button>
         </div>
+        </Resizable>
       </details>
       <SearchHistory />
       <TrackerPanel />
       <details className="card group p-3" open>
         <summary className="label flex cursor-pointer list-none items-center gap-1 [&::-webkit-details-marker]:hidden"><ChevronRight size={13} className="group-open:rotate-90" /> Job alerts</summary>
+        <Resizable id="sidebar-alerts">
         <div className="mt-2 space-y-2">
         <p className="text-[11px] text-muted">
           The Search button above includes Gmail alert jobs in the selected date window. Jobs judged before
@@ -549,15 +538,23 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
             Connect Gmail alerts
           </button>
         )}
-        {gmailWaiting && !gmailConnected && (
+        {gmailWaiting && !gmailHealthy && (
           <p className="flex items-center gap-1 text-[11px] text-muted">
-            <Loader2 size={12} className="animate-spin" /> Finish the Google sign-in in the new tab…
-            <button type="button" className="text-accent hover:underline" onClick={() => setGmailWaiting(false)}>
+            <Loader2 size={12} className="animate-spin" /> Finish the Google sign-in in your browser…
+            <button type="button" className="text-accent hover:underline" onClick={cancelGmail}>
               Cancel
             </button>
           </p>
         )}
-        {gmail.data?.connected && (
+        {gmail.data?.connected && gmail.data.problem && (
+          <div className="space-y-1 text-[11px]">
+            <p className="text-bad">Gmail needs reconnecting: {gmail.data.problem}</p>
+            <button type="button" className="btn-primary py-1 text-[12px]" onClick={connectGmail}>
+              Reconnect Gmail
+            </button>
+          </div>
+        )}
+        {gmailHealthy && gmail.data && (
           <div className="flex items-center justify-between gap-2 text-[11px]">
             <span className="truncate text-good">Connected: {gmail.data.account}</span>
             <button type="button" className="shrink-0 text-accent hover:underline" onClick={connectGmail}>
@@ -566,6 +563,7 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
           </div>
         )}
         </div>
+        </Resizable>
       </details>
       <Modal
         open={!!editingCV}

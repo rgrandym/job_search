@@ -27,21 +27,78 @@ export interface ClaudeCodeStatus extends CodexStatus {
   subscription: string | null;
 }
 
-export interface UsageWindow {
-  used_percent: number;
-  remaining_percent: number;
-  window_minutes: number | null;
+/** One plan window ("5h", "7d"), the same shape for every provider (backend `usage.UsageWindow`). */
+export interface PlanWindow {
+  name: string;
+  /** null: the plan did not say (Claude reports it only near the limit). */
+  used_percent: number | null;
   resets_at: number | null;
+  status: string | null;
 }
 
-export interface CodexUsage {
-  plan_type: string | null;
-  ordinary_usage_allowed: boolean | null;
-  primary: UsageWindow | null;
-  secondary: UsageWindow | null;
-  credits: { has_credits: boolean; unlimited: boolean; balance: string | null };
-  lifetime_tokens: number | null;
+export interface PlanWindows {
+  windows: PlanWindow[];
+  updated_at: number | null;
+  note: string;
+}
+
+export interface SpendRow {
+  provider: string;
+  model: string;
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  estimated: boolean;
+}
+
+/** A model on a provider at an effort (backend `connections.Route`). */
+export interface ModelRoute {
+  provider: Provider;
+  model: string;
+  effort: string | null;
+}
+
+/** Who serves a task now, and who takes over when its plan is spent. */
+export interface RoleView {
+  role: "quality" | "screening" | "profile" | "cv" | "letter";
+  label: string;
+  configured: ModelRoute;
+  replacement: ModelRoute | null;
+  /** The configured plan is spent and the replacement serves. */
+  switched: boolean;
+}
+
+export interface Connection {
+  id: Provider;
+  label: string;
+  billing: "plan" | "key";
+  ready: boolean;
+  roles: string[];
+  windows: PlanWindows | null;
+  exhausted_until: number | null;
+  spend_today: SpendRow[];
+  cost_today: number | null;
+  cost_month: number | null;
+}
+
+/** `GET /api/connections`: every model connection in one view. */
+export interface ConnectionsView {
+  connections: Connection[];
+  roles: RoleView[];
+  on_limit: OnLimit;
+  handover_threshold: number;
   updated_at: number;
+}
+
+export type OnLimit = "switch" | "ask";
+
+/** A plan ran out with work left undone: stop, continue on `replacement`, or wait. */
+export interface PlanLimit {
+  role: RoleView["role"];
+  label: string;
+  configured: ModelRoute;
+  resets_at: number;
+  replacement: ModelRoute | null;
 }
 
 /** Company job-board discovery (backend `company_discovery.DiscoveryStatus`). */
@@ -180,6 +237,8 @@ export interface JobVerdict {
   cap_reason: string | null;
   /** False: too little posting text to check its requirements (fetch or paste it). */
   requirements_checked: boolean;
+  /** "provider:model" that judged it (the other plan's when its own was spent). */
+  model?: string;
   /** Fit with the career intent (never changes the score; "against" caps priority). */
   alignment?: Alignment;
   alignment_note?: string;
@@ -377,6 +436,17 @@ export interface SkillEvidence {
   skill: string;
   level: "expert" | "proficient" | "familiar";
   evidence: string;
+  /** current: present role · recent: about five years · earlier ("" on older profiles). */
+  recency?: "current" | "recent" | "earlier" | "";
+}
+
+/** How a capability could carry the candidate into other fields (backend `ExpansionRoute`). */
+export interface ExpansionRoute {
+  capability: string;
+  opens: string[];
+  evidence: string[];
+  missing: string;
+  bridge: string;
 }
 
 export type FamilyTier = "core" | "progression" | "adjacent";
@@ -391,6 +461,8 @@ export interface RoleFamily {
   evidence: string[];
   gap: string;
   rationale: string;
+  /** How to present the candidate for these roles. */
+  positioning?: string;
   /** The user asked to explore this area (career intent). */
   requested: boolean;
   /** Set by code: why it is not searched. */
@@ -472,6 +544,46 @@ export interface TailoredCVView {
   report: TailorReport | null;
 }
 
+export type MatchClass = "direct" | "transferable" | "adjacent" | "needs_confirmation" | "not_evidenced";
+
+/** One job requirement and the CV evidence for it (backend `RequirementEvidence`). */
+export interface RequirementEvidence {
+  requirement: string;
+  priority: "essential" | "desirable";
+  match: MatchClass;
+  evidence: string[];
+  note: string;
+}
+
+/** How the CV presents the candidate for this job (backend `Positioning`). */
+export interface Positioning {
+  thesis: string;
+  differentiators: string[];
+  transfer: string;
+  level: string;
+}
+
+export type FitDimension = "function" | "domain" | "seniority" | "leadership" | "sector";
+
+/** The original and the tailored CV read for the same job (backend `FitComparison`). */
+export interface FitComparison {
+  before: number;
+  after: number;
+  dimensions: { name: FitDimension; before: number; after: number }[];
+  requirements_total: number;
+  requirements_before: number;
+  requirements_after: number;
+  keywords_before: number;
+  keywords_after: number;
+  first_page_before: number;
+  first_page_after: number;
+  impression_before: string;
+  impression_after: string;
+  worse: string[];
+}
+
+export type Audience = "auto" | "industry" | "academic";
+
 /** What tailoring did, shown under the job: coverage, keywords, headlines, rejections. */
 export interface TailorReport {
   document_id: string;
@@ -487,6 +599,11 @@ export interface TailorReport {
   trim: { allowed: boolean; reason: string } | null;
   left_out: string[];
   document_notes: string[];
+  positioning?: Positioning | null;
+  requirements?: RequirementEvidence[];
+  role_skills?: string[];
+  academic?: boolean;
+  fit_check?: FitComparison | null;
   rejected: number;
   rejections: { source_id: string; reason: string | null }[];
 }
@@ -507,6 +624,10 @@ export interface ProfileSummary {
   headline: string;
   seniority: string;
   years_experience: number;
+  /** What sets the level (autonomy, authority, people led, reach), with CV ids. */
+  seniority_evidence?: string[];
+  /** 2-3 sentences a recruiter would remember. */
+  pitch?: string;
   core_expertise: string[];
   key_skills: SkillEvidence[];
   domains: string[];
@@ -516,6 +637,8 @@ export interface ProfileSummary {
   transferable_strengths: string[];
   /** Every capability the CV evidences (technical, delivery, leadership, commercial, communication). */
   capabilities: string[];
+  /** Where the strongest capabilities could lead. */
+  expansion?: ExpansionRoute[];
   publications?: PublicationRecord | null;
   target_roles: string[];
   stretch_roles: string[];
@@ -590,20 +713,6 @@ export type SearchStreamEvent =
   | { type: "search_results"; outcome: SearchOutcome }
   | { type: "error"; message: string };
 
-export interface ClaudeLimitWindow {
-  window: string;
-  status: string | null;
-  resets_at: number | null;
-  utilization: number | null;
-  using_overage: boolean;
-  observed_at: number | null;
-}
-
-export interface ClaudeCodeUsage {
-  windows: ClaudeLimitWindow[];
-  updated_at: number | null;
-}
-
 export interface MatchReport {
   threshold: number;
   matches: MatchResult[];
@@ -656,6 +765,10 @@ export interface SearchOutcome {
   /** Shortlisted jobs not judged yet (stopped or failed batches): Continue judges them. */
   unscreened: number;
   history_id: string | null;
+  /** A plan ran out with jobs left unjudged: stop, switch or wait. */
+  limit?: PlanLimit | null;
+  /** Tasks the other plan took over because their own plan was spent. */
+  handovers?: string[];
   /** The progress lines, with seconds since the start (saved with the search). */
   progress_log?: string[];
   /** Role families searched: name -> tier. */
@@ -685,6 +798,12 @@ export interface LLMView {
   letter_effort: Effort;
   /** The letter model's own provider (null: `provider`). Used only with a letter model. */
   letter_provider: Provider | null;
+  /** A spent plan: switch to the other plan's equivalent model, or ask. */
+  on_limit: OnLimit;
+  /** Warn before a search once a plan window is this % used. */
+  handover_threshold: number;
+  /** Model id -> replacement on the other plan (overrides the automatic choice). */
+  fallback_models: Record<string, string>;
   key_set: boolean;
   ready: boolean;
   /** Credentials available for the provider that builds the profile. */
@@ -781,6 +900,8 @@ export type ChatEvent =
       output_tokens: number;
       estimated: boolean;
       purpose: string;
+      /** "provider:model" whose spent plan handed this call over. */
+      switched_from?: string | null;
     }
   | { type: "agent_message"; agent: string; depth: number; text: string; final: boolean }
   | { type: "tool_call"; agent: string; depth: number; id: string; tool: string; args: Record<string, unknown> }
@@ -803,5 +924,15 @@ export type ChatEvent =
   | { type: "history_updated" }
   | { type: "result_removed"; job_id: string }
   | { type: "models_updated" }
+  | { type: "handover"; from: { provider: Provider; model: string }; to: { provider: Provider; model: string }; reason: string }
+  | {
+      type: "limit_reached";
+      provider: Provider;
+      model: string;
+      resets_at: number;
+      replacement: { provider: Provider; model: string } | null;
+      /** The message the turn was answering, to send again. */
+      text: string;
+    }
   | { type: "done"; tokens: { input: number; output: number }; cancelled?: boolean }
   | { type: "error"; message: string };

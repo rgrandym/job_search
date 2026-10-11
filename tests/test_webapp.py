@@ -304,6 +304,58 @@ def test_all_sources_include_connected_gmail_and_report_each_source(
     assert gmail.status == "skipped" and "smart matching" in (gmail.detail or "")
 
 
+def test_retry_searches_only_the_failed_sources_and_adds_their_jobs(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.jobs.sources.base import SourceError
+    from src.services import history
+
+    down = {"adzuna"}
+
+    class Stub:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def fetch(self, query: SearchQuery) -> list[JobPosting]:
+            if self.name in down:
+                raise SourceError("service down")
+            if self.name == "reed":
+                return [JobPosting(id="reed:1", title="ML Engineer", company="Orbit AI")]
+            return [  # the same role as Reed's (left out), and one new job
+                JobPosting(id="adzuna:9", title="ML Engineer", company="Orbit AI"),
+                JobPosting(id="adzuna:2", title="Data Scientist", company="Helix Bio"),
+            ]
+
+    requested: list[list[str]] = []
+
+    def build_sources(names: list[str], **_: Any) -> Any:
+        requested.append(list(names))
+        return [Stub(name) for name in names], {}
+
+    monkeypatch.setattr(search_service, "build_sources", build_sources)
+    monkeypatch.setattr(ws, "llm_ready", lambda: False)
+    query = SearchQuery(sources=["reed", "adzuna"])
+    first = asyncio.run(run_search(ws, SearchRequest(query=query, smart=True)))
+    assert first.history_id and {s.name: s.status for s in first.sources}["adzuna"] == "failed"
+
+    down.clear()
+    out = asyncio.run(search_service.retry_sources(ws, first.history_id))
+    assert requested[-1] == ["adzuna"]  # Reed is not searched again
+    rows = {s.name: s for s in out.sources}
+    assert (rows["reed"].status, rows["adzuna"].status, rows["adzuna"].fetched) == (
+        "used",
+        "used",
+        2,
+    )
+    ids = sorted(r.job.id for r in out.report.all_results())
+    assert ids == ["adzuna:2", "reed:1"]  # the duplicate role is listed once
+    assert "adzuna" not in out.errors and out.fetched == first.fetched + 1
+    _, saved = history.open_entry(ws, first.history_id)  # the same search, updated in place
+    assert sorted(r.job.id for r in saved.report.all_results()) == ids
+    with pytest.raises(ValueError, match="No failed source"):
+        asyncio.run(search_service.retry_sources(ws, first.history_id))
+
+
 # ---------------------------------------------------------------- agent loop
 
 
@@ -540,11 +592,29 @@ def test_api_company_boards_status_and_update(
     assert "company" in client.get("/api/state").json()["sources"]["available"]
 
     modes: list[str] = []
-    monkeypatch.setattr(
-        company_discovery, "discover_companies", lambda _settings, mode: modes.append(mode)
-    )
+    stops: list[Any] = []
+
+    def discover(_settings: Any, mode: str, should_stop: Any) -> None:
+        modes.append(mode)
+        stops.append(should_stop)
+
+    monkeypatch.setattr(company_discovery, "discover_companies", discover)
     assert client.post("/api/companies/discover").json()["directory"] == "biopharmguy-uk"
     assert modes == ["stale"]  # Update re-checks new companies and results over 30 days old
+    assert not stops[0]()
+    assert client.post("/api/companies/discover/stop").status_code == 200
+    assert stops[0]()  # Stop ends the pass; what it found is kept
+
+
+def test_api_health_names_the_app_and_its_ui(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from src.web import app as webapp
+
+    monkeypatch.setattr(webapp, "DIST", tmp_path / "missing")
+    assert client.get("/api/health").json() == {"app": "job_search", "ui": False}
+    monkeypatch.setattr(webapp, "DIST", tmp_path)  # the Dock app loads the UI only when built
+    assert client.get("/api/health").json() == {"app": "job_search", "ui": True}
 
 
 def test_api_state_and_search(client: TestClient) -> None:
@@ -573,7 +643,16 @@ def test_gmail_oauth_connect_checks_browser_state(
         }
     )
     status = client.get("/api/gmail/status").json()
-    assert status == {"configured": True, "connected": False, "account": "alerts@example.com"}
+    assert status == {
+        "configured": True,
+        "connected": False,
+        "account": "alerts@example.com",
+        "problem": None,
+    }
+    with monkeypatch.context() as stale:  # a stored sign-in Google no longer accepts
+        stale.setattr(GmailAuth, "connected", property(lambda self: True))
+        stale.setattr(GmailAuth, "problem", lambda self: "Gmail sign-in has expired")
+        assert client.get("/api/gmail/status").json()["problem"] == "Gmail sign-in has expired"
     started = client.get("/api/gmail/connect", follow_redirects=False)
     assert started.status_code == 307
     auth_params = parse_qs(urlsplit(started.headers["location"]).query)
@@ -616,9 +695,7 @@ def test_api_file_download_is_confined(client: TestClient) -> None:
     assert client.get("/api/files/..%2F.env").status_code == 404
 
 
-def test_cv_revision_follows_changes_to_output_document(
-    client: TestClient, ws: Workspace
-) -> None:
+def test_cv_revision_follows_changes_to_output_document(client: TestClient, ws: Workspace) -> None:
     from docx import Document
 
     path = ws.output_dir / "cvs" / "updated.docx"
@@ -937,24 +1014,33 @@ def test_api_codex_login_and_status(client: TestClient, monkeypatch: pytest.Monk
     assert started == [True]
 
 
-def test_api_codex_usage(
+def test_api_connections_lists_roles_plans_and_spend(
     client: TestClient, ws: Workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from src.web import app as webapp
+    from src.core.llm import usage
 
-    ws.llm = ws.llm.model_copy(update={"provider": "codex"})
-    usage = {
-        "plan_type": "plus",
-        "ordinary_usage_allowed": True,
-        "primary": {"used_percent": 10, "remaining_percent": 90},
-        "secondary": None,
-        "credits": {"has_credits": False, "unlimited": False, "balance": "0"},
-        "lifetime_tokens": 1000,
-        "updated_at": 123,
-    }
-    monkeypatch.setattr(webapp, "codex_usage", lambda: usage)
+    ws.llm = ws.llm.model_copy(update={"provider": "anthropic"})
+    monkeypatch.setattr(ws, "provider_ready", lambda provider: provider == "anthropic")
+    usage.record_spend("anthropic", "claude-opus-5", 1_000_000, 0)
 
-    assert client.get("/api/codex/usage").json() == usage
+    view = client.get("/api/connections").json()
+
+    claude = next(c for c in view["connections"] if c["id"] == "anthropic")
+    assert claude["billing"] == "key" and claude["ready"] is True
+    assert "Screening" in claude["roles"]
+    assert claude["cost_today"] == 5.0  # 1M input tokens at $5 per 1M
+    assert [r["role"] for r in view["roles"]][:2] == ["quality", "screening"]
+    assert all(r["replacement"] is None for r in view["roles"])  # an API key is not a plan
+    assert view["on_limit"] == "switch"
+
+
+def test_handover_choice_survives_saving_the_models(client: TestClient, ws: Workspace) -> None:
+    llm = client.put("/api/llm/handover", json={"on_limit": "ask", "handover_threshold": 80}).json()
+    assert (llm["on_limit"], llm["handover_threshold"]) == ("ask", 80)
+    body = {"provider": ws.llm.provider, "quality_model": "q", "screening_model": "s"}
+    llm = client.put("/api/llm", json=body).json()  # the model form leaves the choice out
+    assert (llm["on_limit"], llm["handover_threshold"]) == ("ask", 80)
+    assert client.put("/api/llm/handover", json={"handover_threshold": 10}).status_code == 422
 
 
 def test_api_claude_code_provider(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

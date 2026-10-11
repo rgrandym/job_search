@@ -14,15 +14,23 @@ import hashlib
 import json
 import re
 from collections import Counter
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import BaseModel, TypeAdapter
 
 from src.core.llm_provider import LLMProvider
+from src.cv.claims import overclaim
 from src.cv.models import MasterCV, TailoredCV
 from src.jobs.models import ProfileSummary, RoleFamily, SearchIntent, SearchQuery
-from src.tools.search_tools import board_terms, role_words, shares_role_words, title_core
+from src.tools.search_tools import (
+    board_terms,
+    extract_numbers,
+    role_words,
+    shares_role_words,
+    title_core,
+)
 
 SUMMARY_SYSTEM = """You are the profile analyst of a job-search system. Read the candidate's \
 whole CV and write an accurate, evidence-based profile. A screening agent scores live \
@@ -49,7 +57,10 @@ reviewing and awards: counts, lead-author share, span, themes, the outputs most 
 the target roles, and what it signals to employers (recognised expertise in a field, \
 scientific writing, peer and KOL network, industry collaborations, translational impact). \
 Take counts from the document; write "about" when you estimate. null when there are none.
-3. Only then derive roles, from the capabilities rather than from past job titles alone.
+3. seniority_evidence: what sets their level, read from the work rather than titles or \
+years alone: autonomy, decision authority, people or teams led, organisational reach, budget \
+or commercial scope, stakeholder level; each with its ids. Never promote on a target title.
+4. Only then derive roles, from the capabilities rather than from past job titles alone.
 
 Rules:
 - Every claim must trace to the document. Never invent skills, experience, employers, \
@@ -59,12 +70,16 @@ transferable_strengths is experience that carries into other functions. Never le
 stand in for the first, and never drop it either: give 6-12 specific transferable strengths, \
 each naming its evidence.
 - key_skills.level: "expert" = used deeply/recently with results; "proficient" = solid \
-practical use; "familiar" = mentioned or light use. Cite the evidence briefly.
+practical use; "familiar" = mentioned or light use. Cite the evidence briefly. \
+key_skills.recency: "current" (present role), "recent" (about five years) or "earlier". \
+Possessing a skill is not using it at that level now: keep the two apart.
 - seniority and years_experience: current level, job family and total relevant years.
 - domains: technical domains and sectors/organisation types (pharma, biotech, CRO, CDMO, \
 academia, services, ...). leadership: line, matrix and external leadership with team size, \
 budget and decision scope. qualifications: degrees, PhD, registrations, certifications. \
-achievements: the 3-6 strongest results, quantified where the document quantifies them.
+achievements: the 3-6 strongest, each as action, scope, the candidate's own contribution \
+and outcome; quantified only where the document quantifies them, otherwise the outcome in \
+words. Never turn taking part into leading or exposure into ownership.
 - target_roles: 3-5 obvious titles plus 3-6 credible adjacent ones, written as employers \
 advertise them (short, e.g. "Principal Scientist", "Head of Cell Biology"), including \
 equivalent titles a recruiter would consider. Do not force the candidate into one category.
@@ -88,7 +103,9 @@ experience of the new function may be missing: that is the `gap`, not a reason t
 family out. Each family: 2-4 titles as employers advertise them, 1-3 short domain terms, \
 `evidence` = ids in square brackets showing the transferable work ([role-id], [bullet-id] \
 or [src-N] lines, e.g. publications; at least one for progression, two for adjacent), the \
-main `gap`, and a one-line `rationale` a hiring manager would accept. Propose an adjacent \
+main `gap`, a one-line `rationale` a hiring manager would accept, and `positioning`: 2-3 \
+sentences on how to present the candidate for these roles (what to lead with, how their \
+experience reads in this function). Propose an adjacent \
 family only if a hiring manager would genuinely shortlist this candidate; never one that \
 needs a licence, registration or degree they lack.
 - career_intent: the candidate's own goals. For every target area, return one adjacent \
@@ -96,6 +113,12 @@ family with requested=true under the same evidence rules; if the CV offers no cr
 route in, still return it, with the evidence you found and a gap saying what is missing. Use \
 the intent to orient families and wording, never to change the facts. Areas they want to \
 avoid belong in not_a_fit.
+- expansion: 3-6 routes showing how the strongest capabilities could carry the candidate \
+into other fields or functions: the capability, the fields it `opens`, its `evidence` ids, \
+what is still `missing`, and a realistic `bridge` (a first role or step). Wider than the \
+searched families, still grounded in the evidence.
+- pitch: 2-3 sentences a recruiter would remember: who they are, what sets them apart, where \
+they add value. Compelling through specifics, not adjectives: no superlatives.
 - summary: 4-6 sentences a recruiter would find compelling and accurate: who they are, depth \
 and breadth, the publication record if any, and the directions they credibly fit."""
 
@@ -177,6 +200,46 @@ def _family_problem(fam: RoleFamily) -> str | None:
     return None
 
 
+def _id_check(cv: MasterCV | None, source_ids: set[str] | None) -> Callable[[str], bool]:
+    """Whether an evidence id exists: a CV id, or a [src-N] line of the document the summary
+    was built from (any src id on later re-checks, which have no document)."""
+    ids = _cv_ids(cv) if cv is not None else set()
+
+    def known(i: str) -> bool:
+        if SOURCE_ID.fullmatch(i):
+            return cv is not None and (source_ids is None or i in source_ids)
+        return i in ids
+
+    return known
+
+
+def check_claims(
+    summary: ProfileSummary,
+    cv: MasterCV | None,
+    source_text: str | None = None,
+    source_ids: set[str] | None = None,
+) -> ProfileSummary:
+    """What code can verify in the profile's prose: an achievement or pitch with a number the
+    CV does not have is dropped (so is a pitch with stock superlatives), and expansion routes
+    keep only evidence ids that exist (a route without any is dropped)."""
+    if cv is None:
+        return summary
+    numbers = extract_numbers(f"{profile_cv_text(cv)}\n{source_text or ''}")
+    known = _id_check(cv, source_ids)
+    achievements = [a for a in summary.achievements if extract_numbers(a) <= numbers]
+    pitch = summary.pitch
+    if overclaim(pitch) or not extract_numbers(pitch) <= numbers:
+        pitch = ""
+    routes = []
+    for route in summary.expansion:
+        evidence = [i.strip("[] ") for i in route.evidence if known(i.strip("[] "))]
+        if evidence:
+            routes.append(route.model_copy(update={"evidence": evidence}))
+    return summary.model_copy(
+        update={"achievements": achievements, "pitch": pitch, "expansion": routes}
+    )
+
+
 def check_families(
     summary: ProfileSummary,
     cv: MasterCV | None,
@@ -190,13 +253,7 @@ def check_families(
     Idempotent: re-running it on a stored summary with the same CV and intent changes nothing.
     `source_ids` are the original document's [src-N] lines when the summary is built; later
     re-checks (without the document) keep the src ids that were verified then."""
-    ids = _cv_ids(cv) if cv is not None else set()
-
-    def known(i: str) -> bool:
-        if SOURCE_ID.fullmatch(i):
-            return cv is not None and (source_ids is None or i in source_ids)
-        return i in ids
-
+    known = _id_check(cv, source_ids)
     asked = bool(intent and intent.target_areas)
     counts = dict.fromkeys(MAX_FAMILIES, 0)
     out: list[RoleFamily] = []
@@ -235,7 +292,9 @@ def profile_markdown(rec: ProfileRecord) -> str:
     s = rec.summary
     family = "General profile" if rec.role_family == "any" else rec.role_family
     out = [f"# {s.headline}", "", f"*{family} · from {rec.cv_name or rec.cv_id or 'CV'}*", ""]
-    out += [f"**{s.seniority}** · {s.years_experience:g} years of experience", "", s.summary]
+    out += [f"**{s.seniority}** · {s.years_experience:g} years of experience", ""]
+    out += [f"> {s.pitch}", ""] if s.pitch else []
+    out.append(s.summary)
 
     def section(title: str, items: list[str]) -> None:
         if items:
@@ -253,12 +312,27 @@ def profile_markdown(rec: ProfileRecord) -> str:
     families = [
         f"**{f.name}** ({f.tier}): {', '.join(f.titles)}"
         + (f". {f.rationale}" if f.rationale else "")
+        + (f" How to present: {f.positioning}" if f.positioning else "")
         + (f" Gap: {f.gap}" if f.gap else "")
         + (f" *Not searched: {f.rejected}*" if f.rejected else "")
         for f in s.role_families
     ]
     section("Role families", families)
-    section("Key skills", [f"{k.skill} ({k.level}): {k.evidence}" for k in s.key_skills])
+    routes = [
+        f"**{r.capability}** → {', '.join(r.opens)}"
+        + (f". Still to show: {r.missing}" if r.missing else "")
+        + (f" First step: {r.bridge}" if r.bridge else "")
+        for r in s.expansion
+    ]
+    section("Where the experience could lead", routes)
+    section("What sets the level", s.seniority_evidence)
+    section(
+        "Key skills",
+        [
+            f"{k.skill} ({k.level}{f', {k.recency}' if k.recency else ''}): {k.evidence}"
+            for k in s.key_skills
+        ],
+    )
     for title, items in [
         ("Core expertise", s.core_expertise),
         ("Capabilities", s.capabilities),
@@ -274,6 +348,32 @@ def profile_markdown(rec: ProfileRecord) -> str:
     ]:
         section(title, items)
     return "\n".join(out).strip() + "\n"
+
+
+def profile_brief(s: ProfileSummary, family: str | None = None) -> str:
+    """The profile as CV tailoring reads it: who the candidate is, what sets their level,
+    their strengths and how they transfer, and the role family this job was found under."""
+    lines = [f"headline: {s.headline}", f"level: {s.seniority}, {s.years_experience:g} years"]
+    lines += [f"pitch: {s.pitch}"] if s.pitch else []
+    for title, items in [
+        ("what sets the level", s.seniority_evidence),
+        ("core expertise", s.core_expertise),
+        ("transferable strengths", s.transferable_strengths),
+        ("capabilities", s.capabilities),
+        ("achievements", s.achievements),
+    ]:
+        if items:
+            lines.append(f"{title}: " + "; ".join(items))
+    if (p := s.publications) is not None and p.summary:
+        lines.append(f"publications: {p.summary} " + "; ".join(p.signals))
+    fam = next((f for f in s.role_families if family and f.name == family), None)
+    if fam is not None:
+        lines.append(
+            f"this job's role family: {fam.name} ({fam.tier}). {fam.rationale} "
+            f"{fam.positioning} Gap: {fam.gap or 'none stated'}. "
+            f"Evidence: {', '.join(fam.evidence)}"
+        )
+    return "\n".join(line.strip() for line in lines)
 
 
 def profile_filename(rec: ProfileRecord) -> str:
@@ -487,6 +587,7 @@ def summarize_profile(
     prompt = search + intent_text(intent) + body
     summary = llm.generate(system=SUMMARY_SYSTEM, prompt=prompt, output_model=ProfileSummary)
     summary = check_families(summary, master, intent, source_ids or set())
+    summary = check_claims(summary, master, source_text, source_ids or set())
     memory.put(owner, family, summary, fp, intent_fingerprint(intent))
     return summary, False
 

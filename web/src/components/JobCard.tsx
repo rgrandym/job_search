@@ -6,8 +6,9 @@ import type { Rejection } from "../lib/api";
 import type { FitDimensions, JobStatus, JobVerdict, MatchResult, OutcomeStage, UserLabel } from "../lib/types";
 import { cn, money, scoreColor } from "../lib/utils";
 import { useSearch } from "../stores/searchStore";
-import { TaskProgress, useTaskId } from "./TaskProgress";
+import { TaskError, TaskProgress, useTaskId } from "./TaskProgress";
 import { TailoredCVPanel } from "./TailoredCVPanel";
+import { FitCheckDetails, FitCheckSummary, PositioningDetails } from "./TailorInsights";
 
 const METRICS = [
   ["title", "Title & level"],
@@ -400,6 +401,7 @@ export function JobCard({
   const [reportOpen, setReportOpen] = useState(true);
   const [emphasis, setEmphasis] = useState<"auto" | "leadership" | "hands_on">("auto");
   const [level, setLevel] = useState<"auto" | "senior" | "junior">("auto");
+  const [audience, setAudience] = useState<"auto" | "industry" | "academic">("auto");
   const [documentsOpen, setDocumentsOpen] = useState(false);
   const qc = useQueryClient();
   const setTracking = useSearch((s) => s.setTracking);
@@ -407,7 +409,7 @@ export function JobCard({
   const letterTask = useTaskId();
   const tailor = useMutation({
     meta: { syncLists: true },
-    mutationFn: () => api.tailor(job.id, template, result, emphasis, level, length, tailorTask.next()),
+    mutationFn: () => api.tailor(job.id, template, result, emphasis, level, length, tailorTask.next(), audience),
     onSuccess: (data) => {
       setHeadlineChoice(null);
       setDocumentsOpen(true);
@@ -516,6 +518,7 @@ export function JobCard({
                 Checked twice
               </span>
             )}
+            {verdict?.model && <JudgedBy model={verdict.model} />}
             {verdict?.from_memory && (
               <span className="chip shrink-0 text-faint" title="Judged in an earlier search with the same profile and model: same verdict">
                 Judged before
@@ -646,6 +649,11 @@ export function JobCard({
               <option value="senior">More senior emphasis</option>
               <option value="junior">More junior emphasis</option>
             </select>
+            <select aria-label="CV audience" title="Academic: worded as a research profile, with education and publications before experience (sections you already have, moved whole). Automatic: academic when the job is an academic post." className="input w-auto py-1 text-[12px]" value={audience} onChange={(e) => setAudience(e.target.value as typeof audience)}>
+              <option value="auto">Audience: automatic</option>
+              <option value="industry">Industry</option>
+              <option value="academic">Academic</option>
+            </select>
             <button className="btn-ghost py-1 text-[12px]" disabled={tailor.isPending} onClick={() => tailor.mutate()}>
               {tailor.isPending ? <Loader2 size={12} className="animate-spin" /> : <FileText size={12} />}
               Tailor CV
@@ -684,6 +692,7 @@ export function JobCard({
               Tailored {new Date(savedDraft.created_at).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}
             </span>
           )}
+          <FitCheckSummary check={report.fit_check} />
           <span className="text-muted">Word keyword coverage {report.source_ats_keyword_coverage == null ? "" : `${Math.round(report.source_ats_keyword_coverage * 100)}% original → `}{Math.round((report.ats?.keyword_coverage ?? report.keyword_coverage) * 100)}% tailored · review the wording and claims</span>
           <button
             className="ml-auto flex items-center gap-1 text-muted hover:text-fg"
@@ -694,6 +703,11 @@ export function JobCard({
             Report <ChevronDown size={12} className={cn("transition-transform", reportOpen && "rotate-180")} />
           </button>
           {reportOpen && <>
+          {report.fit_check && <FitCheckDetails check={report.fit_check} />}
+          <PositioningDetails positioning={report.positioning} requirements={report.requirements} />
+          {!!report.role_skills?.length && (
+            <p className="basis-full text-[11px] text-faint">Added under your summary: Relevant skills for this role: {report.role_skills.join(" · ")}</p>
+          )}
           {report.missing_keywords.length > 0 && (
             <span className="min-w-0 text-faint" title="Job keywords not found word for word in the tailored CV. Requirements written as sentences are judged by the match verdict, not here. If your experience covers one, add it truthfully to the Master CV.">
               Keywords not found word for word: {report.missing_keywords.join(", ")}
@@ -761,7 +775,7 @@ export function JobCard({
         </div>
       )}
       {tailor.isPending && <TaskProgress id={tailorTask.id} className="mt-2" />}
-      {tailor.error && <p className="mt-2 text-[12px] text-bad">{(tailor.error as Error).message}</p>}
+      <TaskError error={tailor.error} className="mt-2 text-[12px]" />
       {documentsOpen && <TailoredCVPanel jobId={job.id} result={result} hasCv={canTailor} letterPending={letter.isPending} onLetter={(id) => letter.mutate(id)} />}
       {letter.data && (
         <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md bg-surface p-2 text-[12px]">
@@ -773,7 +787,7 @@ export function JobCard({
         </div>
       )}
       {letter.isPending && <TaskProgress id={letterTask.id} className="mt-2" />}
-      {letter.error && <p className="mt-2 text-[12px] text-bad">{(letter.error as Error).message}</p>}
+      <TaskError error={letter.error} className="mt-2 text-[12px]" />
 
       {open && (
         <div className="mt-3 space-y-1.5 border-t border-border pt-3">
@@ -815,5 +829,21 @@ export function JobCard({
         </div>
       )}
     </article>
+  );
+}
+
+/** A verdict from another plan's model (its own plan was spent mid-search). */
+function JudgedBy({ model }: { model: string }) {
+  const view = useQuery({ queryKey: ["connections"], queryFn: api.connections, staleTime: 60_000 });
+  const own = new Set(
+    (view.data?.roles ?? [])
+      .filter((r) => r.role === "screening" || r.role === "quality")
+      .map((r) => `${r.configured.provider}:${r.configured.model}`),
+  );
+  if (!view.data || own.has(model)) return null;
+  return (
+    <span className="chip shrink-0 text-warn" title={`Judged by ${model}: the configured plan was spent, so the other plan's model of the same standing took over`}>
+      by {model.split(":").slice(1).join(":")}
+    </span>
   );
 }

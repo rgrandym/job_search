@@ -2,49 +2,271 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Design tokens. Change the theme here, not in components. */
+/* Design tokens. Change themes here, not in components. A theme (`data-theme`, listed in
+   src/lib/themes.ts) sets the palette; its scheme (`data-scheme`) sets what light and dark
+   themes share: native controls, the CV desk and the activity panel's agent colours. */
 :root,
-[data-theme="dark"] {
-  --bg: #0b0d12;
-  --bg-panel: #11141b;
-  --bg-surface: #181c25;
-  --border: #252a36;
-  --text-primary: #e8ebf2;
-  --text-secondary: #a9b0c0;
-  --text-muted: #6b7386;
-  --accent: #60a5fa;
-  --accent-bg: rgba(96, 165, 250, 0.12);
-  --good: #34d399;
-  --warn: #fbbf24;
-  --bad: #f87171;
+[data-scheme="light"] {
   --cv-paper: #ffffff;
   --cv-ink: #1f2937;
   --cv-rule: #1f3864;
   --cv-hint: #64748b;
   --cv-hover: #eef3fb;
-  --cv-desk: #1c2029;
+  --cv-desk: #e3e1da;
+  --agent-assistant: #c6613f;
+  --agent-scout: #3a78c2;
+  --agent-reader: #1f8a8a;
+  --agent-screener: #2f8a5c;
+  --agent-reviewer: #b5701f;
+  --agent-profile: #7c5cd6;
+  --agent-writer: #9b4fd1;
+  --agent-letter: #cf3f8a;
+  color-scheme: light;
+}
+[data-scheme="dark"] {
+  --cv-paper: #ffffff;
+  --cv-ink: #1f2937;
+  --cv-rule: #1f3864;
+  --cv-hint: #64748b;
+  --cv-hover: #eef3fb;
+  --cv-desk: #1c1b19;
+  --agent-assistant: #d97757;
+  --agent-scout: #5b9be0;
+  --agent-reader: #3aa5a5;
+  --agent-screener: #44b07a;
+  --agent-reviewer: #d6923a;
+  --agent-profile: #a78bfa;
+  --agent-writer: #c084fc;
+  --agent-letter: #f472b6;
   color-scheme: dark;
 }
-[data-theme="light"] {
-  --bg: #f4f6fa;
-  --bg-panel: #ffffff;
-  --bg-surface: #eef1f6;
-  --border: #dde2ea;
-  --text-primary: #111827;
-  --text-secondary: #4b5563;
-  --text-muted: #8a93a3;
-  --accent: #2563eb;
-  --accent-bg: rgba(37, 99, 235, 0.08);
-  --good: #059669;
-  --warn: #b45309;
-  --bad: #dc2626;
-  --cv-paper: #ffffff;
-  --cv-ink: #1f2937;
-  --cv-rule: #1f3864;
-  --cv-hint: #64748b;
-  --cv-hover: #eef3fb;
-  --cv-desk: #e3e6eb;
-  color-scheme: light;
+:root,
+[data-theme="claude-light"] {
+  --bg: #F0EFEA;
+  --bg-panel: #FAF9F5;
+  --bg-surface: #E8E6DC;
+  --border: #D9D6CC;
+  --text-primary: #141413;
+  --text-secondary: #3D3D3A;
+  --text-muted: #73726C;
+  --accent: #C6613F;
+  --accent-bg: rgba(198, 97, 63, 0.10);
+  --accent-fg: #FFFFFF;
+  --good: #3F7D3A;
+  --warn: #A15C07;
+  --bad: #B53333;
+}
+[data-theme="claude-dark"] {
+  --bg: #1F1E1D;
+  --bg-panel: #262624;
+  --bg-surface: #30302E;
+  --border: #3E3E38;
+  --text-primary: #F5F4EE;
+  --text-secondary: #C2C0B6;
+  --text-muted: #8A8880;
+  --accent: #D97757;
+  --accent-bg: rgba(217, 119, 87, 0.14);
+  --accent-fg: #141413;
+  --good: #7FB069;
+  --warn: #E0A84F;
+  --bad: #E5726A;
+}
+[data-theme="manilla"] {
+  --bg: #EFE6D2;
+  --bg-panel: #FAF5EA;
+  --bg-surface: #E8DCC2;
+  --border: #D8CBAE;
+  --text-primary: #2B2118;
+  --text-secondary: #5A4A3A;
+  --text-muted: #85745F;
+  --accent: #B35C3D;
+  --accent-bg: rgba(179, 92, 61, 0.10);
+  --accent-fg: #FFFFFF;
+  --good: #4E7A35;
+  --warn: #9A5B0B;
+  --bad: #A83A2E;
+}
+[data-theme="kraft"] {
+  --bg: #221C17;
+  --bg-panel: #2B241E;
+  --bg-surface: #352C25;
+  --border: #4A3E33;
+  --text-primary: #F2E8DA;
+  --text-secondary: #CDBBA5;
+  --text-muted: #94826E;
+  --accent: #D4A27F;
+  --accent-bg: rgba(212, 162, 127, 0.14);
+  --accent-fg: #221C17;
+  --good: #9CBF7A;
+  --warn: #E6B35A;
+  --bad: #E07B6E;
+}
+[data-theme="cloud"] {
+  --bg: #EEEEEC;
+  --bg-panel: #FBFBFA;
+  --bg-surface: #E4E4E1;
+  --border: #D3D3CF;
+  --text-primary: #191919;
+  --text-secondary: #40403E;
+  --text-muted: #6E6E6A;
+  --accent: #2F7FD3;
+  --accent-bg: rgba(47, 127, 211, 0.10);
+  --accent-fg: #FFFFFF;
+  --good: #2E7D4F;
+  --warn: #A0620E;
+  --bad: #BF4D43;
+}
+[data-theme="slate"] {
+  --bg: #161719;
+  --bg-panel: #1E1F22;
+  --bg-surface: #27292D;
+  --border: #36393F;
+  --text-primary: #ECECEA;
+  --text-secondary: #B8B9B5;
+  --text-muted: #85878B;
+  --accent: #61AAF2;
+  --accent-bg: rgba(97, 170, 242, 0.14);
+  --accent-fg: #0E1116;
+  --good: #5CC08A;
+  --warn: #E8B04B;
+  --bad: #EF7A70;
+}
+[data-theme="sage"] {
+  --bg: #ECEFE8;
+  --bg-panel: #F9FAF6;
+  --bg-surface: #E1E6DA;
+  --border: #CDD5C4;
+  --text-primary: #1C211A;
+  --text-secondary: #3E4A3A;
+  --text-muted: #6F7A69;
+  --accent: #5E7D45;
+  --accent-bg: rgba(94, 125, 69, 0.12);
+  --accent-fg: #FFFFFF;
+  --good: #2F7A5A;
+  --warn: #A3630A;
+  --bad: #B5443A;
+}
+[data-theme="colorblind-light"] {
+  --bg: #F0EFEA;
+  --bg-panel: #FAF9F5;
+  --bg-surface: #E8E6DC;
+  --border: #D9D6CC;
+  --text-primary: #141413;
+  --text-secondary: #3D3D3A;
+  --text-muted: #73726C;
+  --accent: #A6427E;
+  --accent-bg: rgba(166, 66, 126, 0.10);
+  --accent-fg: #FFFFFF;
+  --good: #0072B2;
+  --warn: #9A6A00;
+  --bad: #D55E00;
+}
+[data-theme="colorblind-dark"] {
+  --bg: #1F1E1D;
+  --bg-panel: #262624;
+  --bg-surface: #30302E;
+  --border: #3E3E38;
+  --text-primary: #F5F4EE;
+  --text-secondary: #C2C0B6;
+  --text-muted: #8A8880;
+  --accent: #CC79A7;
+  --accent-bg: rgba(204, 121, 167, 0.14);
+  --accent-fg: #141413;
+  --good: #56B4E9;
+  --warn: #F0E442;
+  --bad: #F0884A;
+}
+[data-theme="contrast-dark"] {
+  --bg: #000000;
+  --bg-panel: #0A0A0A;
+  --bg-surface: #161616;
+  --border: #5A5A5A;
+  --text-primary: #FFFFFF;
+  --text-secondary: #E6E6E6;
+  --text-muted: #BDBDBD;
+  --accent: #FFB38A;
+  --accent-bg: rgba(255, 179, 138, 0.18);
+  --accent-fg: #000000;
+  --good: #7CFF9B;
+  --warn: #FFE066;
+  --bad: #FF8A80;
+}
+[data-theme="charcoal"] {
+  --bg: #1A1A1A;
+  --bg-panel: #232323;
+  --bg-surface: #2D2D2D;
+  --border: #3A3A3A;
+  --text-primary: #EDEDED;
+  --text-secondary: #BDBDBD;
+  --text-muted: #8C8C8C;
+  --accent: #D97757;
+  --accent-bg: rgba(217, 119, 87, 0.14);
+  --accent-fg: #141413;
+  --good: #7FB069;
+  --warn: #E0A84F;
+  --bad: #E5726A;
+}
+[data-theme="charcoal-colorblind-dark"] {
+  --bg: #1A1A1A;
+  --bg-panel: #232323;
+  --bg-surface: #2D2D2D;
+  --border: #3A3A3A;
+  --text-primary: #EDEDED;
+  --text-secondary: #BDBDBD;
+  --text-muted: #8C8C8C;
+  --accent: #CC79A7;
+  --accent-bg: rgba(204, 121, 167, 0.15);
+  --accent-fg: #141414;
+  --good: #56B4E9;
+  --warn: #F0E442;
+  --bad: #F0884A;
+}
+[data-theme="charcoal-colorblind-light"] {
+  --bg: #E9E9E9;
+  --bg-panel: #F7F7F7;
+  --bg-surface: #DEDEDE;
+  --border: #C9C9C9;
+  --text-primary: #1A1A1A;
+  --text-secondary: #3D3D3D;
+  --text-muted: #666666;
+  --accent: #A6427E;
+  --accent-bg: rgba(166, 66, 126, 0.10);
+  --accent-fg: #FFFFFF;
+  --good: #0072B2;
+  --warn: #8A6000;
+  --bad: #C25100;
+}
+/* The research app's colour-blind-friendly pair (claude_research), the same values: blue for
+   good and orange for bad, so the two never rely on red against green. */
+[data-theme="research-dark-cb"] {
+  --bg: #17181b;
+  --bg-panel: #1e2024;
+  --bg-surface: #25272c;
+  --border: #383b42;
+  --text-primary: #ebecef;
+  --text-secondary: #b0b3ba;
+  --text-muted: #80838b;
+  --accent: #79a8f2;
+  --accent-bg: #1f2c42;
+  --accent-fg: #0f1115;
+  --good: #6fb3ef;
+  --warn: #e6c14d;
+  --bad: #f29a4a;
+}
+[data-theme="research-light-cb"] {
+  --bg: #fafafa;
+  --bg-panel: #f0f1f3;
+  --bg-surface: #ffffff;
+  --border: #dcdee3;
+  --text-primary: #1c1d20;
+  --text-secondary: #55585f;
+  --text-muted: #8a8d94;
+  --accent: #2b62b8;
+  --accent-bg: #e4ecf8;
+  --accent-fg: #ffffff;
+  --good: #1f6fb2;
+  --warn: #8a6d00;
+  --bad: #c25400;
 }
 
 html, body, #root { height: 100%; }
@@ -61,7 +283,7 @@ body { background: var(--bg); color: var(--text-primary); font-size: 13px; }
     @apply inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-[13px]
            font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50;
   }
-  .btn-primary { @apply btn bg-accent text-white hover:brightness-110; }
+  .btn-primary { @apply btn bg-accent text-accent-fg hover:brightness-110; }
   .btn-ghost { @apply btn border border-border bg-surface text-muted hover:text-fg; }
   .chip { @apply inline-flex items-center gap-1 rounded-full bg-surface px-2 py-0.5 text-[11px] text-muted; }
   .scroll-thin { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
@@ -105,3 +327,42 @@ body { background: var(--bg); color: var(--text-primary); font-size: 13px; }
 .cv-evidence { margin-top: 1px; color: var(--cv-hint); font-size: 10px; }
 .cv-evidence summary { cursor: pointer; width: max-content; opacity: 0.6; }
 .cv-evidence[open] summary, li:hover .cv-evidence summary { opacity: 1; }
+
+/* Activity panel: a running agent's track is striped and moving; its emoji rides the front of
+   the track; the stepper's walker paces toward the next step; a finished agent fades out. */
+.lane-running {
+  background-image: linear-gradient(45deg, rgba(255, 255, 255, 0.28) 25%, transparent 25%, transparent 50%, rgba(255, 255, 255, 0.28) 50%, rgba(255, 255, 255, 0.28) 75%, transparent 75%, transparent);
+  background-size: 10px 10px;
+  animation: lane-stripes 0.8s linear infinite;
+}
+@keyframes lane-stripes {
+  from { background-position: 0 0; }
+  to { background-position: 10px 0; }
+}
+.walker {
+  left: 0;
+  animation: walker 2.6s ease-in-out infinite alternate;
+}
+@keyframes walker {
+  from { left: 0; transform: translateX(0); }
+  to { left: 100%; transform: translateX(-100%); }
+}
+.rider {
+  transform: translateX(-50%);
+  transition: left 1.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.rider-live { animation: rider-bob 0.7s ease-in-out infinite alternate; }
+@keyframes rider-bob {
+  from { transform: translate(-50%, 0); }
+  to { transform: translate(-50%, -2px); }
+}
+.track-fill { transition: width 1.2s cubic-bezier(0.22, 1, 0.36, 1); }
+.agent-leaving { animation: agent-leaving 5s ease-in forwards; }
+@keyframes agent-leaving {
+  0%, 55% { opacity: 1; }
+  100% { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lane-running, .walker, .rider-live, .agent-leaving { animation: none; }
+  .rider, .track-fill { transition: none; }
+}

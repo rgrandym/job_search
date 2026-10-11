@@ -12,9 +12,11 @@ import html
 import json
 import logging
 import secrets
+import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -41,9 +43,17 @@ from pydantic import BaseModel, Field, SecretStr
 from src.agents import chat, mcp
 from src.core import progress
 from src.core.config import PROJECT_ROOT, LLMProviderName
-from src.core.llm import LLMConfig, LLMError, ModelUsage, available_models, claude_code_backend
+from src.core.llm import (
+    LLMConfig,
+    LLMError,
+    ModelUsage,
+    available_models,
+    claude_code_backend,
+    fallback,
+)
+from src.core.llm.calls import call_group, cancel_group
 from src.core.llm.catalog import ModelInfo
-from src.core.llm.codex_backend import codex_status, codex_usage, start_login
+from src.core.llm.codex_backend import codex_status, start_login
 from src.cv.models import MasterCV, TailoredCV, TailoredCVEdits, TailoredDocument
 from src.jobs.fetcher import SELECTABLE_SOURCES, SOURCE_CATALOG, build_sources
 from src.jobs.models import (
@@ -76,6 +86,7 @@ from src.services import (
     tailored_documents,
     tracker,
 )
+from src.services import connections as connections_service
 from src.services.search_service import SearchOutcome, SearchRequest, get_summary, run_search
 from src.services.workspace import Workspace, get_workspace
 
@@ -86,6 +97,12 @@ _GMAIL_PENDING: dict[str, tuple[str, float]] = {}
 
 
 # ------------------------------------------------------------------ state & config
+
+
+@app.get("/api/health")
+def health() -> dict[str, Any]:
+    """Cheap check for the Dock app: is this backend ours, and does it serve the built UI?"""
+    return {"app": "job_search", "ui": DIST.exists()}
 
 
 def _llm_view() -> dict[str, Any]:
@@ -143,16 +160,20 @@ def state() -> dict[str, Any]:
 
 @app.get("/api/gmail/status")
 def gmail_status() -> dict[str, Any]:
-    """Report whether the dedicated Gmail account is ready, without exposing tokens."""
+    """Report whether the dedicated Gmail account is ready, without exposing tokens.
+    `problem` says why a stored connection no longer works (the user should reconnect)."""
     auth = GmailAuth(get_workspace().settings)
     return {
         "configured": auth.configured,
         "connected": auth.connected,
         "account": auth.settings.gmail_account,
+        "problem": auth.problem(),
     }
 
 
 _DISCOVERY_TASKS: set[asyncio.Task[None]] = set()
+# The discovery pass the Update button started: its stop flag and call group.
+_DISCOVERY_STOP: list[tuple[threading.Event, str]] = []
 
 
 @app.get("/api/companies/status")
@@ -202,18 +223,39 @@ async def companies_discover(
     """Start a discovery pass in the background (Update button); poll the status route."""
     settings = get_workspace().settings
     if not company_discovery.status(settings).running:
+        stop = threading.Event()
+        group = f"discovery-{uuid.uuid4().hex}"
+        _DISCOVERY_STOP[:] = [(stop, group)]
 
         async def run() -> None:
+            token = call_group.set(group)  # Stop cuts off its requests in flight
             try:
-                await asyncio.to_thread(company_discovery.discover_companies, settings, mode=mode)
+                await asyncio.to_thread(
+                    company_discovery.discover_companies,
+                    settings,
+                    mode=mode,
+                    should_stop=stop.is_set,
+                )
             except SourceError as exc:  # recorded in the status for the UI
-                log.warning("company discovery failed: %s", exc)
+                if not stop.is_set():
+                    log.warning("company discovery failed: %s", exc)
+            finally:
+                call_group.reset(token)
 
         task = asyncio.create_task(run())
         _DISCOVERY_TASKS.add(task)
         task.add_done_callback(_DISCOVERY_TASKS.discard)
         await asyncio.sleep(0.05)  # let the pass take its lock, so the status says running
     return company_discovery.status(settings).model_dump(mode="json")
+
+
+@app.post("/api/companies/discover/stop")
+def companies_discover_stop() -> dict[str, Any]:
+    """Stop the running discovery pass now; the job boards found so far are kept."""
+    for stop, group in _DISCOVERY_STOP:
+        stop.set()
+        cancel_group(group)
+    return company_discovery.status(get_workspace().settings).model_dump(mode="json")
 
 
 @app.get("/api/gmail/connect")
@@ -309,6 +351,10 @@ class LLMUpdate(BaseModel):
     letter_model: str = ""  # empty: letters use the CV model, else the quality model
     letter_effort: Effort = "high"
     letter_provider: LLMProviderName | None = None  # None: the main provider
+    # Left out (None): kept as they are, so the model form never resets the handover choice.
+    on_limit: Literal["switch", "ask"] | None = None
+    handover_threshold: int | None = Field(None, ge=50, le=100)
+    fallback_models: dict[str, str] | None = None
     api_key: str | None = None
     profile_api_key: str | None = None
     cv_api_key: str | None = None
@@ -317,13 +363,31 @@ class LLMUpdate(BaseModel):
 
 @app.put("/api/llm")
 def update_llm(body: LLMUpdate) -> dict[str, Any]:
+    keys = {"api_key", "profile_api_key", "cv_api_key", "letter_api_key"}
+    update = body.model_dump(exclude=keys)
+    for name in ("on_limit", "handover_threshold", "fallback_models"):
+        if update[name] is None:
+            del update[name]
     get_workspace().set_llm_config(
-        body.model_dump(exclude={"api_key", "profile_api_key", "cv_api_key", "letter_api_key"}),
+        update,
         body.api_key,
         body.profile_api_key,
         body.cv_api_key,
         body.letter_api_key,
     )
+    return _llm_view()
+
+
+class HandoverUpdate(BaseModel):
+    on_limit: Literal["switch", "ask"] | None = None
+    handover_threshold: int | None = Field(None, ge=50, le=100)
+    fallback_models: dict[str, str] | None = None
+
+
+@app.put("/api/llm/handover")
+def update_handover(body: HandoverUpdate) -> dict[str, Any]:
+    """What a spent plan does (switch or ask), the warning threshold, and model overrides."""
+    get_workspace().set_llm_config(body.model_dump(exclude_none=True))
     return _llm_view()
 
 
@@ -351,17 +415,6 @@ def get_codex_status() -> dict[str, Any]:
     return codex_status()
 
 
-@app.get("/api/codex/usage")
-async def get_codex_usage() -> dict[str, Any]:
-    """Current ChatGPT-plan Codex limits from the signed-in Codex app-server."""
-    if get_workspace().llm.provider != "codex":
-        raise HTTPException(400, "Codex is not the active provider")
-    try:
-        return await asyncio.to_thread(codex_usage)
-    except (LLMError, OSError, ValueError) as exc:
-        raise HTTPException(502, str(exc)) from exc
-
-
 @app.post("/api/codex/login")
 def codex_login() -> dict[str, Any]:
     """Open the ChatGPT sign-in page via `codex login` (the CLI stores the credentials)."""
@@ -377,10 +430,10 @@ def get_claude_code_status() -> dict[str, Any]:
     return claude_code_backend.claude_code_status()
 
 
-@app.get("/api/claude-code/usage")
-def get_claude_code_usage() -> dict[str, Any]:
-    """Claude plan rate-limit windows as reported by the CLI on recent calls."""
-    return claude_code_backend.claude_code_usage()
+@app.get("/api/connections")
+async def get_connections() -> connections_service.ConnectionsView:
+    """Every model connection: who serves each task, plan windows, spend and handovers."""
+    return await asyncio.to_thread(connections_service.connections, get_workspace())
 
 
 @app.post("/api/claude-code/login")
@@ -447,8 +500,9 @@ def delete_cv(asset_id: str) -> dict[str, bool]:
 async def export_general_cv(progress_id: str | None = None) -> dict[str, Any]:
     """Export the selected CV with its full work history to an editable Word file."""
     try:
-        with progress.track(progress_id, "Exporting your CV"):
-            path, roles = await cv_service.export_general_cv(get_workspace())
+        path, roles = await progress.run(
+            progress_id, "Exporting your CV", cv_service.export_general_cv(get_workspace())
+        )
     except (ValueError, LLMError) as exc:
         raise HTTPException(422, str(exc)) from exc
     return {"download_url": _file_url(path), "roles": roles}
@@ -508,11 +562,17 @@ async def profile_summary(body: SummaryRequest, progress_id: str | None = None) 
     ws = get_workspace()
     if not ws.role_ready("profile"):
         raise HTTPException(400, "Connect the profile model in Settings")
+
+    async def build() -> tuple[Any, ProfileSummary, bool]:
+        progress.step("Reading your CV")
+        cv = await cv_service.ensure_selected_cv(ws, role="profile") if body.use_cv else None
+        summary, cached = await get_summary(ws, cv, body.query, body.refresh)
+        return cv, summary, cached
+
     try:
-        with progress.track(progress_id, "Building the profile", total=4):
-            progress.step("Reading your CV")
-            cv = await cv_service.ensure_selected_cv(ws, role="profile") if body.use_cv else None
-            summary, cached = await get_summary(ws, cv, body.query, body.refresh)
+        cv, summary, cached = await progress.run(
+            progress_id, "Building the profile", build(), total=4
+        )
     except (ValueError, LLMError) as exc:
         raise HTTPException(502, str(exc)) from exc
     key = search_service.summary_key(ws, cv, body.query)
@@ -567,8 +627,12 @@ async def refresh_profile(key: str, progress_id: str | None = None) -> ProfileRe
     if not ws.role_ready("profile"):
         raise HTTPException(400, "Connect the profile model in Settings")
     try:
-        with progress.track(progress_id, "Updating the profile", total=3):
-            return await search_service.refresh_profile(ws, _profile_cv(), key)
+        return await progress.run(
+            progress_id,
+            "Updating the profile",
+            search_service.refresh_profile(ws, _profile_cv(), key),
+            total=3,
+        )
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
     except LLMError as exc:
@@ -595,6 +659,31 @@ async def search(body: SearchRequest) -> SearchOutcome:
         raise HTTPException(422, str(exc)) from exc
     except LLMError as exc:
         raise HTTPException(502, str(exc)) from exc
+
+
+class Activity(BaseModel):
+    searches: int
+    tasks: list[progress.TaskProgress]
+
+
+@app.get("/api/activity")
+def activity() -> Activity:
+    """What the app is doing now: running searches and tasks (read by scripts/live_status.py)."""
+    return Activity(searches=search_service.running_searches(), tasks=progress.active())
+
+
+@app.exception_handler(progress.TaskStopped)
+async def task_stopped(_: Request, exc: progress.TaskStopped) -> JSONResponse:
+    """A task the user stopped ends with 409 "Stopped" (the UI shows it as stopped, not
+    failed)."""
+    return JSONResponse({"detail": progress.STOPPED}, status_code=409)
+
+
+@app.post("/api/progress/{task_id}/stop")
+def stop_task(task_id: str) -> dict[str, bool]:
+    """Stop a running task now (the Stop button): tailoring, a cover letter, a profile build
+    or update, a CV export. Its model calls are killed or cut off mid-request."""
+    return {"stopped": progress.stop(task_id)}
 
 
 @app.get("/api/progress/{task_id}")
@@ -706,16 +795,21 @@ async def search_stream(body: SearchRequest) -> StreamingResponse:
 class ContinueRequest(BaseModel):
     history_id: str
     run_id: str | None = None
+    switch: bool = False  # a plan ran out: continue on the other plan's equivalent model
 
 
 @app.post("/api/search/continue/stream")
 async def continue_stream(body: ContinueRequest) -> StreamingResponse:
-    """Judge the shortlisted jobs a stopped or partly failed search left unjudged."""
-    return _stream(
-        lambda emit, usage: search_service.continue_search(
-            get_workspace(), body.history_id, emit, usage, body.run_id
-        )
-    )
+    """Judge the shortlisted jobs a stopped or partly failed search left unjudged (after a spent
+    plan: on the other plan when `switch`, else on the same model once it has reset)."""
+
+    async def work(emit: Any, usage: Any) -> SearchOutcome:
+        with fallback.switching("switch") if body.switch else nullcontext():
+            return await search_service.continue_search(
+                get_workspace(), body.history_id, emit, usage, body.run_id
+            )
+
+    return _stream(work)
 
 
 class RecheckRequest(BaseModel):
@@ -742,6 +836,22 @@ async def recheck_stream(body: RecheckRequest) -> StreamingResponse:
     )
 
 
+class RetryRequest(BaseModel):
+    history_id: str
+    sources: list[str] | None = None  # None: every source that failed in that search
+    run_id: str | None = None
+
+
+@app.post("/api/search/retry/stream")
+async def retry_stream(body: RetryRequest) -> StreamingResponse:
+    """Search again only the sources that failed in a past search, adding what they find."""
+    return _stream(
+        lambda emit, usage: search_service.retry_sources(
+            get_workspace(), body.history_id, body.sources, emit, usage, body.run_id
+        )
+    )
+
+
 @app.delete("/api/results/{job_id}")
 def remove_result(job_id: str, history_id: str | None = None) -> dict[str, bool]:
     """Delete one posting from the results list (and from that search in the history)."""
@@ -764,6 +874,7 @@ class TailorRequest(BaseModel):
     emphasis: Literal["auto", "leadership", "hands_on"] = "auto"
     level: Literal["auto", "senior", "junior"] = "auto"
     length: Literal["auto", "full", "junior"] = "auto"
+    audience: Literal["auto", "industry", "academic"] = "auto"
 
 
 def _tailor_report(tailored: TailoredCV, document_id: str | None, url: str) -> dict[str, Any]:
@@ -782,6 +893,11 @@ def _tailor_report(tailored: TailoredCV, document_id: str | None, url: str) -> d
         "trim": tailored.trim,
         "left_out": [c.original for c in tailored.changes if c.accepted and not c.tailored],
         "document_notes": tailored.document_notes,
+        "positioning": tailored.positioning,
+        "requirements": tailored.requirements,
+        "role_skills": tailored.role_skills,
+        "academic": tailored.academic,
+        "fit_check": tailored.fit_check,
         "rejected": sum(not c.accepted for c in tailored.changes),
         "rejections": [
             {"source_id": c.source_id, "reason": c.reason}
@@ -915,8 +1031,10 @@ async def tailor_job(
     if result is None:
         raise HTTPException(404, "Job not found in results, saved jobs or search history")
     try:
-        with progress.track(progress_id, "Tailoring your CV"):
-            tailored, path = await cv_service.tailor_to_job(
+        tailored, path = await progress.run(
+            progress_id,
+            "Tailoring your CV",
+            cv_service.tailor_to_job(
                 ws,
                 result.job,
                 body.template,
@@ -924,7 +1042,9 @@ async def tailor_job(
                 emphasis=body.emphasis,
                 level=body.level,
                 length=body.length,
-            )
+                audience=body.audience,
+            ),
+        )
     except (ValueError, LLMError) as exc:
         raise HTTPException(422, str(exc)) from exc
     return {
@@ -943,10 +1063,13 @@ async def cover_letter(
     if result is None:
         raise HTTPException(404, "Job not found in results, saved jobs or search history")
     try:
-        with progress.track(progress_id, "Writing your cover letter"):
-            letter, path = await cv_service.write_cover_letter(
+        letter, path = await progress.run(
+            progress_id,
+            "Writing your cover letter",
+            cv_service.write_cover_letter(
                 ws, result.job, body.template, tailored_cv_id=body.tailored_cv_id
-            )
+            ),
+        )
     except (ValueError, LLMError) as exc:
         raise HTTPException(422, str(exc)) from exc
     return {
@@ -1276,6 +1399,8 @@ async def chat_ws(websocket: WebSocket) -> None:
             kind = msg.get("type")
             if kind == "cancel":
                 chat.cancel(session)
+                if run is not None and not run.done():
+                    run.cancel()  # ends a model call in flight now, not when it answers
             elif kind == "reset":
                 chat.clear_session(ws, session)
             elif kind == "user_message":
@@ -1342,6 +1467,7 @@ async def chat_ws(websocket: WebSocket) -> None:
                         bool(msg.get("widen", False)),
                         msg.get("profile_key"),
                         _mcp_base(websocket),
+                        switch=bool(msg.get("switch")),
                     )
                 )
     except WebSocketDisconnect:

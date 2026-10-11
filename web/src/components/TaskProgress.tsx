@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, CircleStop, Loader2, Square } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { cn } from "../lib/utils";
+import { useActivity } from "../stores/activityStore";
 
 /** An id per run of a long action, sent as `progress_id` so `TaskProgress` can follow it. */
 export function useTaskId() {
@@ -13,6 +14,26 @@ export function useTaskId() {
     return fresh;
   };
   return { id, next };
+}
+
+/** The message the server gives a task the user stopped. */
+export const STOPPED = "Stopped";
+
+/** A failed action's message, or a quiet "Stopped." when the user stopped it. */
+export function TaskError({ error, className }: { error: unknown; className?: string }) {
+  if (!error) return null;
+  const message = error instanceof Error ? error.message : String(error);
+  if (message === STOPPED) return <p className={cn("text-muted", className)}>Stopped.</p>;
+  return <p className={cn("text-bad", className)}>{message}</p>;
+}
+
+/** Ask the server to stop task `id`, retrying briefly if it has not registered it yet. */
+async function stopTask(id: string) {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const { stopped } = await api.stopTask(id);
+    if (stopped) return;
+    await new Promise((resolve) => window.setTimeout(resolve, 200));
+  }
 }
 
 /** Seconds as "45 s" or "2 min 05 s". */
@@ -48,7 +69,8 @@ export function ProgressBar({ fraction, className }: { fraction: number | null; 
 /** Live progress of a request started with `progress_id`: real steps done of the total, the
  *  current step and how long it has run, the model call in flight, and a warning when the
  *  server stops answering. Render it while the request is pending. */
-export function TaskProgress({ id, className }: { id: string | null; className?: string }) {
+export function TaskProgress({ id, className, onStop }: { id: string | null; className?: string; onStop?: () => void }) {
+  const [stopping, setStopping] = useState<string | null>(null);
   const poll = useQuery({
     queryKey: ["task-progress", id],
     queryFn: () => api.taskProgress(id ?? ""),
@@ -61,14 +83,37 @@ export function TaskProgress({ id, className }: { id: string | null; className?:
   useEffect(() => {
     if (poll.data) setOffset(poll.data.now - Date.now() / 1000);
   }, [poll.data]);
+  // The activity panel follows the task while this is on screen (the request is pending).
+  useEffect(() => {
+    if (!id) return;
+    useActivity.getState().addTask(id);
+    return () => useActivity.getState().removeTask(id);
+  }, [id]);
   const now = useNow(!!id) + offset;
   const task = poll.data;
   const lost = poll.isError && !poll.error.message.includes("No task");
   if (!id) return null;
+  const stop = (
+    <button
+      className="flex shrink-0 items-center gap-1 rounded border border-border px-1.5 py-0.5 text-bad hover:border-[var(--bad)] disabled:opacity-60"
+      title="Stop now: model calls in progress are cut off, nothing more is spent"
+      disabled={stopping === id}
+      onClick={() => {
+        setStopping(id);
+        onStop?.();
+        void stopTask(id).catch(() => setStopping(null));
+      }}
+    >
+      {stopping === id ? <CircleStop size={11} /> : <Square size={11} />} {stopping === id ? "Stopping…" : "Stop"}
+    </button>
+  );
   if (!task) {
     return (
       <div className={cn("space-y-1 text-[11px] text-muted", className)} aria-live="polite">
-        <p className="flex items-center gap-1.5"><Loader2 size={12} className="animate-spin text-accent" /> Starting…</p>
+        <div className="flex items-center justify-between gap-2">
+          <p className="flex items-center gap-1.5"><Loader2 size={12} className="animate-spin text-accent" /> Starting…</p>
+          {stop}
+        </div>
         <ProgressBar fraction={null} />
       </div>
     );
@@ -79,14 +124,18 @@ export function TaskProgress({ id, className }: { id: string | null; className?:
     <div className={cn("space-y-1 text-[11px]", className)} aria-live="polite">
       <div className="flex items-center justify-between gap-2">
         <p className="flex min-w-0 items-center gap-1.5 text-fg">
-          {task.error ? <AlertTriangle size={12} className="shrink-0 text-bad" />
+          {task.error === STOPPED ? <CircleStop size={12} className="shrink-0 text-muted" />
+            : task.error ? <AlertTriangle size={12} className="shrink-0 text-bad" />
             : task.finished ? <CheckCircle2 size={12} className="shrink-0 text-good" />
             : <Loader2 size={12} className="shrink-0 animate-spin text-accent" />}
           <span className="truncate">
             {task.error ? task.error : task.finished ? "Done" : `Step ${Math.min(task.done + 1, total)} of ${total}: ${task.step || "starting"}`}
           </span>
         </p>
-        <span className="shrink-0 tabular-nums text-faint">{duration(now - task.started_at)}</span>
+        <span className="flex shrink-0 items-center gap-2">
+          <span className="tabular-nums text-faint">{duration(now - task.started_at)}</span>
+          {!task.finished && stop}
+        </span>
       </div>
       <ProgressBar fraction={fraction} />
       {!task.finished && (

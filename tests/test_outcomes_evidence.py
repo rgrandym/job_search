@@ -23,6 +23,7 @@ from src.cv.models import (
     JDAnalysis,
     LetterOpening,
     LetterParagraph,
+    LetterReview,
     LetterSections,
     MasterCV,
     TailoringPlan,
@@ -65,6 +66,7 @@ def ws(settings: Settings, master_cv: MasterCV, monkeypatch: pytest.MonkeyPatch)
         {
             EvidenceProposals: _proposals,
             JDAnalysis: JDAnalysis(job_title="ML Engineer", company="Orbit"),
+            LetterReview: LetterReview(),
             LetterSections: LetterSections(
                 opening=LetterOpening(
                     interest="I am interested in the ML Engineer role because of its ML work.",

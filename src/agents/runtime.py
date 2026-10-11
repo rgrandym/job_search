@@ -20,6 +20,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
+from src.agents import handoff
 from src.agents.registry import TOOLS, AgentDefinition
 from src.core.config import LLMProviderName
 from src.core.llm import (
@@ -31,7 +32,9 @@ from src.core.llm import (
     Role,
     ToolCall,
     UsageSink,
+    usage,
 )
+from src.core.llm.calls import call_group
 from src.jobs.models import SearchQuery
 from src.jobs.sources.base import SourceError
 from src.services.workspace import Workspace
@@ -61,7 +64,13 @@ class AgentContext:
     mcp_url: str | None = None
     native_session: str | None = None
     cancelled: bool = False
+    # Model calls the turn's tools make (tailoring, letters...) belong to this call group, so
+    # Stop kills or cuts them off at once (`chat.cancel`).
+    group: str = field(default_factory=lambda: f"chat-{uuid.uuid4().hex}")
     active_search_id: str | None = None
+    # A handover packet (`agents.handoff`) opening this turn on a model new to the conversation.
+    handoff: str | None = None
+    actions: list[str] = field(default_factory=list)  # "tool(args) -> ok | failed", this turn
     tokens: dict[str, int] = field(default_factory=lambda: {"input": 0, "output": 0})
     _usage_futures: list[Future[None]] = field(default_factory=list, repr=False)
     _usage_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -127,20 +136,8 @@ async def _run_loop(
         resp = await model.chat(
             system=defn.system_prompt(), messages=messages, tools=defn.tool_specs()
         )
-        ctx.tokens["input"] += resp.input_tokens
-        ctx.tokens["output"] += resp.output_tokens
-        await ctx.emit(
-            "model_usage",
-            {
-                "agent": defn.name,
-                "depth": depth,
-                "model": ctx.chat_model or ctx.ws.llm.model_for(ctx.chat_role),
-                "provider": ctx.chat_provider or ctx.ws.llm.provider,
-                "input_tokens": resp.input_tokens,
-                "output_tokens": resp.output_tokens,
-                "estimated": resp.usage_estimated,
-                "purpose": defn.description,
-            },
+        await _report_usage(
+            ctx, defn, depth, resp.input_tokens, resp.output_tokens, resp.usage_estimated
         )
         msg = resp.message
         messages.append(msg)
@@ -166,6 +163,35 @@ async def _run_loop(
     return answer
 
 
+async def _report_usage(
+    ctx: AgentContext,
+    defn: AgentDefinition,
+    depth: int,
+    tokens_in: int,
+    tokens_out: int,
+    estimated: bool,
+) -> None:
+    """Count a chat turn's tokens, add them to the spend ledger and stream them to the UI."""
+    model = ctx.chat_model or ctx.ws.llm.model_for(ctx.chat_role)
+    provider = ctx.chat_provider or ctx.ws.llm.provider
+    ctx.tokens["input"] += tokens_in
+    ctx.tokens["output"] += tokens_out
+    usage.record_spend(provider, model, tokens_in, tokens_out, estimated)
+    await ctx.emit(
+        "model_usage",
+        {
+            "agent": defn.name,
+            "depth": depth,
+            "model": model,
+            "provider": provider,
+            "input_tokens": tokens_in,
+            "output_tokens": tokens_out,
+            "estimated": estimated,
+            "purpose": defn.description,
+        },
+    )
+
+
 @dataclass
 class NativeRun:
     """A native run in progress, reachable by its token from the MCP endpoint."""
@@ -179,8 +205,11 @@ RUNS: dict[str, NativeRun] = {}
 
 
 def _native_prompt(messages: list[ChatMessage], ctx: AgentContext) -> str:
-    """The new user message; on a fresh session, earlier turns come along as background."""
+    """The new user message; on a fresh session, earlier turns come along as background, and
+    after a handover the packet (`agents.handoff`) tells the model where things stand."""
     latest = messages[-1].content
+    if ctx.handoff:
+        return handoff.with_message(ctx.handoff, latest)
     if ctx.native_session:
         return latest
     earlier = [
@@ -233,21 +262,7 @@ async def _run_native(
     finally:
         RUNS.pop(token, None)
     ctx.native_session = turn.session_id or ctx.native_session
-    ctx.tokens["input"] += turn.input_tokens
-    ctx.tokens["output"] += turn.output_tokens
-    await ctx.emit(
-        "model_usage",
-        {
-            "agent": defn.name,
-            "depth": depth,
-            "model": ctx.chat_model or ctx.ws.llm.model_for(ctx.chat_role),
-            "provider": ctx.chat_provider or ctx.ws.llm.provider,
-            "input_tokens": turn.input_tokens,
-            "output_tokens": turn.output_tokens,
-            "estimated": False,
-            "purpose": defn.description,
-        },
-    )
+    await _report_usage(ctx, defn, depth, turn.input_tokens, turn.output_tokens, False)
     messages.append(ChatMessage(role="assistant", content=turn.text))
     await ctx.emit(
         "agent_message", {"agent": defn.name, "depth": depth, "text": turn.text, "final": True}
@@ -280,12 +295,18 @@ async def _run_tool(
         if call.name not in defn.allowed_tools:
             raise ValueError(f"tool {call.name!r} is not available to {defn.name}")
         t = TOOLS[call.name]
-        result: Any = await t.fn(t.args_model.model_validate(call.arguments), ctx)
+        token = call_group.set(ctx.group)  # also for tools a native run calls over MCP
+        try:
+            result: Any = await t.fn(t.args_model.model_validate(call.arguments), ctx)
+        finally:
+            call_group.reset(token)
     except Cancelled:
         raise
     except (ValidationError, ValueError, KeyError, LLMError, OSError, SourceError) as exc:
         result, is_error = f"Error: {exc}", True
     text = result if isinstance(result, str) else _to_json(result)
+    brief = ", ".join(f"{k}={str(v)[:40]}" for k, v in list(call.arguments.items())[:3])
+    ctx.actions.append(f"{call.name}({brief}) -> {'failed: ' + text[:120] if is_error else 'ok'}")
     await ctx.flush_usage()
     if len(text) > MAX_TOOL_RESULT_CHARS:
         text = text[:MAX_TOOL_RESULT_CHARS] + "\n…[truncated]"

@@ -1,13 +1,18 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bot, Check, ChevronDown, Loader2, RefreshCw, Send, Square, Trash2 } from "lucide-react";
+import { ArrowRightLeft, Bot, Check, ChevronDown, Loader2, Send, Square, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api } from "../lib/api";
-import type { ClaudeCodeUsage, ClaudeLimitWindow, CodexUsage, LLMView, ModelInfo, Provider, UsageWindow } from "../lib/types";
+import { routeLabel } from "../lib/labels";
+import type { LLMView } from "../lib/types";
 import { cn } from "../lib/utils";
-import { useChat, type ChatItem, type SessionModelUsage } from "../stores/chatStore";
+import { useActivity } from "../stores/activityStore";
+import { useChat, type ChatItem } from "../stores/chatStore";
 import { useSearch } from "../stores/searchStore";
+import { ActivityPanel } from "./ActivityPanel";
+import { ConnectionsPanel } from "./ConnectionsPanel";
+import { LimitOptions } from "./LimitOptions";
 import { Empty } from "./ui";
 
 function Activity({ item }: { item: Extract<ChatItem, { kind: "activity" }> }) {
@@ -15,250 +20,6 @@ function Activity({ item }: { item: Extract<ChatItem, { kind: "activity" }> }) {
     <div className="text-[11px] text-faint" style={{ paddingLeft: item.depth * 12 }} title={item.detail}>
       <span className={cn("font-medium", item.ok === false ? "text-bad" : "text-muted")}>{item.agent}</span>{" "}
       <span className="break-words">{item.text.length > 220 ? `${item.text.slice(0, 220)}…` : item.text}</span>
-    </div>
-  );
-}
-
-const tokens = (value: number) => {
-  if (value < 1_000) return value.toLocaleString();
-  if (value < 1_000_000) return `${(value / 1_000).toFixed(1)}k`;
-  return `${(value / 1_000_000).toFixed(1)}m`;
-};
-
-function resetLabel(resetsAt: number | null) {
-  if (!resetsAt) return "reset unavailable";
-  return `resets ${new Date(resetsAt * 1000).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}`;
-}
-
-/** One allowance bar, shared by the OpenAI and Claude plans so both read the same way. */
-function UsageBar({ label, remaining, value, tone = "text-fg", footer }: {
-  label: string;
-  remaining: number | null;
-  value: string;
-  tone?: string;
-  footer: string;
-}) {
-  return (
-    <div>
-      <div className="flex justify-between text-[11px]">
-        <span className="text-muted">{label}</span>
-        <span className={tone}>{value}</span>
-      </div>
-      <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-surface">
-        {/* Unknown share: a neutral full track, so it never reads as an empty allowance. */}
-        <div className={cn("h-full", remaining == null ? "bg-border" : "bg-accent")} style={{ width: `${remaining ?? 100}%` }} />
-      </div>
-      <p className="mt-0.5 text-[10px] text-faint">{footer}</p>
-    </div>
-  );
-}
-
-function Limit({ label, window }: { label: string; window: UsageWindow | null }) {
-  if (!window) return null;
-  return (
-    <UsageBar
-      label={label}
-      remaining={window.remaining_percent}
-      value={`${window.remaining_percent}% left`}
-      footer={resetLabel(window.resets_at)}
-    />
-  );
-}
-
-const WINDOW_LABEL: Record<string, string> = {
-  five_hour: "5-hour allowance",
-  seven_day: "Weekly allowance",
-  seven_day_opus: "Weekly Opus allowance",
-  seven_day_sonnet: "Weekly Sonnet allowance",
-};
-
-const CLAUDE_STATUS: Record<string, { text: string; tone: string }> = {
-  allowed: { text: "within limit", tone: "text-good" },
-  allowed_warning: { text: "nearing limit", tone: "text-warn" },
-  rejected: { text: "limit reached", tone: "text-bad" },
-};
-
-function ClaudeLimit({ window }: { window: ClaudeLimitWindow }) {
-  const status = CLAUDE_STATUS[window.status ?? ""] ?? { text: window.status ?? "unknown", tone: "text-muted" };
-  // Anthropic only reports utilisation as a window nears its limit; a rejected window is spent.
-  const used = window.utilization != null ? Math.round(window.utilization * 100) : window.status === "rejected" ? 100 : null;
-  const remaining = used == null ? null : Math.max(0, 100 - used);
-  return (
-    <UsageBar
-      label={WINDOW_LABEL[window.window] ?? window.window}
-      remaining={remaining}
-      value={remaining != null ? `${remaining}% left` : status.text}
-      tone={remaining != null && window.status === "allowed" ? "text-fg" : status.tone}
-      footer={`${resetLabel(window.resets_at)}${remaining == null ? " · exact % shown as it nears the limit" : ""}${window.using_overage ? " · using extra usage" : ""}`}
-    />
-  );
-}
-
-function ClaudeAccount({ usage, loading, error, refresh }: { usage?: ClaudeCodeUsage; loading: boolean; error: Error | null; refresh: () => void }) {
-  return (
-    <div className="space-y-2 rounded-md border border-border p-2">
-      <div className="flex items-center justify-between">
-        <span className="font-medium text-fg">Claude plan</span>
-        <button title="Refresh plan usage" className="text-faint hover:text-fg" onClick={refresh}><RefreshCw size={11} /></button>
-      </div>
-      {loading && <p className="text-faint">Loading plan limits…</p>}
-      {error && <p className="text-bad">Usage unavailable: {error.message}</p>}
-      {usage && usage.windows.length === 0 && (
-        <p className="text-faint">Limits appear after the first Claude Code call in this app (a search or an agent turn).</p>
-      )}
-      {usage?.windows.map((window) => <ClaudeLimit key={window.window} window={window} />)}
-      {usage && usage.windows.length > 0 && (
-        <p className="text-faint">
-          Reported by Anthropic on each call; the remaining percentage is only shared as a window nears its limit. Usage is
-          shared with Claude Code in VS Code.
-        </p>
-      )}
-    </div>
-  );
-}
-
-const PROVIDER_NAMES: Record<Provider, string> = {
-  anthropic: "Claude API",
-  claude_code: "Claude Code",
-  codex: "Codex",
-  openai: "OpenAI API",
-  openrouter: "OpenRouter",
-};
-
-interface RoleModel {
-  label: string;
-  model: string;
-  effort: string;
-  provider: Provider;
-  purpose: string;
-}
-
-/** Each task's model, effort and provider, resolved like `LLMConfig._own` on the backend. */
-function roleModels(llm: LLMView): RoleModel[] {
-  const own = (model: string, effort: string, provider: Provider | null) => ({ model, effort, provider: provider ?? llm.provider });
-  const quality = own(llm.quality_model, llm.quality_effort, null);
-  const cv = llm.cv_model ? own(llm.cv_model, llm.cv_effort, llm.cv_provider) : quality;
-  return [
-    { label: "Quality", ...quality, purpose: "CV reading, second opinions, assistant default" },
-    { label: "Screening", ...own(llm.screening_model, llm.screening_effort, null), purpose: "First-pass job matching, or chat when selected" },
-    { label: "Profile", ...(llm.profile_model ? own(llm.profile_model, llm.profile_effort, llm.profile_provider) : quality), purpose: "Profile summary every match is judged against" },
-    { label: "CV writing", ...cv, purpose: "Tailored CVs" },
-    { label: "Cover letters", ...(llm.letter_model ? own(llm.letter_model, llm.letter_effort, llm.letter_provider) : cv), purpose: "Cover letters" },
-  ];
-}
-
-function UsagePanel({ llm, chatProvider }: { llm: LLMView; chatProvider: Provider | null }) {
-  const chat = useChat();
-  const roles = roleModels(llm);
-  const uses = (provider: Provider) =>
-    roles.some((role) => role.provider === provider) || chatProvider === provider || Object.values(chat.modelUsage).some((usage) => usage.provider === provider);
-  const models = useQuery({
-    queryKey: ["models", llm.provider],
-    queryFn: () => api.models(llm.provider),
-    staleTime: 5 * 60_000,
-  });
-  const claudeModels = useQuery({
-    queryKey: ["models", "claude_code"],
-    queryFn: () => api.models("claude_code"),
-    enabled: llm.provider !== "claude_code",
-    staleTime: 5 * 60_000,
-  });
-  const account = useQuery({
-    queryKey: ["codex-usage"],
-    queryFn: api.codexUsage,
-    enabled: uses("codex"),
-    refetchInterval: 60_000,
-  });
-  const claude = useQuery({
-    queryKey: ["claude-code-usage"],
-    queryFn: api.claudeCodeUsage,
-    enabled: uses("claude_code"),
-    refetchInterval: 15_000,
-  });
-  const catalog = new Map((models.data ?? []).map((model) => [model.id, model]));
-  const claudeCatalog = new Map((llm.provider === "claude_code" ? models.data ?? [] : claudeModels.data ?? []).map((model) => [model.id, model]));
-  const modelFor = (usage: SessionModelUsage) => usage.provider === "claude_code" ? claudeCatalog.get(usage.model) : catalog.get(usage.model);
-  const session = Object.values(chat.modelUsage);
-  const cost = session.reduce((total, usage) => {
-    const model = modelFor(usage);
-    if (model?.input_price == null || model.output_price == null) return total;
-    return total + (usage.input * model.input_price + usage.output * model.output_price) / 1_000_000;
-  }, 0);
-  const costKnown = session.length > 0 && session.every((usage) => {
-    const model = modelFor(usage);
-    return model?.input_price != null && model.output_price != null;
-  });
-
-  return (
-    <details open className="max-h-[40vh] shrink-0 overflow-y-auto border-b border-border bg-panel px-3 py-2 text-[11px] scroll-thin">
-      <summary className="cursor-pointer text-muted">Models, limits & live usage</summary>
-      <div className="mt-2 space-y-3">
-        <div className="space-y-1 rounded-md bg-surface p-2">
-          {roles.map((role) => <ModelPurpose key={role.label} role={role} />)}
-        </div>
-        {uses("claude_code") && (
-          <ClaudeAccount usage={claude.data} loading={claude.isPending} error={claude.error as Error | null} refresh={() => claude.refetch()} />
-        )}
-        {uses("codex") && (
-          <CodexAccount usage={account.data} loading={account.isPending} error={account.error as Error | null} refresh={() => account.refetch()} />
-        )}
-        <div className="space-y-1.5">
-          <div className="flex justify-between">
-            <span className="font-medium text-fg">This tab (searches + chat)</span>
-            <span>{costKnown ? `$${cost.toFixed(4)}` : "cost unavailable / plan usage"}</span>
-          </div>
-          {session.length === 0 ? (
-            <p className="text-faint">Usage appears after the first model turn.</p>
-          ) : (
-            session.map((usage) => <ModelSession key={`${usage.provider ?? "current"}:${usage.model}`} usage={usage} model={modelFor(usage)} />)
-          )}
-          {uses("codex") && <p className="text-faint">Codex CLI token counts are estimates; account-limit percentages above are reported by OpenAI.</p>}
-        </div>
-      </div>
-    </details>
-  );
-}
-
-function ModelPurpose({ role }: { role: RoleModel }) {
-  return (
-    <p>
-      <span className="font-medium text-fg">{role.label} · {role.effort}:</span> {role.model}{" "}
-      <span className="text-muted">({PROVIDER_NAMES[role.provider]})</span>
-      <br />
-      <span className="text-faint">{role.purpose}</span>
-    </p>
-  );
-}
-
-function CodexAccount({ usage, loading, error, refresh }: { usage?: CodexUsage; loading: boolean; error: Error | null; refresh: () => void }) {
-  return (
-    <div className="space-y-2 rounded-md border border-border p-2">
-      <div className="flex items-center justify-between">
-        <span className="font-medium text-fg">OpenAI account {usage?.plan_type && `· ${usage.plan_type}`}</span>
-        <button title="Refresh account usage" className="text-faint hover:text-fg" onClick={refresh}><RefreshCw size={11} /></button>
-      </div>
-      {loading && <p className="text-faint">Loading account limits…</p>}
-      {error && <p className="text-bad">Usage unavailable: {error.message}</p>}
-      {usage && <>
-        {usage.ordinary_usage_allowed === false && <p className="text-bad">Ordinary Codex usage is currently unavailable.</p>}
-        <Limit label="5-hour allowance" window={usage.primary} />
-        <Limit label="Weekly allowance" window={usage.secondary} />
-        <p className="text-faint">
-          {usage.lifetime_tokens != null && `${tokens(usage.lifetime_tokens)} lifetime tokens`}
-          {usage.credits.has_credits && ` · ${usage.credits.balance ?? "—"} credits`}
-        </p>
-      </>}
-    </div>
-  );
-}
-
-function ModelSession({ usage, model }: { usage: SessionModelUsage; model?: ModelInfo }) {
-  const remaining = model?.context_length == null ? null : Math.max(0, model.context_length - usage.latestContext);
-  return (
-    <div className="rounded-md bg-surface p-2">
-      <div className="flex justify-between"><span className="font-medium text-fg">{usage.model}{usage.provider ? ` · ${PROVIDER_NAMES[usage.provider]}` : ""}</span><span>{usage.estimated && "≈"}{tokens(usage.input + usage.output)} tokens</span></div>
-      <p className="text-faint">{tokens(usage.input)} input · {tokens(usage.output)} output{remaining != null ? ` · ${tokens(remaining)} latest context left` : ""}</p>
-      <p className="text-faint">{usage.agents.join(", ")} · {usage.purposes.join(", ")}</p>
     </div>
   );
 }
@@ -278,7 +39,7 @@ export function AgentPanel({ ready, llm, hasCv }: { ready: boolean; llm?: LLMVie
   // A finished turn may have changed the intent, the CV (and its Word copy), profiles or documents.
   useEffect(() => {
     if (running) return;
-    for (const key of ["intent", "profiles", "evidence", "state", "cv-preview", "history", "saved", "tracker", "labels", "learning", "tailored-cvs", "cover-letters", "company-boards", "codex-usage", "claude-code-usage"]) void qc.invalidateQueries({ queryKey: [key] });
+    for (const key of ["intent", "profiles", "evidence", "state", "cv-preview", "history", "saved", "tracker", "labels", "learning", "tailored-cvs", "cover-letters", "company-boards", "connections"]) void qc.invalidateQueries({ queryKey: [key] });
   }, [running, qc]);
   const [draft, setDraft] = useState("");
   const [chatChoice, setChatChoice] = useState("quality");
@@ -360,12 +121,13 @@ export function AgentPanel({ ready, llm, hasCv }: { ready: boolean; llm?: LLMVie
         </div>
         <div className="flex items-center gap-2 text-[11px] text-faint">
           {chat.tokens.input + chat.tokens.output > 0 && (
-            <span>{((chat.tokens.input + chat.tokens.output) / 1000).toFixed(1)}k tok</span>
+            <span title="Tokens used by this tab (searches and assistant)">{((chat.tokens.input + chat.tokens.output) / 1000).toFixed(1)}k tok</span>
           )}
         </div>
       </header>
 
-      {llm && <UsagePanel llm={llm} chatProvider={claudeSelected ? "claude_code" : null} />}
+      <ActivityPanel />
+      {llm && <ConnectionsPanel />}
 
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto overflow-x-hidden p-3 scroll-thin [overflow-wrap:anywhere]">
         {chat.items.length === 0 ? (
@@ -410,6 +172,31 @@ export function AgentPanel({ ready, llm, hasCv }: { ready: boolean; llm?: LLMVie
                   <p key={i} className="rounded-md border border-bad/40 px-2 py-1.5 text-[12px] text-bad">
                     {item.text}
                   </p>
+                );
+              case "notice":
+                return (
+                  <p key={i} className="flex items-start gap-1.5 rounded-md border border-warn/40 px-2 py-1.5 text-[12px] text-muted">
+                    <ArrowRightLeft size={12} className="mt-0.5 shrink-0 text-warn" /> {item.text}
+                  </p>
+                );
+              case "limit":
+                return item.resolved ? (
+                  <p key={i} className="text-[11px] text-faint">{routeLabel(item)}&apos;s plan ran out; you chose what to do next.</p>
+                ) : (
+                  <LimitOptions
+                    key={i}
+                    what="this request"
+                    configured={item}
+                    resetsAt={item.resetsAt}
+                    replacement={item.replacement}
+                    onSwitch={() => chat.resend(i, true)}
+                    onWait={() => {
+                      chat.resolve(i);
+                      // A minute after the reset, so the plan has really refreshed.
+                      useActivity.getState().wait((item.resetsAt + 60) * 1000, `Send your message again on ${item.model}`, () => chat.resend(i, false));
+                    }}
+                    onStop={() => chat.resolve(i)}
+                  />
                 );
             }
           })

@@ -157,9 +157,12 @@ def test_codex_structured_repairs_invalid_json_once(monkeypatch: pytest.MonkeyPa
         return {"value": "ready"}
 
     monkeypatch.setattr(backend, "run_codex", fake_run)
-    assert backend.CodexStructured(_config()).generate(
-        system="Follow the rules", prompt="Return a result", output_model=Answer
-    ).value == "ready"
+    assert (
+        backend.CodexStructured(_config())
+        .generate(system="Follow the rules", prompt="Return a result", output_model=Answer)
+        .value
+        == "ready"
+    )
     assert len(prompts) == 2
 
 

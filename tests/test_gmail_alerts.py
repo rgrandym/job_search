@@ -156,6 +156,29 @@ def test_gmail_refreshes_expired_access_token(settings: Settings) -> None:
     assert auth._load().refresh_token.get_secret_value() == "refresh"
 
 
+def test_gmail_revoked_sign_in_is_reported_as_a_problem(settings: Settings) -> None:
+    settings = _settings(settings)
+    revoked = {"error": "invalid_grant", "error_description": "Token has been expired or revoked."}
+    http = HttpFetcher(
+        settings,
+        httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(400, json=revoked))),
+    )
+    auth = GmailAuth(settings, http)
+    assert auth.problem() is None  # nothing stored: not connected, nothing to reconnect
+    token = GmailToken(
+        account="alerts@example.com",
+        access_token=SecretStr("expired"),
+        refresh_token=SecretStr("refresh"),
+        expires_at=time.time() - 1,
+    )
+    auth._save(token)
+    assert auth.connected  # the file is there, but Google no longer accepts it
+    problem = auth.problem()
+    assert problem is not None and "expired or was revoked" in problem and "reconnect" in problem
+    auth._save(token.model_copy(update={"expires_at": time.time() + 3600}))
+    assert auth.problem() is None  # a valid access token needs no call to Google
+
+
 def test_gmail_source_requires_selected_cv(settings: Settings) -> None:
     settings = _settings(settings)
     GmailAuth(settings)._save(

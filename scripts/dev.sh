@@ -86,24 +86,10 @@ if [[ "$STOP_ONLY" == 1 ]]; then rm -f "$OWNER_FILE"; log "Stopped."; exit 0; fi
 
 # ------------------------------------------------------------------ conda env
 
-CONDA_BASE="$(conda info --base 2>/dev/null || true)"
-if [[ -z "$CONDA_BASE" ]]; then
-  for c in "$HOME/miniconda3" "$HOME/anaconda3" /opt/miniconda3 /opt/anaconda3 /opt/homebrew/Caskroom/miniconda/base; do
-    [[ -f "$c/etc/profile.d/conda.sh" ]] && CONDA_BASE="$c" && break
-  done
-fi
-if [[ -z "$CONDA_BASE" ]]; then warn "conda not found. Install Miniconda first."; exit 1; fi
-set +u  # conda's activation scripts reference unset variables
-# shellcheck disable=SC1091
-source "$CONDA_BASE/etc/profile.d/conda.sh"
-
-if ! conda env list | awk '{print $1}' | grep -qx "$CONDA_ENV"; then
-  log "Creating conda env '$CONDA_ENV' (python 3.12)"
-  conda create -y -q -n "$CONDA_ENV" python=3.12 >/dev/null
-  FORCE_INSTALL=1
-fi
-conda activate "$CONDA_ENV"
-set -u
+# shellcheck source=lib/conda.sh
+source "$ROOT/scripts/lib/conda.sh"
+activate_conda "$CONDA_ENV" || exit 1
+[[ "$CONDA_CREATED" == 1 ]] && FORCE_INSTALL=1
 log "Conda env: $CONDA_ENV ($(python --version))"
 
 cd "$ROOT"
@@ -181,7 +167,9 @@ mkdir -p "$LOG_DIR"
 : > "$LOG_DIR/frontend.log"
 
 log "Starting backend  → http://localhost:$BACKEND_PORT"
+# The UI keeps a chat WebSocket open: without a shutdown timeout a reload waits on it forever.
 python -m uvicorn src.web.app:app --reload --reload-dir src --port "$BACKEND_PORT" \
+  --timeout-graceful-shutdown 3 \
   >"$LOG_DIR/backend.log" 2>&1 &
 BACKEND_PID=$!
 disown "$BACKEND_PID"  # no "Terminated" job notices on shutdown

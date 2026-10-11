@@ -8,14 +8,18 @@ review every document before sending it.
 ## Get started
 
 Install [Miniconda](https://www.anaconda.com/docs/getting-started/miniconda/main) and
-[Node.js](https://nodejs.org/) with npm, then run this from the repository folder:
+[Node.js](https://nodejs.org/) 20+ with npm (on a Mac, also run `xcode-select --install`), then:
 
 ```bash
-bash scripts/dev.sh
+git clone https://github.com/rgrandym/job_search.git && cd job_search && bash scripts/install.sh
 ```
 
-The script sets up the local environment and opens the app at
-[http://localhost:5173](http://localhost:5173). Choose an AI provider in **Settings**,
+The installer sets up the local environment, builds the app and, on a Mac, adds **Job Search**
+to `~/Applications` and opens it. Right-click its Dock icon and choose **Options → Keep in
+Dock**. Clicking the icon opens the app, or brings its window back if it is already open.
+Without the Mac app, run `bash scripts/start.sh` and open
+[http://localhost:8000](http://localhost:8000). To update, run `git pull`; the app rebuilds
+what changed the next time it starts. Choose an AI provider in **Settings**,
 upload a CV, then run a search. You can try the **demo** source before adding a CV or API key.
 
 **Read the [user guide](USER_GUIDE.md)** for full setup instructions, model and account

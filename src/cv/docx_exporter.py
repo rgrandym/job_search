@@ -79,6 +79,10 @@ def export_docx(cv: MasterCV | TailoredCV, path: Path, template: str = "classic"
     tpl = TEMPLATES[template]
     master = cv.cv if isinstance(cv, TailoredCV) else cv
     options = cv.headline_options if isinstance(cv, TailoredCV) else []
+    sections = list(tpl.sections)
+    if isinstance(cv, TailoredCV) and cv.academic and "education" in sections:
+        sections.remove("education")  # academic readers look for education first
+        sections.insert(sections.index("summary") + 1 if "summary" in sections else 0, "education")
 
     doc = Document()
     dt.set_margins(doc, tpl.margins_in)
@@ -93,8 +97,10 @@ def export_docx(cv: MasterCV | TailoredCV, path: Path, template: str = "classic"
         "certifications": _certifications,
         "languages": _languages,
     }
-    for section in tpl.sections:
+    for section in sections:
         renderers[section](doc, master, tpl)
+        if section == "summary" and isinstance(cv, TailoredCV) and cv.role_skills:
+            doc.add_paragraph(f"Relevant skills for this role: {' · '.join(cv.role_skills)}")
 
     path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(path))

@@ -259,7 +259,8 @@ def refresh(ws: Workspace, report: MatchReport) -> None:
     # Jobs applied to before this search were set aside without screening. Once the
     # application is cleared, show them in results again without inventing a verdict.
     restored = [
-        result for result in report.applied
+        result
+        for result in report.applied
         if result.tracking is not None and result.tracking.status == "open"
     ]
     if restored:

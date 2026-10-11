@@ -23,6 +23,7 @@ from src.cv.models import (
     JDAnalysis,
     LetterOpening,
     LetterParagraph,
+    LetterReview,
     LetterSections,
     MasterCV,
     TailoringPlan,
@@ -178,12 +179,19 @@ def test_search_uses_codex_when_separate_writing_roles_use_claude(
 
     ws = Workspace(settings)
     ws.master_cv, ws.active_cv_id = master_cv, "master"
-    ws.set_llm_config({
-        "provider": "codex", "quality_model": "sol", "screening_model": "luna",
-        "profile_model": "claude-opus-5-5", "profile_provider": "claude_code",
-        "cv_model": "claude-opus-5-5", "cv_provider": "claude_code",
-        "letter_model": "claude-opus-5-5", "letter_provider": "claude_code",
-    })
+    ws.set_llm_config(
+        {
+            "provider": "codex",
+            "quality_model": "sol",
+            "screening_model": "luna",
+            "profile_model": "claude-opus-5-5",
+            "profile_provider": "claude_code",
+            "cv_model": "claude-opus-5-5",
+            "cv_provider": "claude_code",
+            "letter_model": "claude-opus-5-5",
+            "letter_provider": "claude_code",
+        }
+    )
     monkeypatch.setattr(ws, "_cli_logged_in", lambda provider: provider == "codex")
     calls: list[tuple[str, str]] = []
     fake = FakeLLM({ProfileSummary: SUMMARY, ScreeningBatch: _assessments((4, 4, 3, 4, 3, 3))})
@@ -194,9 +202,11 @@ def test_search_uses_codex_when_separate_writing_roles_use_claude(
         return fake
 
     monkeypatch.setattr(workspace, "make_structured", make)
-    outcome = asyncio.run(search_service.run_search(
-        ws, SearchRequest(query=SearchQuery(sources=["demo"]), smart=True)
-    ))
+    outcome = asyncio.run(
+        search_service.run_search(
+            ws, SearchRequest(query=SearchQuery(sources=["demo"]), smart=True)
+        )
+    )
     assert outcome.report.screened
     assert any(role == "quality" for role, _ in calls)
     assert any(role == "screening" for role, _ in calls)
@@ -212,9 +222,7 @@ def test_first_cv_read_uses_its_task_provider(
     roles: list[str] = []
     fake = FakeLLM({MasterCV: master_cv})
     monkeypatch.setattr(ws, "role_ready", lambda selected: selected == role)
-    monkeypatch.setattr(
-        ws, "structured", lambda selected, *_: roles.append(selected) or fake
-    )
+    monkeypatch.setattr(ws, "structured", lambda selected, *_: roles.append(selected) or fake)
 
     assert asyncio.run(cv_service.ensure_selected_cv(ws, role=role)) == master_cv
     assert roles == [role]
@@ -281,6 +289,7 @@ def test_cv_and_cover_letter_share_one_jd_analysis(
             JDAnalysis: JDAnalysis(job_title="ML Engineer"),
             TailoringPlan: TailoringPlan(),
             CVCritique: CVCritique(),
+            LetterReview: LetterReview(),
             LetterSections: draft,
         }
     )

@@ -59,6 +59,7 @@ from src.jobs.sources.pages import PostingPages
 from src.jobs.sources.public_boards import LinkedInSource
 from src.services import (
     company_discovery,
+    connections,
     cv_service,
     history,
     labels,
@@ -66,14 +67,16 @@ from src.services import (
     saved,
     tracker,
 )
+from src.services.connections import PlanLimit
 from src.services.intent import get_intent
 from src.services.workspace import Workspace
 from src.tools.search_tools import board_terms, company_key, shares_role_words
 
 Emit = Callable[[str, dict[str, Any]], Awaitable[None]]
 T = TypeVar("T")
-# After Stop, a run gets this long to hand back its partial results before it is cancelled.
-STOP_GRACE_S = 1.5
+# After Stop, a run gets this long to hand back its partial results before it is cancelled
+# (model calls are killed or cut off at once, so a stopped pipeline returns almost at once).
+STOP_GRACE_S = 0.5
 # Postings with less text than this get their full posting opened before screening.
 ENRICH_BELOW = 600
 BOARD_TERMS = 16  # job-board searches per source (profile roles split into short terms)
@@ -126,6 +129,12 @@ class SearchOutcome(BaseModel):
     skipped_sources: dict[str, str] = Field(default_factory=dict)
     summary_from_memory: bool | None = None
     smart_unavailable: str | None = None
+    limit: PlanLimit | None = Field(
+        None, description="A plan ran out with jobs left unjudged: stop, switch or wait"
+    )
+    handovers: list[str] = Field(
+        default_factory=list, description="Tasks the other plan took over (a spent plan)"
+    )
     seconds: float = 0.0
     cancelled: bool = Field(False, description="The user stopped the search")
     unscreened: int = Field(0, description="Shortlisted jobs not yet judged (continue them)")
@@ -203,6 +212,11 @@ def stop_search(run_id: str) -> bool:
     return True
 
 
+def running_searches() -> int:
+    """How many searches (or continuations) are running now."""
+    return len(_RUNS)
+
+
 @asynccontextmanager
 async def _running(run_id: str | None) -> AsyncIterator[str]:
     """Register a run so it can be stopped; model calls inside join its cancellable group."""
@@ -213,7 +227,8 @@ async def _running(run_id: str | None) -> AsyncIterator[str]:
         yield run_id
     finally:
         _RUNS.pop(run_id, None)
-        clear_group(run_id)
+        if not event.is_set():  # a stopped run's group stays cancelled for threads left behind
+            clear_group(run_id)
         _stop.reset(tokens[0])
         call_group.reset(tokens[1])
         _log.reset(tokens[2])
@@ -239,7 +254,33 @@ async def _run_search(
     ws: Workspace, req: SearchRequest, emit: Emit, usage_sink: UsageSink | None
 ) -> SearchOutcome:
     t0 = time.monotonic()
+    outcome, query, cv = await _collect(ws, req, emit, usage_sink)
+    ws.last_query, ws.last_report = query, outcome.report
+    outcome.seconds = round(time.monotonic() - t0, 2)
+    _take_log(outcome)
+    outcome.history_id = history.record(ws, req, outcome).id
+    labels.attach_verdicts(ws, outcome.report, ws.last_models)  # labelled postings seen again
+    history.log_family_yield(
+        ws, outcome.history_id, _owner(ws, cv), outcome.families, outcome.report
+    )
+    return await _finish(outcome, emit)
+
+
+async def _collect(
+    ws: Workspace,
+    req: SearchRequest,
+    emit: Emit,
+    usage_sink: UsageSink | None,
+    known: MatchReport | None = None,
+    new_alerts_only: bool | None = None,
+) -> tuple[SearchOutcome, SearchQuery, Any]:
+    """Fetch, pre-filter and judge: the search pipeline up to its outcome (not yet saved).
+    With `known` (a retry of failed sources), jobs already among those results are left out.
+    Returns (outcome, the board query searched, the CV)."""
     names, gmail_skipped = _source_names(ws, req)
+    if req.smart:
+        for warning in await asyncio.to_thread(connections.plan_warnings, ws):
+            await _say(emit, "plan", warning)
     cv = await _load_cv(ws, req, emit, usage_sink)
     if cv is not None and req.smart and ws.llm_ready():
         await _learn_from_reasons(ws, emit, usage_sink)
@@ -252,11 +293,14 @@ async def _run_search(
         names,
         settings=ws.settings,
         cv_key=cv_key,
-        new_alerts_only=names == ["gmail_alerts"],  # "Search new alerts for this CV"
+        # "Search new alerts for this CV"; a retry keeps what its search asked for.
+        new_alerts_only=names == ["gmail_alerts"] if new_alerts_only is None else new_alerts_only,
     )
     skipped |= gmail_skipped
     counts: dict[str, int] = {}
     jobs, errors = await _capture(sources, req.query, query, counts, emit)
+    if known is not None:
+        jobs = await _unseen(known, jobs, emit)
     jobs, applied, dismissed = await _set_aside(ws, jobs, emit)
 
     ctx = _Context(req, cv, query, intent, profile)
@@ -278,16 +322,104 @@ async def _run_search(
         unscreened=count_unscreened(ws, req, matched.report),
         families=families,
     )
+    _note_limits(ws, outcome)
     if matched.complete:
         _mark_gmail_analysed(sources, outcome.report)
+    return outcome, query, cv
 
-    ws.last_query, ws.last_report = query, outcome.report
-    outcome.seconds = round(time.monotonic() - t0, 2)
+
+async def retry_sources(
+    ws: Workspace,
+    history_id: str,
+    names: list[str] | None = None,
+    emit: Emit = _noop,
+    usage_sink: UsageSink | None = None,
+    run_id: str | None = None,
+) -> SearchOutcome:
+    """Search again only the sources that failed in a past search (`names`, or every failed
+    one) with its filters, adding the new jobs they find to its results. Everything else is
+    kept as it was; the history entry is updated."""
+    async with _running(run_id):
+        return await _stoppable(_retry(ws, history_id, names, emit, usage_sink))
+
+
+async def _retry(
+    ws: Workspace,
+    history_id: str,
+    names: list[str] | None,
+    emit: Emit,
+    usage_sink: UsageSink | None,
+) -> SearchOutcome:
+    t0 = time.monotonic()
+    req, outcome = history.open_entry(ws, history_id)
+    failed = [s.name for s in outcome.sources if s.status == "failed"]
+    wanted = [name for name in (names or failed) if name in failed]
+    if not wanted:
+        raise ValueError("No failed source to search again in this search")
+    await _say(emit, "plan", f"Searching again only: {', '.join(wanted)}")
+    retry = req.model_copy(update={"query": req.query.model_copy(update={"sources": wanted})})
+    new, _, _ = await _collect(
+        ws, retry, emit, usage_sink, known=outcome.report, new_alerts_only=outcome.alert_only
+    )
+    _merge(outcome, new, wanted)
+    outcome.unscreened = count_unscreened(ws, req, outcome.report)
+    outcome.seconds = round(outcome.seconds + time.monotonic() - t0, 2)
     _take_log(outcome)
-    outcome.history_id = history.record(ws, req, outcome).id
-    labels.attach_verdicts(ws, outcome.report, ws.last_models)  # labelled postings seen again
-    history.log_family_yield(ws, outcome.history_id, _owner(ws, cv), families, outcome.report)
+    history.update(ws, history_id, outcome)
+    labels.attach_verdicts(ws, outcome.report, ws.last_models)
+    ws.last_report = outcome.report
     return await _finish(outcome, emit)
+
+
+async def _unseen(known: MatchReport, jobs: list[JobPosting], emit: Emit) -> list[JobPosting]:
+    """`jobs` that are not already among a search's results (same id, or the same role at
+    the same place), so a retry never judges or lists a job twice."""
+
+    def keys(job: JobPosting) -> set[tuple[str, str]]:
+        role = f"{tracker.role_id(job.title, job.company)}|{(job.location or '').casefold()}"
+        return {("id", job.id), ("role", role)}
+
+    seen = set().union(*(keys(r.job) for r in known.all_results()))
+    fresh = [job for job in jobs if not keys(job) & seen]
+    if len(fresh) < len(jobs):
+        await _say(emit, "prefilter", f"{len(jobs) - len(fresh)} already in these results")
+    return fresh
+
+
+def _merge(outcome: SearchOutcome, new: SearchOutcome, retried: list[str]) -> None:
+    """Add a retry's results to its search (in place): its jobs ranked into the buckets as
+    screening ranks them, its source rows and errors in place of the failed ones."""
+    rep, add = outcome.report, new.report
+    rep.matches = sorted([*rep.matches, *add.matches], key=lambda r: r.rank_key(), reverse=True)
+    rep.to_check = sorted([*rep.to_check, *add.to_check], key=lambda r: r.rank_key(), reverse=True)
+    rep.below_threshold = sorted(
+        [*rep.below_threshold, *add.below_threshold],
+        key=lambda r: (r.verdict is not None, r.rank_key()),
+        reverse=True,
+    )
+    rep.excluded += add.excluded
+    rep.applied, rep.dismissed = (
+        _once(rep.applied + add.applied),
+        _once(rep.dismissed + add.dismissed),
+    )
+    rep.not_retrieved += add.not_retrieved
+    rep.screened = rep.screened or add.screened
+    rep.summary = rep.summary or add.summary
+    rows = {s.name: s for s in new.sources}
+    outcome.sources = [rows.pop(s.name, s) for s in outcome.sources] + list(rows.values())
+    names = set(retried)
+    errors = {k: v for k, v in outcome.errors.items() if k.split(":")[0] not in names}
+    for key, value in new.errors.items():
+        errors[f"{key} (retry)" if key in errors else key] = value
+    outcome.errors = errors
+    outcome.skipped_sources = {
+        k: v for k, v in outcome.skipped_sources.items() if k not in names
+    } | new.skipped_sources
+    outcome.fetched += new.fetched
+    outcome.smart_unavailable = outcome.smart_unavailable or new.smart_unavailable
+    outcome.limit = new.limit or outcome.limit
+    outcome.handovers = list(dict.fromkeys([*outcome.handovers, *new.handovers]))
+    outcome.cancelled = new.cancelled
 
 
 async def continue_search(
@@ -430,6 +562,7 @@ async def _rejudge(
     outcome.smart_unavailable = None
     outcome.cancelled = _stopped()
     outcome.unscreened = count_unscreened(ws, req, report)
+    _note_limits(ws, outcome)
     outcome.seconds = round(outcome.seconds + time.monotonic() - t0, 2)
     outcome.history_id = history_id
     _take_log(outcome)
@@ -686,6 +819,13 @@ def _attribute(report: MatchReport, widen: bool) -> dict[str, str]:
 _RULES = "location, arrangement, salary, certifications, languages, optional job-level range"
 
 
+def _note_limits(ws: Workspace, outcome: SearchOutcome) -> None:
+    """Record tasks the other plan took over, and a spent plan that left jobs unjudged."""
+    outcome.handovers = connections.handovers(ws)
+    left = outcome.unscreened or any(k.startswith("screening") for k in outcome.errors)
+    outcome.limit = connections.plan_limit(ws) if left and not outcome.cancelled else None
+
+
 class _Matched(NamedTuple):
     report: MatchReport
     summary_from_memory: bool | None
@@ -765,7 +905,13 @@ async def _screen_shortlist(
     """Profile summary (pinned, remembered or built), then the job_matcher on the shortlist.
     Returns (summary from memory, screening errors)."""
     summary, from_memory = ctx.profile or await get_summary(
-        ws, ctx.cv, ctx.query, ctx.req.refresh_summary, emit, usage_sink, ctx.intent,
+        ws,
+        ctx.cv,
+        ctx.query,
+        ctx.req.refresh_summary,
+        emit,
+        usage_sink,
+        ctx.intent,
         role="quality",
     )
     errors = await _screen(

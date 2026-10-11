@@ -49,8 +49,10 @@ def _models(ws: Workspace, outcome: SearchOutcome) -> str | None:
         return None
     llm = ws.llm
     profile = (
-        " · profile saved" if outcome.summary_from_memory
-        else " · profile built with quality" if outcome.summary_from_memory is False
+        " · profile saved"
+        if outcome.summary_from_memory
+        else " · profile built with quality"
+        if outcome.summary_from_memory is False
         else ""
     )
     return (

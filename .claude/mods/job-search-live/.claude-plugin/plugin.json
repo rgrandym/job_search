@@ -1,0 +1,15 @@
+{
+  "name": "job-search-live",
+  "version": "0.1.0",
+  "description": "Job-search workspace pane: app tasks and searches as a stepper, subagents with elapsed time, the quality gate, plan windows; /live, /gate, and a Master CV check before the cv_writer skill.",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "pane": {
+      "type": "string",
+      "title": "Live pane",
+      "description": "auto opens the pane when a session starts; command opens it only on /live.",
+      "default": "command",
+      "options": ["auto", "command"]
+    }
+  }
+}

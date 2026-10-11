@@ -6,9 +6,12 @@ from pathlib import Path
 from typing import Any, TypeVar, cast
 
 import anthropic
+import httpcore2
+import httpx2
 from anthropic.types import MessageParam, ToolParam
 from pydantic import BaseModel
 
+from src.core.llm.calls import abortable_client
 from src.core.llm.types import (
     ChatMessage,
     ChatResponse,
@@ -22,6 +25,8 @@ from src.core.llm.types import (
 )
 
 T = TypeVar("T", bound=BaseModel)
+# The SDK passes its own per-request timeout; this only bounds the connection.
+HTTP_TIMEOUT = httpx2.Timeout(600.0, connect=15.0)
 
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 NO_CREDENTIALS = (
@@ -64,11 +69,12 @@ def has_ambient_credentials() -> bool:
 
 def subscription_env() -> dict[str, str]:
     """Process env without Anthropic API credentials, so the Claude Code CLI uses its own
-    claude.ai sign-in instead of silently billing an inherited API key."""
+    claude.ai sign-in instead of silently billing an inherited API key. `JOB_SEARCH_APP=1`
+    tells the workspace's Claude Code mod (`.claude/mods/job-search-live`) to stay out."""
     import os
 
     strip = {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "JOBSEARCH_ANTHROPIC_API_KEY"}
-    return {k: v for k, v in os.environ.items() if k not in strip}
+    return {k: v for k, v in os.environ.items() if k not in strip} | {"JOB_SEARCH_APP": "1"}
 
 
 def _llm_error(exc: Exception) -> Exception:
@@ -99,18 +105,22 @@ class AnthropicStructured:
         self.purpose = purpose
 
     def generate(self, *, system: str, prompt: str, output_model: type[T]) -> T:
-        try:
-            response = self.client.messages.parse(
-                model=self.model,
-                max_tokens=self.cfg.max_tokens,
-                system=system,
-                messages=[{"role": "user", "content": prompt}],
-                output_format=output_model,
-                **_effort(self.cfg, self.model),
-                **_extras(self.cfg, self.model),
-            )
-        except (anthropic.APIError, TypeError) as exc:
-            raise _llm_error(exc) from exc
+        # Abortable: Stop shuts the request down mid-call (`calls.cancel_group`).
+        # The SDK's own HTTP library (httpx2), so its client options and errors still apply.
+        network = httpcore2.SyncBackend()
+        with abortable_client(httpx2.Client, network, timeout=HTTP_TIMEOUT) as http:
+            try:
+                response = self.client.with_options(http_client=http).messages.parse(
+                    model=self.model,
+                    max_tokens=self.cfg.max_tokens,
+                    system=system,
+                    messages=[{"role": "user", "content": prompt}],
+                    output_format=output_model,
+                    **_effort(self.cfg, self.model),
+                    **_extras(self.cfg, self.model),
+                )
+            except (anthropic.APIError, TypeError) as exc:
+                raise _llm_error(exc) from exc
         if response.stop_reason == "refusal":
             raise LLMError(f"Model declined the request: {response.stop_details}")
         if response.stop_reason == "max_tokens":

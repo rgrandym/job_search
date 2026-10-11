@@ -21,7 +21,6 @@ import json
 import shutil
 import subprocess
 import tempfile
-import time
 import uuid
 from collections.abc import Awaitable, Callable
 from functools import lru_cache
@@ -30,6 +29,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
+from src.core.llm import usage
 from src.core.llm.anthropic_backend import NO_EFFORT, NO_XHIGH, subscription_env
 from src.core.llm.calls import run_cli
 from src.core.llm.codex_backend import parse_turn, render_turn, turn_schema
@@ -48,9 +48,6 @@ from src.core.llm.types import (
 
 T = TypeVar("T", bound=BaseModel)
 TIMEOUT_S = 600
-# Latest plan rate-limit state per window ("five_hour", "seven_day", ...), as reported by the
-# CLI's `rate_limit_event`s on each call. Process-local; refreshed by every Claude Code call.
-_LIMITS: dict[str, dict[str, Any]] = {}
 # Replaces Claude Code's default coding-assistant system prompt for agent turns.
 AGENT_SYSTEM = "You are the reasoning model inside a job-search application. Reply in JSON only."
 
@@ -180,25 +177,43 @@ def _events(stdout: str) -> list[dict[str, Any]]:
     return events
 
 
-def _record_limits(events: list[dict[str, Any]]) -> None:
+def _record_limits(events: list[dict[str, Any]]) -> float | None:
+    """Store the plan windows the call reported (`usage.record_claude_limit`); returns the
+    reset time of a window that refused the call, if one did."""
+    rejected = None
     for event in events:
         info = event.get("rate_limit_info") if event.get("type") == "rate_limit_event" else None
         if isinstance(info, dict) and info.get("rateLimitType"):
-            _LIMITS[str(info["rateLimitType"])] = {**info, "observed_at": int(time.time())}
+            usage.record_claude_limit(info)
+            if info.get("status") == "rejected" and info.get("resetsAt"):
+                rejected = float(info["resetsAt"])
+    return rejected
+
+
+def _error(
+    events: list[dict[str, Any]], data: dict[str, Any] | None, code: int, tail: str
+) -> LLMError:
+    """The error of a failed call; a refusing plan window makes it a limit with its reset."""
+    rejected = _record_limits(events)
+    if data is None:
+        message = f"claude -p failed (exit {code}): {tail}"
+    else:
+        detail = data.get("result") or data.get("api_error_status") or data.get("subtype")
+        message = f"Claude Code error: {detail}"
+    if rejected:
+        return LLMError(message, kind="limit", resets_at=rejected)
+    return LLMError(message)
 
 
 def _result(returncode: int, stdout: str, stderr: str) -> dict[str, Any]:
     """Parse `--output-format stream-json`: the final `result` event holds the answer in
     `structured_output`; `rate_limit_event`s update the plan usage view."""
     events = _events(stdout)
-    _record_limits(events)
     data = next((e for e in reversed(events) if e.get("type") == "result"), None)
-    if data is None:
+    if data is None or data.get("is_error") or data.get("subtype") != "success":
         tail = "\n".join((stdout + stderr).strip().splitlines()[-8:])
-        raise LLMError(f"claude -p failed (exit {returncode}): {tail}")
-    if data.get("is_error") or data.get("subtype") != "success":
-        detail = data.get("result") or data.get("api_error_status") or data.get("subtype")
-        raise LLMError(f"Claude Code error: {detail}")
+        raise _error(events, data, returncode, tail)
+    _record_limits(events)
     if data.get("structured_output") is None:
         raise LLMError("Claude Code returned no structured output")
     return data
@@ -247,26 +262,6 @@ async def run_claude_async(
             proc.kill()
             raise
     return _result(proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace"))
-
-
-def claude_code_usage() -> dict[str, Any]:
-    """Plan limits seen on the latest calls. Anthropic reports each window's status and reset
-    time; utilisation is only included as a window nears its limit."""
-    windows = [
-        {
-            "window": name,
-            "status": info.get("status"),
-            "resets_at": info.get("resetsAt"),
-            "utilization": info.get("utilization"),
-            "using_overage": bool(info.get("isUsingOverage")),
-            "observed_at": info.get("observed_at"),
-        }
-        for name, info in sorted(_LIMITS.items())
-    ]
-    return {
-        "windows": windows,
-        "updated_at": max((w["observed_at"] or 0 for w in windows), default=None),
-    }
 
 
 def _tokens(data: dict[str, Any]) -> tuple[int, int]:
@@ -417,14 +412,10 @@ def claude_events(
 
 
 def _native_result(events: list[dict[str, Any]], code: int, stderr: str) -> NativeTurn:
-    _record_limits(events)
     data = next((e for e in reversed(events) if e.get("type") == "result"), None)
-    if data is None:
-        tail = "\n".join(stderr.strip().splitlines()[-8:])
-        raise LLMError(f"claude -p failed (exit {code}): {tail}")
-    if data.get("is_error") or data.get("subtype") != "success":
-        detail = data.get("result") or data.get("api_error_status") or data.get("subtype")
-        raise LLMError(f"Claude Code error: {detail}")
+    if data is None or data.get("is_error") or data.get("subtype") != "success":
+        raise _error(events, data, code, "\n".join(stderr.strip().splitlines()[-8:]))
+    _record_limits(events)
     tokens_in, tokens_out = _tokens(data)
     return NativeTurn(
         text=str(data.get("result") or ""),

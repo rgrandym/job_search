@@ -14,7 +14,16 @@ from typing import Any
 from pydantic import SecretStr, TypeAdapter
 
 from src.core.config import LLMProviderName, Settings, get_settings
-from src.core.llm import ChatModel, LLMConfig, Role, UsageSink, make_chat, make_structured
+from src.core.llm import (
+    ChatModel,
+    LLMConfig,
+    Role,
+    UsageSink,
+    fallback,
+    make_chat,
+    make_structured,
+    usage,
+)
 from src.core.llm_provider import LLMProvider
 from src.cv import master_cv_manager as mgr
 from src.cv.models import JDAnalysis, MasterCV, TailoredCV
@@ -30,6 +39,7 @@ class Workspace:
         self._cli_login: dict[str, tuple[bool, float]] = {}  # provider -> (ok, checked_at)
         self.llm_config_path = data / "llm_config.json"
         self.llm = self._load_llm_config()
+        usage.configure(data)  # plan windows and spend persist next to the other app data
         self.memory = ProfileMemory(
             data / "profile_summaries.json", self.settings.output_dir / "profiles"
         )
@@ -151,7 +161,31 @@ class Workspace:
         cfg = self.llm
         if role in ("profile", "cv", "letter"):
             cfg = self.provider_config(cfg.provider_for(role))
-        return make_structured(cfg, role, usage_sink, purpose)
+        return make_structured(cfg, role, usage_sink, purpose, self.fallback_config(role))
+
+    def replacement(self, role: Role) -> tuple[LLMProviderName, str, str | None] | None:
+        """(plan, model, effort) that takes `role` over when its plan is spent; None when its
+        provider is not a plan, the other plan is not signed in, or offers nothing alike."""
+        provider = self.llm.provider_for(role)
+        if provider not in usage.PLAN_PROVIDERS:
+            return None
+        found = fallback.replacement_model(
+            provider, self.llm.model_for(role), self.llm.effort_for(role), self.llm.fallback_models
+        )
+        if found is None:
+            return None
+        other: LLMProviderName = "codex" if found[0] == "codex" else "claude_code"
+        return (other, found[1], found[2]) if self.provider_ready(other) else None
+
+    def fallback_config(self, role: Role) -> LLMConfig | None:
+        """The config `role` hands over to when its plan is spent (see `replacement`)."""
+        try:
+            found = self.replacement(role)
+        except Exception:  # noqa: BLE001 - no fallback is better than a failed call
+            return None
+        if found is None:
+            return None
+        return self.llm.with_role_model(role, *found)
 
     def chat(
         self,

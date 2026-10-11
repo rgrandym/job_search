@@ -2,8 +2,10 @@
 
 Every tailored CV looks exactly like the original: same layout, fonts, name, title, section
 headings and publications. Only content changes: guarded bullet rewrites, the order of a
-role's listed bullets, the order of skills, the summary, and lines left out when trimming for
-a more junior role was allowed. Paragraphs move whole, so each keeps its own formatting.
+role's listed bullets, the order of skills, the summary, one "Relevant skills for this role"
+line under it, and lines left out when trimming for a more junior role was allowed. For an
+academic post, whole sections may also move into the order academic readers expect
+(`academic_order`). Paragraphs move whole, so each keeps its own formatting.
 
 Each role is found as a block in the file (its heading line up to the next role or section),
 and `align_to_document` gives the structured CV the document's own wording for those lines
@@ -51,6 +53,29 @@ _STOP = {"the", "and", "ltd", "inc", "llc", "plc", "gmbh", "of", "for", "pre", "
 PROFILE_WORDS = {"profile", "summary", "statement", "about"}
 DATE_LINE = re.compile(r"\d{1,2}\s+[A-Z][a-z]+\s+\d{4}")
 HEADLINE_MATCH = 0.6  # enough to take the file's own headline line as the CV's headline
+ROLE_SKILLS_LABEL = "Relevant skills for this role"
+# Section kinds by heading words, in the order an academic CV presents them.
+ACADEMIC_SECTIONS: list[tuple[str, set[str]]] = [
+    ("profile", {"profile", "summary", "statement", "about", "objective"}),
+    ("education", {"education", "qualifications", "degrees"}),
+    ("experience", {"experience", "employment", "positions", "appointments", "career"}),
+    ("publications", {"publications", "papers", "articles", "patents", "bibliography"}),
+    ("grants", {"grants", "funding", "fellowships"}),
+    ("awards", {"awards", "honours", "honors", "prizes"}),
+    ("talks", {"presentations", "talks", "conferences", "invited"}),
+    ("teaching", {"teaching", "supervision", "mentoring", "lecturing"}),
+    ("service", {"service", "committees", "memberships", "reviewing", "editorial"}),
+    ("skills", {"skills", "techniques", "expertise", "competencies"}),
+    ("certifications", {"certifications", "certificates", "training", "courses"}),
+    ("languages", {"languages"}),
+    ("references", {"references", "referees"}),
+]
+# Words a section heading may carry besides its kind ("Selected Peer-Reviewed Publications").
+HEADING_FILLER = {
+    "selected", "research", "professional", "academic", "recent", "other", "key", "relevant",
+    "technical", "work", "and", "of", "in", "peer", "reviewed", "invited", "scientific",
+    "personal", "additional", "honours", "&", "a", "the",
+}  # fmt: skip
 
 
 def _plain(text: str) -> str:
@@ -222,10 +247,14 @@ def write_like_original(
     tailored: MasterCV,
     out: Path,
     headline_options: Sequence[str] = (),
+    role_skills: Sequence[str] = (),
+    academic: bool = False,
 ) -> list[str]:
     """Save `tailored` as a copy of `original` (the Word file `source` was read from) at
     `out`; returns notes on anything kept as in the original. `headline_options` are written
-    under the CV's own headline, in its formatting, for the user to keep or delete."""
+    under the CV's own headline, in its formatting, for the user to keep or delete;
+    `role_skills` as one line under the summary. `academic` puts the sections in the order
+    academic readers expect."""
     doc = Document(str(original))
     claimed: list[Any] = []
     headline = find_paragraph(doc, source.basics.headline or "", 0.75)
@@ -245,6 +274,9 @@ def write_like_original(
     notes += _skills(doc, source.skills, tailored.skills, claimed)
     # Last, so the added lines are never taken for a role, summary or skills line.
     notes += _headline_options(headline, tailored.basics.headline, headline_options)
+    notes += _role_skills_line(doc, role_skills)
+    if academic:
+        notes += academic_order(doc)
     out.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(out))
     return notes
@@ -319,6 +351,72 @@ def _headline_options(
     for option in reversed(extra):
         insert_paragraph_after(line, option)
     return []
+
+
+def _role_skills_line(doc: DocxDocument, skills: Sequence[str]) -> list[str]:
+    """One line under the summary, in its formatting: the CV's own skills that matter most
+    for this job."""
+    if not skills:
+        return []
+    lines = profile_paragraphs(doc)
+    if not lines:
+        return ["Relevant skills line not added (no profile or summary section in the Word file)"]
+    insert_paragraph_after(lines[-1], f"{ROLE_SKILLS_LABEL}: {' · '.join(skills)}")
+    return []
+
+
+def _section_kind(paragraph: Paragraph) -> str | None:
+    """The kind of section a heading line opens, or None. Only headings made of a section
+    word and filler ("Selected Publications") count, so a role line such as "TEACHING
+    ASSISTANT, Univ." or a name in capitals never starts a section."""
+    text = paragraph.text.strip()
+    words = re.findall(r"[a-z&]+", _plain(text))
+    if not words or len(words) > 5 or re.search(r"\d", text):
+        return None
+    kind = next((k for k, names in ACADEMIC_SECTIONS if set(words) & names), None)
+    allowed = HEADING_FILLER | (dict(ACADEMIC_SECTIONS).get(kind or "", set()))
+    if kind is None or not set(words) <= allowed:
+        return None
+    bold = bool(paragraph.runs) and all(r.bold for r in paragraph.runs if r.text.strip())
+    styled = _heading_level(paragraph) in (1, 2, 3) or _section_break(paragraph)
+    return kind if styled or bold or text.isupper() else None
+
+
+def academic_order(doc: DocxDocument) -> list[str]:
+    """Move whole sections (a heading and everything up to the next) into the academic order:
+    profile, education, experience, publications, grants, awards, talks, teaching, service,
+    skills, certifications, languages, references. A heading not recognised moves with the
+    section above it. Only top-level sections of the page body move; the name and contact
+    lines above the first section stay first."""
+    body = doc.element.body
+    children = [c for c in body if not c.tag.endswith("}sectPr")]
+    starts = [
+        (children.index(p._p), kind)
+        for p in doc.paragraphs
+        if (kind := _section_kind(p)) is not None
+    ]
+    if len(starts) < 2:
+        return ["Sections kept in your CV's order (its section headings were not recognised)"]
+    rank = {kind: n for n, (kind, _) in enumerate(ACADEMIC_SECTIONS)}
+    blocks = [
+        (kind, children[start : starts[n + 1][0] if n + 1 < len(starts) else len(children)])
+        for n, (start, kind) in enumerate(starts)
+    ]
+    ordered = sorted(blocks, key=lambda b: rank.get(b[0], len(rank)))
+    if [k for k, _ in ordered] == [k for k, _ in blocks]:
+        return []
+    anchor = children[starts[0][0]].getprevious()
+    for _, elements in blocks:
+        for element in elements:
+            body.remove(element)
+    for _, elements in reversed(ordered):
+        for element in reversed(elements):
+            if anchor is None:
+                body.insert(0, element)
+            else:
+                anchor.addnext(element)
+    names = ", ".join(dict.fromkeys(k for k, _ in ordered))
+    return [f"Sections arranged for an academic post: {names}"]
 
 
 def _summary(doc: DocxDocument, old: str | None, new: str | None, claimed: list[Any]) -> list[str]:

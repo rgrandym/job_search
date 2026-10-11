@@ -1,5 +1,5 @@
-import { X } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type TextareaHTMLAttributes } from "react";
+import { Maximize2, Minus, X } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type TextareaHTMLAttributes } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "../lib/utils";
 
@@ -202,6 +202,43 @@ export function Segmented<T extends string>({
   );
 }
 
+type Edge = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
+const EDGES: { edge: Edge; className: string }[] = [
+  { edge: "n", className: "inset-x-3 -top-1 h-2 cursor-ns-resize" },
+  { edge: "s", className: "inset-x-3 -bottom-1 h-2 cursor-ns-resize" },
+  { edge: "e", className: "inset-y-3 -right-1 w-2 cursor-ew-resize" },
+  { edge: "w", className: "inset-y-3 -left-1 w-2 cursor-ew-resize" },
+  { edge: "ne", className: "-right-1 -top-1 h-3 w-3 cursor-nesw-resize" },
+  { edge: "sw", className: "-bottom-1 -left-1 h-3 w-3 cursor-nesw-resize" },
+  { edge: "nw", className: "-left-1 -top-1 h-3 w-3 cursor-nwse-resize" },
+  { edge: "se", className: "-bottom-1 -right-1 h-3 w-3 cursor-nwse-resize" },
+];
+const WINDOW_KEY = "jobsearch.window.";
+const MIN_W = 288;
+const MIN_H = 160;
+
+function savedSize(id: string): { w: number; h: number } | null {
+  try {
+    const raw = localStorage.getItem(WINDOW_KEY + id);
+    const size = raw ? (JSON.parse(raw) as { w: number; h: number }) : null;
+    return size && size.w > 0 && size.h > 0 ? size : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveSize(id: string, size: { w: number; h: number } | null) {
+  try {
+    if (size) localStorage.setItem(WINDOW_KEY + id, JSON.stringify({ w: Math.round(size.w), h: Math.round(size.h) }));
+    else localStorage.removeItem(WINDOW_KEY + id);
+  } catch {
+    /* the size just isn't remembered */
+  }
+}
+
+/** A window over the app. Drag any edge or corner to resize it (the size is remembered per
+ *  window; double-click an edge to restore the default). Minimise it, or double-click its title
+ *  bar, to fold it into a bar at the bottom right and keep working behind it. */
 export function Modal({
   open,
   onClose,
@@ -211,17 +248,29 @@ export function Modal({
   resizable,
   document: isDocument,
   headerAction,
+  id,
 }: {
   open: boolean;
   onClose: () => void;
   title: string;
   children: ReactNode;
   wide?: boolean;
+  /** A larger default size (every window can be resized). */
   resizable?: boolean;
   /** Full-window frame whose child owns the scrolling (the CV page editor). */
   document?: boolean;
   headerAction?: ReactNode;
+  /** Remembers this window's size (default: its title). */
+  id?: string;
 }) {
+  const key = id ?? title;
+  const [size, setSize] = useState<{ w: number; h: number } | null>(() => savedSize(key));
+  const [minimised, setMinimised] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => setSize(savedSize(key)), [key]);
+  useEffect(() => {
+    if (!open) setMinimised(false);
+  }, [open]);
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -229,38 +278,209 @@ export function Modal({
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
   if (!open) return null;
+
+  // The window is centred, so an edge moves by half the size change: grow by twice the drag.
+  const drag = (edge: Edge) => (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || !box.current) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = box.current.getBoundingClientRect();
+    const [x0, y0] = [e.clientX, e.clientY];
+    const sx = edge.includes("e") ? 2 : edge.includes("w") ? -2 : 0;
+    const sy = edge.includes("s") ? 2 : edge.includes("n") ? -2 : 0;
+    let last = { w: rect.width, h: rect.height };
+    const move = (ev: PointerEvent) => {
+      last = {
+        w: Math.min(window.innerWidth - 16, Math.max(MIN_W, rect.width + sx * (ev.clientX - x0))),
+        h: Math.min(window.innerHeight - 16, Math.max(MIN_H, rect.height + sy * (ev.clientY - y0))),
+      };
+      setSize(last);
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      saveSize(key, last);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+  const resetSize = () => {
+    setSize(null);
+    saveSize(key, null);
+  };
+
+  const controls = (
+    <div className="flex shrink-0 items-center gap-3">
+      {!minimised && headerAction}
+      <button
+        aria-label={minimised ? "Restore" : "Minimise"}
+        title={minimised ? "Restore" : "Minimise (keep working behind it)"}
+        className="text-faint hover:text-fg"
+        onClick={() => setMinimised((v) => !v)}
+      >
+        {minimised ? <Maximize2 size={14} /> : <Minus size={16} />}
+      </button>
+      <button aria-label="Close" className="text-faint hover:text-fg" onClick={onClose}>
+        <X size={16} />
+      </button>
+    </div>
+  );
+  if (minimised) {
+    return createPortal(
+      <div
+        role="dialog"
+        aria-label={title}
+        className="card fixed bottom-3 right-3 z-50 flex w-72 max-w-[calc(100vw-1.5rem)] items-center justify-between gap-3 px-3 py-2 shadow-2xl"
+        onDoubleClick={() => setMinimised(false)}
+      >
+        <h2 className="truncate text-[13px] font-semibold">{title}</h2>
+        {controls}
+      </div>,
+      document.body,
+    );
+  }
   const header = (
-    <div className={cn("flex items-center justify-between gap-3 bg-panel", isDocument ? "border-b border-border px-4 py-2.5" : "sticky top-0 z-10 mb-4 pb-2")}>
-      <h2 className="truncate text-[15px] font-semibold">{title}</h2>
-      <div className="flex shrink-0 items-center gap-3">
-        {headerAction}
-        <button aria-label="Close" className="text-faint hover:text-fg" onClick={onClose}>
-          <X size={16} />
-        </button>
-      </div>
+    <div
+      className={cn("flex items-center justify-between gap-3 bg-panel", isDocument ? "border-b border-border px-4 py-2.5" : "sticky top-0 z-10 mb-4 pb-2")}
+      onDoubleClick={(e) => e.target === e.currentTarget && setMinimised(true)}
+    >
+      <h2 className="truncate text-[15px] font-semibold" onDoubleClick={() => setMinimised(true)}>{title}</h2>
+      {controls}
     </div>
   );
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-2 sm:p-4" onMouseDown={onClose}>
       <div
+        ref={box}
         role="dialog"
         aria-label={title}
+        style={size ? { width: size.w, height: size.h, maxWidth: "calc(100vw - 1rem)", maxHeight: "calc(100vh - 1rem)" } : undefined}
         className={cn(
-          "card shadow-2xl",
-          isDocument
-            ? "flex h-[96vh] w-[min(1180px,100%)] flex-col overflow-hidden"
-            : "max-h-[85vh] overflow-y-auto p-5 scroll-thin",
-          !isDocument && (resizable
-            ? "h-[70vh] w-[92vw] min-h-64 min-w-72 max-w-[calc(100vw-2rem)] resize overflow-auto"
-            : wide ? "w-full max-w-2xl" : "w-full max-w-md"),
+          "relative flex flex-col",
+          isDocument && !size && "h-[96vh] w-[min(1180px,100%)]",
+          !isDocument && !size && (resizable
+            ? "h-[70vh] w-[92vw] max-w-[calc(100vw-2rem)]"
+            : cn("max-h-[85vh] w-full", wide ? "max-w-2xl" : "max-w-md")),
         )}
         onMouseDown={(e) => e.stopPropagation()}
       >
-        {header}
-        {isDocument ? <div className="min-h-0 flex-1">{children}</div> : children}
+        {/* The frame clips its content; the resize edges sit outside it, on the frame's border. */}
+        <div className="card flex min-h-0 flex-1 flex-col overflow-hidden shadow-2xl">
+          {isDocument ? (
+            <>
+              {header}
+              <div className="min-h-0 flex-1">{children}</div>
+            </>
+          ) : (
+            // The content scrolls inside, so the resize edges stay on the window's frame.
+            <div className="min-h-0 flex-1 overflow-y-auto p-5 scroll-thin">
+              {header}
+              {children}
+            </div>
+          )}
+        </div>
+        {EDGES.map(({ edge, className }) => (
+          <div
+            key={edge}
+            aria-hidden
+            className={cn("absolute z-20 touch-none", className)}
+            title="Drag to resize; double-click for the default size"
+            onPointerDown={drag(edge)}
+            onDoubleClick={resetSize}
+          />
+        ))}
       </div>
     </div>,
     document.body,
+  );
+}
+
+const HEIGHT_KEY = "jobsearch.height.";
+
+function savedHeight(id: string): number | null {
+  try {
+    const value = Number(localStorage.getItem(HEIGHT_KEY + id));
+    return value > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveHeight(id: string, height: number | null) {
+  try {
+    if (height === null) localStorage.removeItem(HEIGHT_KEY + id);
+    else localStorage.setItem(HEIGHT_KEY + id, String(Math.round(height)));
+  } catch {
+    /* the height just isn't remembered */
+  }
+}
+
+/** A section body whose height the user sets by dragging its bottom edge (or with the arrow
+ *  keys on the edge); it then scrolls inside. The height is remembered per `id`; double-click
+ *  the edge to fit the content again. */
+export function Resizable({ id, children, className, fit, min = 48 }: {
+  id: string;
+  children: ReactNode;
+  className?: string;
+  /** Classes while the user has not set a height (e.g. a maximum before it scrolls). */
+  fit?: string;
+  min?: number;
+}) {
+  const [height, setHeight] = useState<number | null>(() => savedHeight(id));
+  const body = useRef<HTMLDivElement>(null);
+  const set = (value: number | null) => {
+    const next = value === null ? null : Math.max(min, value);
+    setHeight(next);
+    saveHeight(id, next);
+  };
+  const drag = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || !body.current) return;
+    e.preventDefault();
+    const startY = e.clientY;
+    const startHeight = body.current.getBoundingClientRect().height;
+    let last = startHeight;
+    const move = (ev: PointerEvent) => {
+      last = Math.max(min, startHeight + ev.clientY - startY);
+      setHeight(last);
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      document.body.style.removeProperty("cursor");
+      saveHeight(id, last);
+    };
+    document.body.style.cursor = "row-resize";
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+  return (
+    <>
+      <div
+        ref={body}
+        style={height === null ? undefined : { height }}
+        className={cn(height !== null ? "overflow-y-auto overflow-x-hidden scroll-thin" : fit, className)}
+      >
+        {children}
+      </div>
+      <div
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Resize this section"
+        tabIndex={0}
+        title="Drag to resize; double-click to fit the content"
+        onPointerDown={drag}
+        onDoubleClick={() => set(null)}
+        onKeyDown={(e) => {
+          if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+          e.preventDefault();
+          const current = height ?? body.current?.getBoundingClientRect().height ?? min;
+          set(current + (e.key === "ArrowDown" ? 24 : -24));
+        }}
+        className="group/edge -mx-1 mt-1 flex h-2 cursor-row-resize items-center justify-center focus-visible:outline-none"
+      >
+        <span className="h-1 w-8 rounded-full bg-border transition-colors group-hover/edge:w-full group-hover/edge:bg-accent group-focus-visible/edge:w-full group-focus-visible/edge:bg-accent" />
+      </div>
+    </>
   );
 }
 

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from src.core.config import LLMProviderName, Settings
+
+if TYPE_CHECKING:
+    from src.core.llm.usage import ErrorKind
 
 # quality: rare, accuracy-critical work (CV parsing and tailoring, cover letters, second
 # opinions, the assistant). screening: the job_matcher's first pass, hundreds of calls per
@@ -29,13 +32,25 @@ class ModelUsage(BaseModel):
     estimated: bool = False
     purpose: str = ""
     provider: str | None = None  # the provider that served the call (set by `make_structured`)
+    switched_from: str | None = None  # "provider:model" whose spent plan handed the call over
 
 
 UsageSink = Callable[[ModelUsage], None]
 
 
 class LLMError(RuntimeError):
-    """Raised when the model refuses, truncates, or returns unparseable output."""
+    """Raised when the model refuses, truncates, or returns unparseable output, or the
+    provider refuses the call. `kind` says which (classified from the message unless the
+    backend knows better); `resets_at` is when a spent limit resets, when known."""
+
+    def __init__(
+        self, message: str = "", kind: ErrorKind | None = None, resets_at: float | None = None
+    ) -> None:
+        super().__init__(message)
+        from src.core.llm.usage import classify, reset_from_text
+
+        self.kind: ErrorKind = kind or classify(message)
+        self.resets_at = resets_at or (reset_from_text(message) if self.kind == "limit" else None)
 
 
 class LLMConfig(BaseModel):
@@ -60,6 +75,16 @@ class LLMConfig(BaseModel):
     letter_effort: Effort = "high"
     letter_provider: LLMProviderName | None = Field(
         None, description="Another provider for the letter model; None: `provider`"
+    )
+    on_limit: Literal["switch", "ask"] = Field(
+        "switch",
+        description="A spent plan: switch to the other plan's equivalent model, or ask the user",
+    )
+    handover_threshold: int = Field(
+        90, ge=50, le=100, description="Warn before a search once a plan window is this % used"
+    )
+    fallback_models: dict[str, str] = Field(
+        default_factory=dict, description="Model id -> replacement on the other plan (overrides)"
     )
     max_tokens: int = 16000
     refusal_fallback: bool = True
@@ -96,6 +121,23 @@ class LLMConfig(BaseModel):
     def profile_provider_for(self) -> LLMProviderName:
         """The provider that builds the profile."""
         return self.provider_for("profile")
+
+    def with_role_model(
+        self, role: Role, provider: LLMProviderName, model: str, effort: str | None = None
+    ) -> LLMConfig:
+        """This config with `role` served by `model` on `provider` (a plan handover), at
+        `effort` when given."""
+        name: str = role
+        if self._own(role):
+            name = "cv" if role == "letter" and not self.letter_model else role
+        elif role not in ("quality", "screening"):
+            name = "quality"  # a writing role without its own model uses the quality model
+        update: dict[str, Any] = {"provider": provider, "api_key": None, f"{name}_model": model}
+        if name in ("profile", "cv", "letter"):
+            update[f"{name}_provider"] = None
+        if effort is not None:
+            update[f"{name}_effort"] = effort
+        return self.model_copy(update=update)
 
     def for_role(self, role: Role) -> LLMConfig:
         """The config one client uses: its role's effort in `effort`."""

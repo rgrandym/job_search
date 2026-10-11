@@ -24,7 +24,7 @@ from urllib.robotparser import RobotFileParser
 import httpx
 
 from src.core.config import Settings, get_settings
-from src.core.llm.calls import call_group, is_cancelled
+from src.core.llm.calls import abort_scope, call_group, is_cancelled, make_abortable
 from src.cv.models import WorkArrangement
 from src.jobs.models import JobPosting
 
@@ -80,6 +80,8 @@ class HttpFetcher:
             headers={"User-Agent": user_agent or self.settings.http_user_agent},
             follow_redirects=True,
         )
+        # Stop cuts off a request in flight (a client passed in, e.g. in tests, is left as is).
+        self._abortable = None if client is not None else make_abortable(self.client)
         self._last_hit: dict[str, float] = {}
         self._robots: dict[str, RobotFileParser] = {}
         self._lock = threading.Lock()  # sources fetch boards from several threads at once
@@ -92,9 +94,11 @@ class HttpFetcher:
         self._wait_turn(host)
         _check_stopped()
         try:
-            resp = self.client.get(url, **kwargs)
+            with abort_scope(self._abortable):
+                resp = self.client.get(url, **kwargs)
             resp.raise_for_status()
         except httpx.HTTPError as exc:
+            _check_stopped()
             raise SourceError(f"GET {url} failed: {exc}") from exc
         return resp
 
@@ -106,9 +110,11 @@ class HttpFetcher:
         self._wait_turn(host)
         _check_stopped()
         try:
-            resp = self.client.post(url, **kwargs)
+            with abort_scope(self._abortable):
+                resp = self.client.post(url, **kwargs)
             resp.raise_for_status()
         except httpx.HTTPError as exc:
+            _check_stopped()
             raise SourceError(f"POST {url} failed: {exc}") from exc
         return resp
 

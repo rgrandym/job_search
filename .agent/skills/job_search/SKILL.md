@@ -313,16 +313,35 @@ Profiles built before an intent change are listed with `intent_changed`.
 
 
 `profile_memory.summarize_profile(cv, query, llm, memory, source_text=...)` returns a
-`ProfileSummary`: headline, seniority, years, core expertise (direct experience), key skills
-with level (expert / proficient / familiar) and evidence, domains and sectors, leadership,
-qualifications, achievements, **transferable strengths** (6-12, kept apart from direct
+`ProfileSummary`: headline, seniority, years, **seniority_evidence** (what sets the level,
+read from the work, not titles or years alone: autonomy, decision authority, people led,
+reach, budget, stakeholder level, each with ids), a **pitch** (2-3 sentences a recruiter
+would remember), core expertise (direct experience), key skills with level (expert /
+proficient / familiar), **recency** (current / recent / earlier) and evidence, domains and
+sectors, leadership, qualifications, achievements (action, scope, contribution, outcome;
+quantified only where the CV is), **transferable strengths** (6-12, kept apart from direct
 experience), **capabilities** (every capability the document evidences: technical, delivery,
-leadership, external and commercial, communication), **publications** (`PublicationRecord`:
+leadership, external and commercial, communication), **expansion** (3-6 `ExpansionRoute`s:
+a capability, the fields it could open, its evidence ids, what is still missing and a
+realistic bridge), **publications** (`PublicationRecord`:
 counts, lead-author share, span, themes, most relevant outputs, patents / grants / talks /
 awards, and what the record signals to employers; null without one), **target roles**
 (3-5 obvious + 3-6 adjacent, as advertised titles), stretch roles, **not_a_fit** role types,
 and a 4-6 sentence narrative. Fields added later default to empty in stored profiles until
 updated.
+
+- **Claims checked by code** (`check_claims`, when a profile is built): an achievement or
+  pitch with a number the CV and its document do not have is dropped (so is a pitch with
+  stock superlatives); expansion routes keep only evidence ids that exist, and a route left
+  without any is dropped.
+- **What the job_matcher sees** (`screener.matcher_profile`): the profile without rejected
+  families, the pitch, the expansion routes and each family's `positioning`. Those are
+  presentation (for the user and for CV writing), not evidence; `seniority_evidence` is
+  evidence and is seen.
+- **CV tailoring reads the profile** (`profile_brief`, via `cv_service.stored_profile`: the
+  selected CV's general profile, else its newest): pitch, what sets the level, strengths,
+  transferable experience, publication signals and the role family the job was found under
+  (its positioning, rationale, gap and evidence). Never builds one.
 
 - Built only from CV facts (and the search and career intent). The model inventories
   capabilities and the publication record first, then derives roles from them, not from past
@@ -342,7 +361,8 @@ updated.
   published scientific leader into consulting, due diligence, licensing or scientific
   affairs). Missing direct experience of the new function is the family's `gap`, not a
   reason to drop it. Each has advertised titles, domain terms, `evidence` ids (CV ids or
-  `[src-N]` document lines, e.g. publications), the main `gap` and a `rationale`. Every career-intent target area becomes a
+  `[src-N]` document lines, e.g. publications), the main `gap`, a `rationale` and a
+  `positioning` (how to present the candidate for these roles). Every career-intent target area becomes a
   `requested` adjacent family. **LLM proposes, code decides** (`check_families`): evidence ids
   must exist in the CV or, for `[src-N]`, in the document the summary was built from
   (re-checks without the document keep src ids verified then; adjacent ≥ 2, progression ≥ 1), non-core families must state a gap,
@@ -461,6 +481,15 @@ usually come last.
   every search (`from_memory`, "Judged before" in the UI); presentation-only leading
   description labels and known employer aliases share a key, while changed requirements
   are judged again. Bump `MATCHER_VERSION` whenever the prompt or scale changes.
+- *A spent plan* (Claude Code or Codex): the batch that hits the limit is not retried and no
+  later batch starts (`_Runner.limit`); its postings stay unjudged for **Continue**. With
+  `on_limit` "switch" (default), `core.llm.fallback` hands the role to the other plan's
+  model of the same standing at the same effort (`claude-opus-5` -> `gpt-6-sol`), so the
+  search goes on. Every verdict names the model that judged it (`JobVerdict.model`); a
+  verdict from a replacement model is **not remembered**, so the configured model judges that
+  posting next time. With "ask" (or no other plan signed in) the outcome carries
+  `SearchOutcome.limit` and the UI offers stop / continue on the other model
+  (`POST /api/search/continue/stream` with `switch`) / wait for the reset and continue.
 - *Second opinion*: every first-pass match (a lenient first pass can miss an unmet essential
   and put a weak job at the top), a posting within 5 points of the threshold, one scoring 65–80 with
   ambiguous seniority and leadership (both levels 2–3), or one that would match but for an
@@ -505,11 +534,14 @@ the prompt also caps every explanation list at 3 short points (`MAX_POINTS`, tri
 A batch with no answer within `JOBSEARCH_SCREEN_BATCH_TIMEOUT_S` (240) is abandoned (its CLI
 process killed via `core/llm/calls.cancel_group`) and retried once. A search started with
 `SearchRequest.run_id` can be stopped (`POST /api/search/stop/{run_id}`): sources not yet
-searched and batches not yet started are skipped, in-flight model calls, requests and Chrome
-pages are killed or abandoned, and the partial outcome is returned and recorded with
-`cancelled` and `unscreened` (shortlisted jobs without a verdict). Stop always acts within
-`STOP_GRACE_S` (1.5 s): a step still busy then is cancelled outright (`_stoppable`; the run
-ends with "Search stopped", no partial outcome), like Ctrl+C without restarting the app.
+searched and batches not yet started are skipped, in-flight model calls (CLI processes
+killed, API requests cut off mid-call by shutting their sockets: `calls.abortable_client`),
+source requests (`HttpFetcher`, same way) and Chrome pages are stopped at once, and the
+partial outcome is returned and recorded with `cancelled` and `unscreened` (shortlisted jobs
+without a verdict). A stopped run's call group stays cancelled, so a worker thread left
+behind cannot start another call or request. Stop always acts within `STOP_GRACE_S` (0.5 s):
+a step still busy then is cancelled outright (`_stoppable`; the run ends with "Search
+stopped", no partial outcome), like Ctrl+C without restarting the app.
 Searches, Continue and Fetch full posting all run this way. `continue_search` (`POST /api/search/continue/stream`)
 judges only those, keeps the existing verdicts, and updates the history entry in place.
 

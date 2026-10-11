@@ -213,7 +213,7 @@ def test_new_reasons_are_learned_once_and_go_straight_into_the_profile(
     learned = learning.learn_new(ws, fake)  # type: ignore[arg-type]
     assert learned is not None and [p.text for p in learned] == [floor.text]
     assert learned[0].status == "accepted" and learned[0].auto
-    assert 'ruled out (N/A): site monitoring travel' in fake.calls[0][0]
+    assert "ruled out (N/A): site monitoring travel" in fake.calls[0][0]
     summary = learning.learned_for(ws, SUMMARY, master_cv)
     assert floor.text in summary.not_a_fit  # every later search's profile carries it
 

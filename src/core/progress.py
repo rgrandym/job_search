@@ -6,15 +6,23 @@ A route opens a task with `track(task_id, title, total)`. Code anywhere below it
 Without an open task every call is a no-op. The UI polls `snapshot(task_id)` about once a
 second: `done / total` is real step progress, and `waiting_on` / `waiting_since` show which
 model call is running and for how long, so a slow call is visible as a slow call.
+
+`run(task_id, title, work)` also makes the task stoppable: `stop(task_id)` (the UI's Stop
+button) ends it at once. The work is cancelled, its model calls are killed or cut off
+mid-request (`llm.calls.cancel_group`; the task id is their call group) and, since a stopped
+group refuses new calls, a worker thread left behind ends without spending more. `run` then
+raises `TaskStopped`.
 """
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Awaitable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from typing import Any, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -45,6 +53,14 @@ class TaskProgress(BaseModel):
 _TASKS: dict[str, TaskProgress] = {}
 _LOCK = threading.Lock()
 _CURRENT: ContextVar[str | None] = ContextVar("progress_task", default=None)
+# Stoppable work by task id: its event loop and the asyncio task running it.
+_STOPPABLE: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Future[Any]]] = {}
+STOPPED = "Stopped"
+T = TypeVar("T")
+
+
+class TaskStopped(Exception):
+    """The user stopped the task (`stop`)."""
 
 
 def _update(**changes: object) -> None:
@@ -128,3 +144,65 @@ def snapshot(task_id: str) -> TaskProgress | None:
     with _LOCK:
         task = _TASKS.get(task_id)
     return task.model_copy(update={"now": time.time()}) if task else None
+
+
+def active() -> list[TaskProgress]:
+    """Tasks still running, oldest first (the dev pane's `scripts/live_status.py` lists them)."""
+    now = time.time()
+    with _LOCK:
+        running = [t for t in _TASKS.values() if not t.finished]
+    return [t.model_copy(update={"now": now}) for t in sorted(running, key=lambda t: t.started_at)]
+
+
+async def run(task_id: str | None, title: str, work: Awaitable[T], total: int = 0) -> T:
+    """`await work` as a tracked task that `stop(task_id)` ends at once (raising
+    `TaskStopped` here). Model calls made inside, in this coroutine or its worker threads,
+    belong to the call group `task_id`. Without an id it simply awaits `work`."""
+    from src.core.llm.calls import call_group, clear_group  # llm imports this module
+
+    if not task_id:
+        return await work
+    with track(task_id, title, total):
+        token = call_group.set(task_id)
+        try:
+            child = asyncio.ensure_future(work)  # copies the context: task and call group
+        finally:
+            call_group.reset(token)
+        _STOPPABLE[task_id] = (asyncio.get_running_loop(), child)
+        try:
+            await asyncio.wait({child})
+        except asyncio.CancelledError:  # the request itself went away
+            child.cancel()
+            raise
+        finally:
+            _STOPPABLE.pop(task_id, None)
+        if child.cancelled():
+            raise TaskStopped(STOPPED)
+        result: T = child.result()
+        clear_group(task_id)  # a stopped group stays cancelled for threads left behind
+        return result
+
+
+def stop(task_id: str) -> bool:
+    """Stop a running task now: its model calls are killed or cut off and its work cancelled.
+    False when no such task is running."""
+    from src.core.llm.calls import cancel_group
+
+    entry = _STOPPABLE.get(task_id)
+    if entry is None:
+        return False
+    cancel_group(task_id)
+    with _LOCK:
+        task = _TASKS.get(task_id)
+        if task is not None:
+            _TASKS[task_id] = task.model_copy(
+                update={
+                    "finished": True,
+                    "error": STOPPED,
+                    "waiting_on": None,
+                    "updated_at": time.time(),
+                }
+            )
+    loop, child = entry
+    loop.call_soon_threadsafe(child.cancel)
+    return True

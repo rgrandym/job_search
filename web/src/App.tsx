@@ -1,20 +1,19 @@
 import { useQuery } from "@tanstack/react-query";
-import { Bot, Briefcase, ListChecks, Moon, Settings, SlidersHorizontal, Sun } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
-import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import { Bot, Briefcase, ListChecks, PanelLeft, PanelRight, PanelTop, Settings, SlidersHorizontal } from "lucide-react";
+import { Fragment, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { Panel, PanelGroup, PanelResizeHandle, type ImperativePanelHandle } from "react-resizable-panels";
 import { AgentPanel } from "./components/AgentPanel";
 import { ResultsPanel } from "./components/ResultsPanel";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { Sidebar } from "./components/Sidebar";
 import { SummaryDialog } from "./components/SummaryDialog";
+import { ThemePicker } from "./components/ThemePicker";
 import { api } from "./lib/api";
 import { useRestoreLastSearch } from "./lib/useRestoreLastSearch";
 import { cn } from "./lib/utils";
 import { useChat } from "./stores/chatStore";
 import { useSearch } from "./stores/searchStore";
 
-// v2: light became the default (the old key stored the dark default on every load).
-const THEME_KEY = "jobsearch.theme.v2";
 const VIEW_KEY = "jobsearch.view"; // the narrow-screen panel open last
 const WIDE = "(min-width: 1024px)"; // three resizable columns from here; tabs below
 
@@ -46,8 +45,80 @@ function TabButton({ active, onClick, icon, children }: { active: boolean; onCli
 }
 
 function Handle() {
-  return <PanelResizeHandle className="w-px bg-border transition-colors hover:bg-accent data-[resize-handle-active]:bg-accent" />;
+  return (
+    <PanelResizeHandle
+      className="w-1 shrink-0 border-x border-transparent bg-border bg-clip-content transition-colors hover:bg-accent data-[resize-handle-active]:bg-accent"
+      title="Drag to resize; drag to the edge to collapse"
+    />
+  );
 }
+
+// A collapsed column keeps a slim rail (percent of the window width) that opens it again.
+const RAIL = 2.5;
+
+interface ColumnSpec {
+  id: string;
+  label: string;
+  icon: ReactNode;
+  defaultSize: number;
+  minSize: number;
+  maxSize?: number;
+  className: string;
+}
+
+/** One of the three columns: resizable by dragging its edges, collapsible to a rail (from
+ *  the header buttons, the rail itself, or by dragging it past its minimum width). The layout,
+ *  collapsed columns included, is remembered (`autoSaveId`). */
+function Column({ spec, order, panel, onToggle, children }: {
+  spec: ColumnSpec;
+  order: number;
+  panel: RefObject<ImperativePanelHandle>;
+  onToggle: (collapsed: boolean) => void;
+  children: ReactNode;
+}) {
+  // The group reports the restored layout through these callbacks too (a column saved
+  // collapsed opens collapsed).
+  const [collapsed, setCollapsed] = useState(false);
+  const change = (value: boolean) => {
+    setCollapsed(value);
+    onToggle(value);
+  };
+  return (
+    <Panel
+      id={spec.id}
+      order={order}
+      ref={panel}
+      collapsible
+      collapsedSize={RAIL}
+      defaultSize={spec.defaultSize}
+      minSize={spec.minSize}
+      maxSize={spec.maxSize}
+      onCollapse={() => change(true)}
+      onExpand={() => change(false)}
+      className={cn("min-w-0", spec.className)}
+    >
+      {collapsed ? (
+        <button
+          className="flex h-full w-full flex-col items-center gap-2 pt-3 text-faint hover:bg-surface hover:text-fg"
+          title={`Show ${spec.label}`}
+          onClick={() => panel.current?.expand()}
+        >
+          {spec.icon}
+          <span className="text-[11px] font-medium [writing-mode:vertical-rl]">{spec.label}</span>
+        </button>
+      ) : (
+        children
+      )}
+    </Panel>
+  );
+}
+
+const COLUMNS: ColumnSpec[] = [
+  { id: "search", label: "Search", icon: <SlidersHorizontal size={14} />, defaultSize: 22, minSize: 16, maxSize: 40, className: "bg-bg" },
+  { id: "results", label: "Results", icon: <ListChecks size={14} />, defaultSize: 50, minSize: 25, className: "bg-bg" },
+  { id: "assistant", label: "Assistant", icon: <Bot size={14} />, defaultSize: 28, minSize: 18, maxSize: 55, className: "bg-panel" },
+];
+const TOGGLE_ICONS = [<PanelLeft key="l" size={15} />, <PanelTop key="t" size={15} />, <PanelRight key="r" size={15} />];
 
 export default function App() {
   // Output files can change outside the browser; keep the CV library current.
@@ -55,13 +126,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [summaryProfileKey, setSummaryProfileKey] = useState<string | null>(null);
-  const [theme, setTheme] = useState(() => localStorage.getItem(THEME_KEY) ?? "light");
   useRestoreLastSearch();
-
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    localStorage.setItem(THEME_KEY, theme);
-  }, [theme]);
 
   const llm = state.data?.llm;
   const ready = !!llm?.ready;
@@ -86,6 +151,9 @@ export default function App() {
   const sidebar = <Sidebar state={state.data} onShowSummary={(key) => { setSummaryProfileKey(key ?? null); setSummaryOpen(true); }} />;
   const results = <ResultsPanel hasCv={!!state.data?.cv_files.selected && ready} />;
   const agent = <AgentPanel ready={ready} llm={llm} hasCv={!!state.data?.cv_files.selected} />;
+  const panels = [useRef<ImperativePanelHandle>(null), useRef<ImperativePanelHandle>(null), useRef<ImperativePanelHandle>(null)];
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const toggles = useRef(COLUMNS.map((c) => (value: boolean) => setCollapsed((st) => (st[c.id] === value ? st : { ...st, [c.id]: value })))).current;
 
   return (
     <div className="flex h-full min-w-0 flex-col overflow-hidden">
@@ -111,13 +179,26 @@ export default function App() {
                   : "Configure LLM"}</span>
             </button>
           )}
-          <button
-            className="shrink-0 text-faint hover:text-fg"
-            title="Toggle theme"
-            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-          >
-            {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
-          </button>
+          {wide && (
+            <div className="flex shrink-0 items-center gap-1.5 border-r border-border pr-2">
+              {COLUMNS.map((c, i) => (
+                <button
+                  key={c.id}
+                  className={cn("hover:text-fg", collapsed[c.id] ? "text-faint opacity-50" : "text-faint")}
+                  title={`${collapsed[c.id] ? "Show" : "Hide"} the ${c.label.toLowerCase()} panel`}
+                  aria-pressed={!collapsed[c.id]}
+                  onClick={() => {
+                    const panel = panels[i].current;
+                    if (panel?.isCollapsed()) panel.expand();
+                    else panel?.collapse();
+                  }}
+                >
+                  {TOGGLE_ICONS[i]}
+                </button>
+              ))}
+            </div>
+          )}
+          <ThemePicker />
           <button className="shrink-0 text-faint hover:text-fg" title="Settings" onClick={() => setSettingsOpen(true)}>
             <Settings size={15} />
           </button>
@@ -125,18 +206,15 @@ export default function App() {
       </header>
 
       {wide ? (
-        <PanelGroup direction="horizontal" autoSaveId="jobsearch.layout" className="min-h-0 flex-1">
-          <Panel defaultSize={22} minSize={18} maxSize={32} className="min-w-0 bg-bg">
-            {sidebar}
-          </Panel>
-          <Handle />
-          <Panel defaultSize={50} minSize={30} className="min-w-0 bg-bg">
-            {results}
-          </Panel>
-          <Handle />
-          <Panel defaultSize={28} minSize={20} maxSize={45} className="min-w-0 bg-panel">
-            {agent}
-          </Panel>
+        <PanelGroup direction="horizontal" autoSaveId="jobsearch.layout.v2" className="min-h-0 flex-1">
+          {[sidebar, results, agent].map((content, i) => (
+            <Fragment key={COLUMNS[i].id}>
+              {i > 0 && <Handle />}
+              <Column spec={COLUMNS[i]} order={i} panel={panels[i]} onToggle={toggles[i]}>
+                {content}
+              </Column>
+            </Fragment>
+          ))}
         </PanelGroup>
       ) : (
         <>

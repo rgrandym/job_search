@@ -11,7 +11,7 @@ from src.agents.registry import tool
 from src.agents.runtime import AgentContext
 from src.cv import master_cv_manager as mgr
 from src.jobs.models import SearchQuery
-from src.services import cv_service, labels, saved, search_service, tracker
+from src.services import cv_service, labels, saved, search_service, tailored_documents, tracker
 from src.services.search_service import SearchRequest
 
 
@@ -165,6 +165,11 @@ class DocumentArgs(BaseModel):
         description="full: keep every line; junior: trim for a junior role; auto: trim only "
         "when the job is clearly more junior",
     )
+    audience: Literal["auto", "industry", "academic"] = Field(
+        "auto",
+        description="academic: arrange and word the CV for an academic post; auto: when the "
+        "job is one",
+    )
 
 
 @tool("tailor_cv", "Create a guarded, reviewed Word CV for a result or saved job.", DocumentArgs)
@@ -179,6 +184,7 @@ async def tailor_cv(args: DocumentArgs, ctx: AgentContext) -> dict[str, Any]:
         ctx.usage_sink("assistant"),
         ctx.ws.result(job.id),
         length=args.length,
+        audience=args.audience,
     )
     await ctx.emit("documents_updated", {"job_id": job.id})
     return {
@@ -191,6 +197,9 @@ async def tailor_cv(args: DocumentArgs, ctx: AgentContext) -> dict[str, Any]:
         "trim": tailored.trim.model_dump() if tailored.trim else None,
         "document_notes": tailored.document_notes,
         "rejections": [change.reason for change in tailored.changes if not change.accepted],
+        "positioning": tailored.positioning.model_dump() if tailored.positioning else None,
+        "gaps": [r.requirement for r in tailored.requirements if r.match == "not_evidenced"],
+        "fit_check": tailored.fit_check.model_dump() if tailored.fit_check else None,
     }
 
 
@@ -203,8 +212,10 @@ async def write_cover_letter(args: DocumentArgs, ctx: AgentContext) -> dict[str,
     job = ctx.ws.job(args.job_id)
     if job is None:
         raise ValueError("Job not found in results or saved jobs")
+    # The newest reviewed tailored CV for this job, as the app uses by default.
+    drafts = [d for d in tailored_documents.list_for_job(ctx.ws, job.id) if d.reviewed]
     letter, path = await cv_service.write_cover_letter(
-        ctx.ws, job, args.template, ctx.usage_sink("assistant")
+        ctx.ws, job, args.template, ctx.usage_sink("assistant"), drafts[0].id if drafts else None
     )
     await ctx.emit("documents_updated", {"job_id": job.id})
     return {

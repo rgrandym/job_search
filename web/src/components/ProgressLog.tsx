@@ -1,10 +1,9 @@
 import { CheckCircle2, Loader2, XCircle } from "lucide-react";
 import type { Heartbeat, ProgressEvent } from "../lib/types";
+import { STAGE_LABEL, STAGES } from "../lib/labels";
 import { cn } from "../lib/utils";
 import { duration, ProgressBar, useNow } from "./TaskProgress";
 
-// The pipeline's stages in order; overall progress is the stage reached plus its own share done.
-const STAGES = ["cv", "summary", "plan", "capture", "prefilter", "enrich", "screen", "done"];
 
 /** Overall search progress (0-1) from the events so far: real counts within sources and
  *  screening, stage position otherwise. */
@@ -51,17 +50,6 @@ export function SearchStatus({ log, startedAt, beat }: { log: ProgressEvent[]; s
     </div>
   );
 }
-
-const STAGE_LABEL: Record<string, string> = {
-  cv: "CV",
-  summary: "Profile",
-  plan: "Plan",
-  capture: "Sources",
-  prefilter: "Pre-filter",
-  enrich: "Details",
-  screen: "Matching",
-  done: "Done",
-};
 
 /** Collapse the raw event stream into display rows: one row per source, one live row for
  *  screening progress (and one for the second opinions), and every other message in order. */

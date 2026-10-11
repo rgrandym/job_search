@@ -1,11 +1,12 @@
 import type {
   AppState,
+  Audience,
   BoardView,
   CompanyBoard,
   CompanyBoardsStatus,
-  CodexUsage,
+  ConnectionsView,
   CodexStatus,
-  ClaudeCodeUsage,
+  OnLimit,
   HistoryItem,
   JobTracking,
   MatchResult,
@@ -89,13 +90,19 @@ const searchStream = (body: SearchRequest, onEvent: (event: SearchStreamEvent) =
   streamOutcome("/api/search/stream", body, onEvent);
 
 /** Judge the shortlisted jobs a stopped or partly failed search left unjudged. */
-const continueStream = (body: { history_id: string; run_id: string }, onEvent: (event: SearchStreamEvent) => void) =>
+const continueStream = (body: { history_id: string; run_id: string; switch?: boolean }, onEvent: (event: SearchStreamEvent) => void) =>
   streamOutcome("/api/search/continue/stream", body, onEvent);
 /** Read full postings (or judge pasted text) for results whose requirements were not checked. */
 const recheckStream = (
   body: { history_id: string; run_id: string; job_ids?: string[]; description?: string },
   onEvent: (event: SearchStreamEvent) => void,
 ) => streamOutcome("/api/search/recheck/stream", body, onEvent);
+
+/** Search again only the sources that failed in a past search (all failed ones, or `sources`). */
+const retryStream = (
+  body: { history_id: string; run_id: string; sources?: string[] },
+  onEvent: (event: SearchStreamEvent) => void,
+) => streamOutcome("/api/search/retry/stream", body, onEvent);
 
 /** `?progress_id=…` so the server reports this request's steps (see `TaskProgress`). */
 const tracked = (path: string, progressId?: string) =>
@@ -142,7 +149,9 @@ export const api = {
     request<{ removed: boolean }>(`/api/companies/mine/${encodeURIComponent(name)}`, { method: "DELETE" }),
   discoverCompanies: (mode: "new" | "stale" | "all" = "stale") =>
     request<CompanyBoardsStatus>(`/api/companies/discover?mode=${mode}`, { method: "POST" }),
-  gmailStatus: () => request<{ configured: boolean; connected: boolean; account: string | null }>("/api/gmail/status"),
+  stopDiscovery: () => request<CompanyBoardsStatus>("/api/companies/discover/stop", { method: "POST" }),
+  gmailStatus: () =>
+    request<{ configured: boolean; connected: boolean; account: string | null; problem: string | null }>("/api/gmail/status"),
   models: (provider: Provider) => request<ModelInfo[]>(`/api/llm/models?provider=${provider}`),
   chatProviders: () => request<Record<Provider, boolean>>("/api/llm/chat-providers"),
   updateLLM: (body: {
@@ -166,7 +175,9 @@ export const api = {
     letter_api_key?: string;
   }) => request<LLMView>("/api/llm", json("PUT", body)),
   codexStatus: () => request<CodexStatus>("/api/codex/status"),
-  codexUsage: () => request<CodexUsage>("/api/codex/usage"),
+  connections: () => request<ConnectionsView>("/api/connections"),
+  updateHandover: (body: { on_limit?: OnLimit; handover_threshold?: number }) =>
+    request<LLMView>("/api/llm/handover", json("PUT", body)),
   loginCodex: () => request<{ started: boolean }>("/api/codex/login", { method: "POST" }),
   claudeCodeStatus: () => request<ClaudeCodeStatus>("/api/claude-code/status"),
   loginClaudeCode: () => request<{ started: boolean }>("/api/claude-code/login", { method: "POST" }),
@@ -184,6 +195,9 @@ export const api = {
   exportGeneralCV: (progressId?: string) =>
     request<{ download_url: string; roles: number }>(tracked("/api/cv/general", progressId), { method: "POST" }),
   taskProgress: (taskId: string) => request<TaskProgress>(`/api/progress/${encodeURIComponent(taskId)}`),
+  /** Stop a running task now (tailoring, a letter, a profile build or update, a CV export). */
+  stopTask: (taskId: string) =>
+    request<{ stopped: boolean }>(`/api/progress/${encodeURIComponent(taskId)}/stop`, { method: "POST" }),
   cvSourceUrl: (assetId: string) => `/api/cv/source/${encodeURIComponent(assetId)}`,
   cvRevision: (assetId: string) => request<{ revision: string }>(`/api/cv/revision/${encodeURIComponent(assetId)}`),
   /** The CV as the browser can show it (Word files arrive as Word's own PDF rendering). */
@@ -206,6 +220,7 @@ export const api = {
   searchStream,
   continueStream,
   recheckStream,
+  retryStream,
   removeResult: (jobId: string, historyId: string | null) =>
     request<{ removed: boolean }>(
       `/api/results/${encodeURIComponent(jobId)}${historyId ? `?history_id=${encodeURIComponent(historyId)}` : ""}`,
@@ -248,7 +263,6 @@ export const api = {
     request<ProfileRecord>(tracked(`/api/profiles/refresh/${encodeURIComponent(key)}`, progressId), { method: "POST" }),
   deleteProfile: (key: string) =>
     request<{ deleted: boolean }>(`/api/profiles/${encodeURIComponent(key)}`, { method: "DELETE" }),
-  claudeCodeUsage: () => request<ClaudeCodeUsage>("/api/claude-code/usage"),
   /** Mark a job of the current search applied / N/A / open, and/or set its note, reason or stage. */
   trackJob: (jobId: string, status?: "open" | "applied" | "na", note?: string, extra?: Omit<TrackingUpdate, "status" | "note">) =>
     request<JobTracking>(`/api/jobs/${encodeURIComponent(jobId)}/tracking`, json("PUT", { status, note, ...extra })),
@@ -263,10 +277,11 @@ export const api = {
   tailor: (jobId: string, template: string, result?: MatchResult,
     emphasis: "auto" | "leadership" | "hands_on" = "auto",
     level: "auto" | "senior" | "junior" = "auto",
-    length: "auto" | "full" | "junior" = "auto", progressId?: string) =>
+    length: "auto" | "full" | "junior" = "auto", progressId?: string,
+    audience: Audience = "auto") =>
     request<TailorReport & { tracking: JobTracking | null }>(
       tracked(`/api/jobs/${encodeURIComponent(jobId)}/tailor`, progressId),
-      json("POST", { template, result, emphasis, level, length }),
+      json("POST", { template, result, emphasis, level, length, audience }),
     ),
   tailoredCVs: (jobId: string) =>
     request<TailoredCVView[]>(`/api/jobs/${encodeURIComponent(jobId)}/tailored-cvs`),

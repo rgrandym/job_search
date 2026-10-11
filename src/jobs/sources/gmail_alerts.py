@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from src.core.config import Settings, get_settings
@@ -64,6 +65,19 @@ def _write_private(path: Path, payload: dict[str, Any]) -> None:
     finally:
         if tmp is not None:
             tmp.unlink(missing_ok=True)
+
+
+def _google_error(exc: Exception) -> str | None:
+    """The OAuth `error` code Google gave for a refused token request (e.g. "invalid_grant"
+    when the sign-in expired or was revoked), if the failure was such a refusal."""
+    cause = exc.__cause__
+    if not isinstance(cause, httpx.HTTPStatusError):
+        return None
+    try:
+        error = cause.response.json().get("error")
+    except (ValueError, AttributeError):
+        return None
+    return error if isinstance(error, str) else None
 
 
 class GmailAuth:
@@ -169,11 +183,26 @@ class GmailAuth:
             raise SourceError("Configure Gmail OAuth client ID, secret, and account in .env")
         return secret.get_secret_value()
 
+    def problem(self) -> str | None:
+        """Why the stored connection cannot read the inbox now, or None when it can. Asks
+        Google only when the access token has expired (it is then renewed and saved)."""
+        if not self.connected:
+            return None
+        try:
+            self.access_token()
+        except SourceError as exc:
+            return str(exc)
+        return None
+
     def _token_request(self, data: dict[str, Any]) -> dict[str, Any]:
         try:
             payload: dict[str, Any] = self.http.post(TOKEN_URL, data=data).json()
             return payload
-        except (SourceError, ValueError):
+        except (SourceError, ValueError) as exc:
+            if _google_error(exc) == "invalid_grant":
+                raise SourceError(
+                    "Gmail sign-in has expired or was revoked; reconnect the account"
+                ) from None
             raise SourceError("Gmail authorization failed; reconnect the account") from None
 
     def _profile(self, access_token: str) -> str:

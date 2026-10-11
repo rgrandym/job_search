@@ -358,7 +358,7 @@ def test_stale_results_are_rechecked_only_when_asked(settings: Settings) -> None
 
 def test_a_stopped_pass_resumes_with_the_unchecked_companies(settings: Settings) -> None:
     http, _ = _http(settings, _site_routes())
-    calls = iter([False, True])  # stop after the first company
+    calls = iter([False, False, True])  # checked before and after each company: stop after one
     first = discover_companies(
         settings, http=http, workers=1, should_stop=lambda: next(calls, True)
     )
@@ -366,6 +366,15 @@ def test_a_stopped_pass_resumes_with_the_unchecked_companies(settings: Settings)
     assert cd.needs_discovery(settings)
     assert discover_companies(settings, mode="new", http=http, workers=1).checked == 1
     assert not cd.needs_discovery(settings)
+
+
+def test_a_company_cut_off_by_stop_is_not_recorded_as_without_a_board(
+    settings: Settings,
+) -> None:
+    http, _ = _http(settings, _site_routes())
+    calls = iter([False, True])  # stopped while the first company was being checked
+    discover_companies(settings, http=http, workers=1, should_stop=lambda: next(calls, True))
+    assert cd.status(settings).unchecked == 2  # both are checked next time
 
 
 def test_search_runs_discovery_only_when_companies_are_unchecked(

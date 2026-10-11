@@ -287,6 +287,11 @@ class RoleFamily(_Strict):
         "", description="The main thing missing for this family (required if not core)"
     )
     rationale: str = Field("", description="One line: why an employer would consider the candidate")
+    positioning: str = Field(
+        "",
+        description="2-3 sentences: how to present the candidate for these roles, from the "
+        "evidence (what to lead with, how the experience reads in this function)",
+    )
     requested: bool = Field(False, description="The user asked to explore this area")
     rejected: str | None = Field(None, description="Set by code: why it is not searched")
 
@@ -295,6 +300,24 @@ class SkillEvidence(_Strict):
     skill: str
     level: Literal["expert", "proficient", "familiar"]
     evidence: str = Field(description="Where in the CV this is demonstrated")
+    recency: Literal["current", "recent", "earlier", ""] = Field(
+        "",
+        description="current: in the present role · recent: within about five years · earlier",
+    )
+
+
+class ExpansionRoute(_Strict):
+    """How a capability could carry the candidate into other fields, with its evidence."""
+
+    capability: str = Field(description="The evidenced capability")
+    opens: list[str] = Field(
+        default_factory=list, description="Fields or functions it could open, as employers say"
+    )
+    evidence: list[str] = Field(
+        default_factory=list, description="CV ids or [src-N] lines that show the capability"
+    )
+    missing: str = Field("", description="What the candidate would still need to show")
+    bridge: str = Field("", description="A realistic first step or role that bridges the move")
 
 
 class PublicationRecord(_Strict):
@@ -331,6 +354,16 @@ class ProfileSummary(_Strict):
     headline: str = Field(description="One line: who this candidate is professionally")
     seniority: str
     years_experience: float = Field(ge=0)
+    seniority_evidence: list[str] = Field(
+        default_factory=list,
+        description="What sets the level, each with CV ids: autonomy, decision authority, "
+        "people led, organisational reach, budget, stakeholder level",
+    )
+    pitch: str = Field(
+        "",
+        description="2-3 sentences a recruiter would remember: who they are, what sets them "
+        "apart, where they add value; every claim from the CV",
+    )
     core_expertise: list[str] = Field(description="What they are genuinely strong at")
     key_skills: list[SkillEvidence]
     domains: list[str] = Field(default_factory=list, description="Industries / problem domains")
@@ -341,7 +374,9 @@ class ProfileSummary(_Strict):
         default_factory=list, description="Degrees, PhD, registrations, certifications"
     )
     achievements: list[str] = Field(
-        default_factory=list, description="The 3-5 strongest quantified achievements"
+        default_factory=list,
+        description="The 3-6 strongest achievements: action, scope, contribution and outcome, "
+        "quantified only where the CV quantifies them",
     )
     transferable_strengths: list[str] = Field(
         default_factory=list,
@@ -351,6 +386,10 @@ class ProfileSummary(_Strict):
         default_factory=list,
         description="Every distinct capability the document evidences (technical, delivery, "
         "leadership, external and commercial, communication), each with brief evidence",
+    )
+    expansion: list[ExpansionRoute] = Field(
+        default_factory=list,
+        description="3-6 routes: how the strongest capabilities could carry into other fields",
     )
     publications: PublicationRecord | None = Field(
         None, description="The publication record, summarised; null when the CV has none"
@@ -499,6 +538,9 @@ class JobVerdict(_AssessmentText):
     cap_reason: str | None = Field(None, description="Why the score was capped, if it was")
     requirements_checked: bool = Field(
         True, description="False: too little posting text to check its requirements"
+    )
+    model: str = Field(
+        "", description="provider:model that judged it (another plan's when its own was spent)"
     )
 
 

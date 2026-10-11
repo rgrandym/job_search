@@ -1,14 +1,20 @@
 <!doctype html>
-<html lang="en" data-theme="light">
+<html lang="en" data-theme="claude-light" data-scheme="light">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>AI Job Search</title>
     <script>
-      // Apply a saved theme before the first paint (light is the default).
+      // Apply the saved theme before the first paint (Claude Light is the default). Keep the
+      // dark ids in step with src/lib/themes.ts.
       try {
-        const theme = localStorage.getItem("jobsearch.theme.v2");
-        if (theme === "dark" || theme === "light") document.documentElement.dataset.theme = theme;
+        const dark = ["claude-dark", "kraft", "slate", "colorblind-dark", "contrast-dark", "charcoal", "charcoal-colorblind-dark", "research-dark-cb"];
+        const old = localStorage.getItem("jobsearch.theme.v2");
+        const theme = localStorage.getItem("jobsearch.theme.v3") || (old === "dark" ? "claude-dark" : "");
+        if (theme) {
+          document.documentElement.dataset.theme = theme;
+          document.documentElement.dataset.scheme = dark.includes(theme) ? "dark" : "light";
+        }
       } catch {}
     </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />

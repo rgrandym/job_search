@@ -23,8 +23,7 @@ from pydantic import BaseModel
 
 from src.core.llm import LLMConfig, ModelUsage
 from src.core.llm.catalog import claude_models
-
-WINDOW_NAMES = {"primary": "session (5 h)", "secondary": "week"}
+from src.core.llm.usage import plan_windows
 
 
 class ModelCost(BaseModel):
@@ -86,32 +85,14 @@ def total_cost(items: list[ModelCost]) -> float | None:
 
 def plan_snapshot(cfg: LLMConfig) -> dict[str, dict[str, Any]]:
     """Window -> {percent, resets_at} for the plan `cfg` runs on (empty when not a plan or not
-    readable: a comparison never fails over this)."""
+    readable: a comparison never fails over this). Read fresh, never from the minute's cache."""
     try:
-        if cfg.provider == "codex":
-            from src.core.llm.codex_backend import codex_usage
-
-            view = codex_usage()
-            return {
-                WINDOW_NAMES[k]: {
-                    "percent": float(w["used_percent"]),
-                    "resets_at": w.get("resets_at"),
-                }
-                for k in ("primary", "secondary")
-                if (w := view.get(k))
-            }
-        if cfg.provider == "claude_code":
-            from src.core.llm.claude_code_backend import claude_code_usage
-
-            out = {}
-            for w in claude_code_usage()["windows"]:
-                u = w.get("utilization")
-                pct = None if u is None else float(u) * (100 if float(u) <= 1 else 1)
-                out[str(w["window"])] = {"percent": pct, "resets_at": w.get("resets_at")}
-            return out
+        found = plan_windows(cfg.provider, fresh=True)
     except Exception:  # noqa: BLE001 - usage is informative; the comparison goes on without it
         return {}
-    return {}
+    if found is None:
+        return {}
+    return {w.name: {"percent": w.used_percent, "resets_at": w.resets_at} for w in found.windows}
 
 
 def plan_usage(

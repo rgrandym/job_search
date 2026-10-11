@@ -4,6 +4,7 @@ import { useState } from "react";
 import { api } from "../lib/api";
 import type { HistoryItem } from "../lib/types";
 import { cn } from "../lib/utils";
+import { Resizable } from "./ui";
 import { openedSearch, useSearch } from "../stores/searchStore";
 
 const when = (iso: string) => new Date(iso).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
@@ -43,6 +44,7 @@ export function SearchHistory() {
   return (
     <details className="card group p-3" open>
       <summary className="label flex cursor-pointer list-none items-center gap-1 [&::-webkit-details-marker]:hidden"><ChevronRight size={13} className="group-open:rotate-90" /> Recent searches</summary>
+      <Resizable id="history">
       <div className="mt-2 space-y-2">
       <div className="flex items-center justify-end">
         {items.length > 0 && (
@@ -99,6 +101,7 @@ export function SearchHistory() {
       )}
       {error && <p className="text-[11px] text-bad">{error.message}</p>}
       </div>
+      </Resizable>
     </details>
   );
 }

@@ -5,7 +5,7 @@ import { api } from "../lib/api";
 import type { HeadToHead, OutcomeStage, SetupAgreement, TrackedJob } from "../lib/types";
 import { STAGES } from "./JobCard";
 import { LearnFromLabels } from "./LearnFromLabels";
-import { Empty, Modal } from "./ui";
+import { Empty, Modal, Resizable } from "./ui";
 
 // Where postings came from (backend `history.source_origin`): boards by name, alerts by origin.
 const ORIGIN_LABELS: Record<string, string> = {
@@ -34,6 +34,7 @@ export function TrackerPanel() {
   return (
     <details className="card group p-3" open>
       <summary className="label flex cursor-pointer list-none items-center gap-1 [&::-webkit-details-marker]:hidden"><ChevronRight size={13} className="group-open:rotate-90" /> Applications &amp; sources</summary>
+      <Resizable id="tracker">
       <div className="mt-2 space-y-2">
       <div className="flex flex-col gap-1.5">
         <button className="btn-ghost w-full justify-start text-[12px]" onClick={() => setOpen("register")}>
@@ -65,6 +66,7 @@ export function TrackerPanel() {
       <Modal open={open === "labels"} onClose={() => setOpen(null)} title="Your labels vs the models" wide>
         <Labels />
       </Modal>
+      </Resizable>
     </details>
   );
 }

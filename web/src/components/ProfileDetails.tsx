@@ -55,7 +55,16 @@ export function ProfileDetails({ record }: { record: ProfileRecord }) {
         <p className="font-semibold text-fg">{summary.headline}</p>
         <p className="text-faint">{summary.seniority} · {summary.years_experience} years of experience</p>
       </div>
+      {summary.pitch && <p className="border-l-2 border-accent pl-2 text-fg">{summary.pitch}</p>}
       <p className="whitespace-pre-wrap text-muted">{summary.summary}</p>
+      {!!summary.seniority_evidence?.length && (
+        <section>
+          <h3 className="label">What sets the level</h3>
+          <ul className="list-inside list-disc text-muted">
+            {summary.seniority_evidence.map((item, index) => <li key={`${item}:${index}`}>{item}</li>)}
+          </ul>
+        </section>
+      )}
       {summary.publications && <PublicationsView record={summary.publications} />}
       {summary.role_families && summary.role_families.length > 0 && (
         <section className="space-y-2">
@@ -66,10 +75,23 @@ export function ProfileDetails({ record }: { record: ProfileRecord }) {
               <p className="text-muted">Titles: {family.titles.join(", ") || "None"}</p>
               {family.domain_terms.length > 0 && <p className="text-muted">Domains: {family.domain_terms.join(", ")}</p>}
               {family.rationale && <p className="text-muted">{family.rationale}</p>}
+              {family.positioning && <p className="text-muted">How to present: {family.positioning}</p>}
               {family.gap && <p className="text-muted">Gap: {family.gap}</p>}
               {family.evidence.length > 0 && <p className="text-muted">Evidence: {family.evidence.join(", ")}</p>}
               {family.requested && <p className="text-faint">Requested in career intent</p>}
               {family.rejected && <p className="text-warn">Not searched: {family.rejected}</p>}
+            </div>
+          ))}
+        </section>
+      )}
+      {!!summary.expansion?.length && (
+        <section className="space-y-1">
+          <h3 className="label">Where the experience could lead</h3>
+          {summary.expansion.map((route) => (
+            <div key={route.capability} className="text-muted">
+              <p><span className="font-medium text-fg">{route.capability}</span> → {route.opens.join(", ")}</p>
+              {route.missing && <p className="pl-3 text-faint">Still to show: {route.missing}</p>}
+              {route.bridge && <p className="pl-3 text-faint">First step: {route.bridge}</p>}
             </div>
           ))}
         </section>
@@ -80,7 +102,7 @@ export function ProfileDetails({ record }: { record: ProfileRecord }) {
           <ul className="list-inside list-disc text-muted">
             {summary.key_skills.map((skill, index) => (
               <li key={`${skill.skill}:${index}`}>
-                <span className="font-medium text-fg">{skill.skill}</span> · {skill.level}
+                <span className="font-medium text-fg">{skill.skill}</span> · {skill.level}{skill.recency ? ` · ${skill.recency}` : ""}
                 {skill.evidence && <p className="pl-3 text-faint">{skill.evidence}</p>}
               </li>
             ))}

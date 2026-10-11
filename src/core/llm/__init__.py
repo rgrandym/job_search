@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, TypeVar
 from pydantic import BaseModel
 
 from src.core import progress
+from src.core.llm import fallback, usage
 from src.core.llm.types import (
     ChatMessage,
     ChatModel,
@@ -57,14 +58,22 @@ T = TypeVar("T", bound=BaseModel)
 
 
 class _Reported:
-    """Marks each call as in flight in the current task's progress (`core.progress`)."""
+    """Marks each call as in flight in the current task's progress (`core.progress`), records
+    who served it (`fallback.served_by`), and marks the provider spent on a limit error."""
 
-    def __init__(self, inner: LLMProvider, purpose: str, model: str) -> None:
-        self.inner, self.purpose, self.model = inner, purpose, model
+    def __init__(self, inner: LLMProvider, purpose: str, model: str, provider: str) -> None:
+        self.inner, self.purpose, self.model, self.provider = inner, purpose, model, provider
 
     def generate(self, *, system: str, prompt: str, output_model: type[T]) -> T:
         with progress.model_call(self.purpose, self.model):
-            return self.inner.generate(system=system, prompt=prompt, output_model=output_model)
+            try:
+                out = self.inner.generate(system=system, prompt=prompt, output_model=output_model)
+            except LLMError as exc:
+                if exc.kind == "limit":
+                    usage.mark_exhausted(self.provider, exc.resets_at, str(exc))
+                raise
+        fallback.served_by.set(f"{self.provider}:{self.model}")
+        return out
 
 
 def make_structured(
@@ -72,16 +81,44 @@ def make_structured(
     role: Role = "screening",
     usage_sink: UsageSink | None = None,
     purpose: str = "structured output",
+    fallback_cfg: LLMConfig | None = None,
 ) -> LLMProvider:
     """Structured-output provider for `cfg.provider`, reporting its calls as task progress.
-    Usage reports name `cfg.provider`: roles may use different providers."""
-    sink = _stamped(usage_sink, cfg.provider) if usage_sink is not None else None
-    return _Reported(_backend(cfg, role, sink, purpose), purpose, cfg.model_for(role))
+    Usage reports name the provider that served the call: roles may use different providers.
+    With `fallback_cfg` (another plan, see `fallback`), a spent plan hands the role over."""
+    primary = _reported(cfg, role, usage_sink, purpose)
+    if fallback_cfg is None:
+        return primary
+    label = f"{cfg.provider}:{cfg.model_for(role)}"
+
+    def replacement() -> LLMProvider:
+        return _reported(fallback_cfg, role, usage_sink, purpose, switched_from=label)
+
+    return fallback.FallbackProvider(primary, replacement, cfg.provider, label, cfg.on_limit)
 
 
-def _stamped(usage_sink: UsageSink, provider: str) -> UsageSink:
-    def sink(usage: ModelUsage) -> None:
-        usage_sink(usage.model_copy(update={"provider": provider}))
+def _reported(
+    cfg: LLMConfig,
+    role: Role,
+    usage_sink: UsageSink | None,
+    purpose: str,
+    switched_from: str | None = None,
+) -> LLMProvider:
+    sink = _stamped(usage_sink, cfg.provider, switched_from)
+    return _Reported(_backend(cfg, role, sink, purpose), purpose, cfg.model_for(role), cfg.provider)
+
+
+def _stamped(usage_sink: UsageSink | None, provider: str, switched_from: str | None) -> UsageSink:
+    """Every call goes into the spend ledger, then to the caller's sink, if any."""
+
+    def sink(used: ModelUsage) -> None:
+        usage.record_spend(
+            provider, used.model, used.input_tokens, used.output_tokens, used.estimated
+        )
+        if usage_sink is not None:
+            usage_sink(
+                used.model_copy(update={"provider": provider, "switched_from": switched_from})
+            )
 
     return sink
 

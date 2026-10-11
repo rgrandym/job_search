@@ -493,6 +493,8 @@ def _discover(
         if should_stop():
             return None
         board, note = discover_board(source, company, directory)
+        if should_stop():  # cut off mid-check: not a real "no board", check it next time
+            return None
         return DiscoveryRecord(
             name=company.name, website=company.website, origin=directory,
             board=board, note=note, checked_on=today,

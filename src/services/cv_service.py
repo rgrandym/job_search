@@ -19,9 +19,10 @@ from src.core.llm import Role, UsageSink
 from src.core.llm_provider import LLMProvider
 from src.cv import master_cv_manager as mgr
 from src.cv.ats import check_docx
-from src.cv.cover_letter import write_letter
+from src.cv.cover_letter import letter_context, write_letter
 from src.cv.docx_exporter import export_cover_letter, export_docx
 from src.cv.docx_original import align_to_document, write_like_original
+from src.cv.fit_check import compare_fit
 from src.cv.models import (
     CoverLetter,
     JDAnalysis,
@@ -31,6 +32,7 @@ from src.cv.models import (
     TailoringPlan,
 )
 from src.cv.tailor import (
+    Audience,
     LengthChoice,
     LevelEmphasis,
     TailoringEmphasis,
@@ -40,6 +42,7 @@ from src.cv.tailor import (
     tailor,
 )
 from src.jobs.models import JobPosting, JobVerdict, MatchResult
+from src.jobs.profile_memory import profile_brief
 from src.services import document_files, tailored_documents, tracker
 from src.services.intent import delete_intent, get_intent
 from src.services.workspace import Workspace
@@ -636,11 +639,13 @@ async def tailor_to_job(
     emphasis: TailoringEmphasis = "auto",
     level: LevelEmphasis = "auto",
     length: LengthChoice = "auto",
+    audience: Audience = "auto",
 ) -> tuple[TailoredCV, Path]:
-    """Tailor the Master CV to `job` (steered by the job_matcher's verdict on it, then
-    reviewed and revised), export it to .docx and check what an ATS reads from the file.
+    """Tailor the Master CV to `job` (steered by the job_matcher's verdict on it and the
+    stored profile, then reviewed and revised), export it to .docx, check what an ATS reads
+    from the file and how much better it shows the fit than the original CV.
     `template` "original" (the default) writes it in the CV's own Word design."""
-    progress.step("Reading your CV", total=9)
+    progress.step("Reading your CV", total=10)
     master_cv = await ensure_selected_cv(ws, usage_sink, role="cv")
     original = original_docx(ws)
     if original is not None:  # tailor from every line as written in the Word file
@@ -649,10 +654,14 @@ async def tailor_to_job(
     text = _job_text(job)
     progress.step("Analysing the job description")
     jd = await _analysis(ws, text, llm)
-    guidance = matcher_guidance(result.verdict if result is not None else _verdict(ws, job.id))
+    result = result if result is not None else ws.result(job.id)
+    guidance = matcher_guidance(result.verdict if result is not None else None)
+    profile = stored_profile(ws, result.family if result is not None else None)
     tailored = await asyncio.to_thread(
-        tailor, master_cv, text, llm, guidance, True, jd, emphasis, level, length
+        tailor, master_cv, text, llm, guidance, True, jd, emphasis, level, length, profile, audience
     )
+    progress.step("Comparing how well each CV shows your fit for this job")
+    tailored = await asyncio.to_thread(_fit_check, master_cv, tailored, jd, text, llm)
     progress.step("Writing the Word file in your CV's design")
     path = _new_output_path(ws, _file_stem(master_cv, job))
     tailored, template = _write_tailored(tailored, master_cv, original, path, template)
@@ -671,6 +680,31 @@ async def tailor_to_job(
     ws.tailored[job.id] = tailored
     tracker.remember_document_job(ws, job, cv_file=path.name)
     return tailored, path
+
+
+def _fit_check(
+    source: MasterCV, tailored: TailoredCV, jd: JDAnalysis, text: str, llm: LLMProvider
+) -> TailoredCV:
+    """The before/after reading; a failed check never costs the user the tailored CV."""
+    try:
+        return tailored.model_copy(
+            update={"fit_check": compare_fit(source, tailored, jd, text, llm)}
+        )
+    except Exception as exc:  # noqa: BLE001 - the CV is written whatever the check's fate
+        note = f"The before/after fit check could not run: {exc}"
+        return tailored.model_copy(update={"document_notes": [*tailored.document_notes, note]})
+
+
+def stored_profile(ws: Workspace, family: str | None = None) -> str:
+    """The selected CV's stored profile as tailoring reads it ("" when none is stored; never
+    builds one). The general profile is preferred, else the most recently updated."""
+    owner = ws.active_cv_id
+    records = ws.memory.records(owner) if owner else []
+    if not records:
+        return ""
+    general = [r for r in records if r.role_family == "any"]
+    record = (general or sorted(records, key=lambda r: r.updated_at or r.created_at))[-1]
+    return profile_brief(record.summary, family)
 
 
 def original_docx(ws: Workspace) -> Path | None:
@@ -745,7 +779,15 @@ def _write_tailored(
     content; a named template only when the user chose one (or no Word version exists).
     Returns the CV with notes, and the template name used."""
     if template == tailored_documents.ORIGINAL and original is not None:
-        notes = write_like_original(original, master, tailored.cv, path, tailored.headline_options)
+        notes = write_like_original(
+            original,
+            master,
+            tailored.cv,
+            path,
+            tailored.headline_options,
+            tailored.role_skills,
+            tailored.academic,
+        )
         notes.insert(0, f"Written in the design of {original.name}")
     elif template == tailored_documents.ORIGINAL:
         export_docx(tailored, path, "classic")
@@ -754,6 +796,7 @@ def _write_tailored(
     else:
         export_docx(tailored, path, template)
         notes = [f"Written in the {template} design, as you chose"]
+    notes = [*notes, *tailored.document_notes]
     return tailored.model_copy(update={"document_notes": notes}), template
 
 
@@ -838,16 +881,24 @@ async def write_cover_letter(
     document = tailored_documents.load(ws, tailored_cv_id, job.id) if tailored_cv_id else None
     if document is not None and not document.reviewed:
         raise ValueError("Review and save the imported CV before using it for a cover letter")
-    progress.step("Reading your CV", total=6)
-    master_cv = document.tailored.cv if document else await ensure_selected_cv(
-        ws, usage_sink, role="letter"
+    progress.step("Reading your CV", total=8)
+    master_cv = (
+        document.tailored.cv
+        if document
+        else await ensure_selected_cv(ws, usage_sink, role="letter")
     )
     llm = ws.structured("letter", usage_sink, "Cover letter")
     text = _job_text(job)
     progress.step("Analysing the job description")
     jd = await _analysis(ws, text, llm)
     letter = await asyncio.to_thread(
-        write_letter, master_cv, jd, text, llm, motivation(ws, document.cv_id if document else None)
+        write_letter,
+        master_cv,
+        jd,
+        text,
+        llm,
+        motivation(ws, document.cv_id if document else None),
+        letter_context(document.tailored if document else None),
     )
     if not letter.paragraphs:
         raise ValueError("Every drafted paragraph was rejected by the guards; try again")
@@ -881,11 +932,6 @@ def matcher_guidance(verdict: JobVerdict | None) -> str:
         if items:
             lines.append(f"{label}: " + "; ".join(items))
     return "\n".join(lines)
-
-
-def _verdict(ws: Workspace, job_id: str) -> JobVerdict | None:
-    result = ws.result(job_id)  # the current search or a saved job
-    return result.verdict if result is not None else None
 
 
 async def _analysis(ws: Workspace, text: str, llm: LLMProvider) -> JDAnalysis:

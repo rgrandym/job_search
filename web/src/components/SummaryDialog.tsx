@@ -9,7 +9,7 @@ import { EvidenceReview } from "./EvidenceReview";
 import { IntentEditor } from "./IntentEditor";
 import { PublicationsView } from "./ProfileDetails";
 import { RoleFamiliesEditor, RoleFamiliesView } from "./RoleFamilies";
-import { TaskProgress, useTaskId } from "./TaskProgress";
+import { TaskError, TaskProgress, useTaskId } from "./TaskProgress";
 import { AutoText, Field, Modal } from "./ui";
 
 const LEVEL_COLOR = { expert: "var(--good)", proficient: "var(--accent)", familiar: "var(--text-muted)" };
@@ -174,7 +174,7 @@ export function SummaryDialog({ open, onClose, initialProfileKey, embedded = fal
                   </button>
                 </div>
                 {build.isPending && <TaskProgress id={buildTask.id} />}
-                {build.error && <p className="text-[11px] text-bad">{(build.error as Error).message}</p>}
+                <TaskError error={build.error} className="text-[11px]" />
               </aside>
               <section className="min-w-0">
                 {!current ? (
@@ -197,7 +197,7 @@ export function SummaryDialog({ open, onClose, initialProfileKey, embedded = fal
                   />
                 )}
                 {update.isPending && <TaskProgress id={updateTask.id} className="mb-3 rounded-md border border-border bg-surface p-2" />}
-                {update.error && <p className="mt-2 text-[12px] text-bad">{(update.error as Error).message}</p>}
+                <TaskError error={update.error} className="mt-2 text-[12px]" />
                 {remove.error && <p className="mt-2 text-[12px] text-bad">{(remove.error as Error).message}</p>}
               </section>
             </div>

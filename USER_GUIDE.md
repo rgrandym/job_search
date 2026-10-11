@@ -1,41 +1,137 @@
 # User guide: job search and CV writing
 
-This guide is for the local web app at **http://localhost:5173**. It covers setup, model access, Gmail job alerts, searching, and Word documents. You can use the buttons in the app for normal work; the terminal steps below are only for initial setup.
+This app runs on your own computer. On a Mac it opens as its own window from the Dock. On
+Windows or Linux, or on a Mac if you prefer, you use it in **Google Chrome** at
+**http://localhost:8000**. Section 1 takes you from nothing to the app open on screen. After that
+you work with the buttons in the app; the terminal is only needed to install, start and update.
 
 The app is free for personal job searching under its [noncommercial license](LICENSE.md). AI
 providers or job source APIs may charge separately. Commercial use requires a separate paid
 license from the copyright holder before use.
 
-### Ask a coding agent to set it up
+## 1. Install and open the app
 
-If you use a coding agent such as Codex, Claude Code, Cursor, or a VS Code agent, open this
-repository in the agent and ask:
+### What you need first
+
+| Tool | Why | Check it is installed (in a terminal) | Install it |
+| --- | --- | --- | --- |
+| **Git** | Downloads the app | `git --version` | Mac: run `xcode-select --install` (it includes Git). Windows: use Git inside WSL (below). Linux: your package manager, e.g. `sudo apt install git`. |
+| **Miniconda** | Runs the app's Python | `conda --version` | [Miniconda installer](https://www.anaconda.com/docs/getting-started/miniconda/main). Close and reopen the terminal afterwards. |
+| **Node.js 20 or newer** | Builds the app's screens | `node --version` (must say v20 or higher) | [nodejs.org](https://nodejs.org/), the LTS version. |
+| **Apple command line tools** (Mac only) | Builds the Dock app | `xcode-select -p` (prints a folder) | `xcode-select --install` |
+| **Google Chrome** (recommended) | The browser version, and reading job postings that need a browser | open Chrome | [google.com/chrome](https://www.google.com/chrome/) |
+
+You also need a way for the app to use AI (a Claude or ChatGPT plan, or an API key). You choose
+it inside the app after installing; see section 2.
+
+### On a Mac: install the Job Search app
+
+1. Open **Terminal** (press **Cmd+Space**, type *Terminal*, press **Return**).
+2. Go to the folder where you want the app to live, for example your home folder:
+
+   ```bash
+   cd ~
+   ```
+
+3. Download the app and install it. Copy these three lines, paste them into Terminal and press
+   **Return**:
+
+   ```bash
+   git clone https://github.com/rgrandym/job_search.git
+   cd job_search
+   bash scripts/install.sh
+   ```
+
+   The script checks the tools above and says exactly what is missing if something is. Install
+   that, open a new Terminal window, `cd ~/job_search`, and run `bash scripts/install.sh` again.
+   The first install takes a few minutes. It never touches your CVs, settings or documents, so it
+   is safe to run again at any time.
+4. When it finishes, **Job Search** opens in its own window and its icon appears in the Dock.
+   Right-click the icon and choose **Options → Keep in Dock**.
+5. **Every day after that:** click the **Job Search** icon in the Dock. You do not need Terminal.
+   Closing the window keeps the app running in the background (click the icon to bring it
+   back); **Cmd+Q** quits it. The app is also in your home folder's **Applications** folder.
+   Downloads go to your Downloads folder, and job postings and the Gmail sign-in open in your
+   normal browser.
+
+If you move the `job_search` folder, rebuild the Dock icon with `bash scripts/macos/make_app.sh`
+from inside the folder. If the app does not open, its startup log is `.run/logs/app.log` in the
+folder.
+
+### On Windows, Linux or Chrome: use the browser version
+
+The app is the same; it opens as a page in Google Chrome instead of its own window.
+
+1. **Windows only:** install **WSL** (Windows Subsystem for Linux) once. Open **PowerShell** as
+   administrator, run `wsl --install`, restart the computer, and open **Ubuntu** from the Start
+   menu. Do every step below inside that Ubuntu window, and install Git, Miniconda and Node.js
+   there (the Linux instructions in the table above). [Microsoft's WSL guide](https://learn.microsoft.com/windows/wsl/install).
+2. In a terminal (Ubuntu on Windows, any terminal on Linux or Mac), download and install the app:
+
+   ```bash
+   cd ~
+   git clone https://github.com/rgrandym/job_search.git
+   cd job_search
+   bash scripts/install.sh
+   ```
+
+   On a Mac this also makes the Dock app; add `--no-app` (`bash scripts/install.sh --no-app`)
+   if you only want the browser version.
+3. Start the app:
+
+   ```bash
+   bash scripts/start.sh
+   ```
+
+4. Open **Google Chrome** and go to **http://localhost:8000**. Bookmark it. To give it its own
+   window and icon, use Chrome's menu **⋮ → Cast, save and share → Install page as app**.
+5. Keep the terminal open while you use the app. To stop it, press **Ctrl+C** in that terminal.
+   **Every day after that:** open a terminal, run `cd ~/job_search` then `bash scripts/start.sh`,
+   and open your bookmark.
+
+Other browsers usually work too, but Chrome is the one the app is tested with.
+
+### Update the app
+
+In a terminal, run:
+
+```bash
+cd ~/job_search
+git pull
+```
+
+Then open the app as usual. It rebuilds whatever changed the first time it starts, which can take
+a minute. Your CVs, settings, saved jobs and documents are kept.
+
+### Keep your data private
+
+The app stores your CVs, model settings and keys, Gmail sign-in, saved jobs and generated
+documents on your computer, in the `data/` and `output/` folders and the `.env` file. They are
+never uploaded with the code. Do not share those folders or put API keys in a screenshot, issue
+or commit. The app has no login of its own, so run it only on your own computer and do not make
+it reachable from the internet.
+
+### Ask a coding agent to set it up (optional)
+
+If you use a coding agent such as Claude Code, Codex, Cursor or a VS Code agent, you can let it
+do the steps above. Open the downloaded `job_search` folder in the agent and ask:
 
 > Set up this job search app on my computer for local use. Read AGENTS.md, CLAUDE.md, and
 > USER_GUIDE.md first. Check whether Miniconda, Node.js 20+, and npm are installed; explain
 > anything I need to install or sign in to. Run the repository's setup and verification steps,
-> start the app with `bash scripts/dev.sh`, and tell me the local URL. Help me choose a model
+> run `bash scripts/install.sh`, and tell me how to open the app. Help me choose a model
 > provider in Settings. Keep my CVs, API keys, Gmail credentials, and generated documents in
 > local ignored files; do not commit, upload, or print them.
 
-Give the agent access to this repository and answer its installation or provider sign-in
-questions. Enter API keys in the app's Settings or your local `.env` file yourself. The agent
-can verify the demo search before you add a CV or credentials. This app is intended to run on
-your own computer; do not expose its unauthenticated backend or frontend to the internet.
+Answer its questions about installing tools or signing in. Enter API keys in the app's Settings
+or your local `.env` file yourself.
 
-## 1. Start the app
+### For developers
 
-1. Install [Miniconda](https://www.anaconda.com/docs/getting-started/miniconda/main) if `conda` is not available. Install a recent Node.js version with npm if `npm` is not available.
-2. Open a terminal in this repository's folder and run:
-
-   ```bash
-   bash scripts/dev.sh
-   ```
-
-   The script creates the `job_search` Conda environment if needed, installs missing app dependencies, and starts the backend and frontend. The first run can take a few minutes.
-3. Open **http://localhost:5173**. Keep the terminal running while you use the app. Run the same command again to restart it. Press **Ctrl+C** to stop it, or run `bash scripts/dev.sh --stop` from the repository folder. If startup fails, check `.run/logs/backend.log` and `.run/logs/frontend.log`.
-
-The app stores your CVs, model settings, Gmail tokens, saved jobs, and generated documents locally. The `data/` and `output/` folders contain private information. Do not share those folders or put API keys in a screenshot, issue, or commit.
+To work on the app's code, run `bash scripts/dev.sh` instead. It reloads on changes and serves
+the page at **http://localhost:5173**. Run it again to restart, press **Ctrl+C** or run
+`bash scripts/dev.sh --stop` to stop it, and check `.run/logs/backend.log` and
+`.run/logs/frontend.log` if it fails.
 
 ## 2. Choose how the app uses AI
 
@@ -56,7 +152,7 @@ Open **Settings** with the gear icon at the top right. A search uses the **quali
 1. Create or sign in to a [Claude Console](https://console.anthropic.com/) account. Set up Console API billing or credits as prompted; your Claude chat subscription is separate.
 2. In Claude Console, open **Settings → API keys**, create a key, and copy it. [Claude's API key instructions](https://platform.claude.com/docs/en/manage-claude/authentication).
 3. In this app, open **Settings → Claude**, paste the key into **API key**, choose both models, and click **Save**. A saved key appears as a masked placeholder next time; leaving that field blank keeps it.
-4. As an alternative, set `ANTHROPIC_API_KEY` in a local `.env` file and restart the app. Do not put a real key in `.env.example`.
+4. As an alternative, set `ANTHROPIC_API_KEY` in the local `.env` file and restart the app (section 1). Do not put a real key in `.env.example`.
 
 ### B. Claude Code with a Claude plan
 
@@ -100,8 +196,8 @@ Google currently says standard Gmail API usage has **no additional cost below it
    http://localhost:8000/api/gmail/callback
    ```
 
-   The backend receives the OAuth callback on port **8000**; the app's page on port **5173** is not the redirect URI. Keep `localhost`, `http`, the port, and the path exactly the same. A JavaScript origin is not needed for this server-side flow. [Google's web-server OAuth guide](https://developers.google.com/identity/protocols/oauth2/web-server).
-6. Copy the new **Client ID** and **Client secret**. In this repository's root, make a local `.env` file by copying `.env.example` if you do not have one. Open `.env` in a text editor and set:
+   The app receives the Google sign-in on port **8000**, also when you use the developer page on port 5173. Keep `localhost`, `http`, the port, and the path exactly the same. A JavaScript origin is not needed for this server-side flow. [Google's web-server OAuth guide](https://developers.google.com/identity/protocols/oauth2/web-server).
+6. Copy the new **Client ID** and **Client secret**. In the `job_search` folder, make a local `.env` file by copying `.env.example` if you do not have one (`cp .env.example .env`). Open `.env` in a text editor and set:
 
    ```dotenv
    JOBSEARCH_GMAIL_ACCOUNT=your-alerts@gmail.com
@@ -110,7 +206,7 @@ Google currently says standard Gmail API usage has **no additional cost below it
    ```
 
    Do not put quotation marks around these example values unless the actual value needs them. Keep `.env` private; it is ignored by Git.
-7. Restart with `bash scripts/dev.sh`. In the left panel, expand **Job alerts** and click **Connect Gmail alerts**. The sign-in opens in a new tab. Select the same address as `JOBSEARCH_GMAIL_ACCOUNT`, grant the read-only access, and return to the app. A project in Testing status may show Google's unverified-app warning; proceed only if it is the Cloud project you created and the requested permission is the read-only Gmail scope. The app should show **Connected: your-alerts@gmail.com**.
+7. Restart the app so it reads `.env`: quit it with **Cmd+Q** and click the Dock icon again, or stop `bash scripts/start.sh` with **Ctrl+C** and run it again. In the left panel, expand **Job alerts** and click **Connect Gmail alerts**. The sign-in opens in a new tab. Select the same address as `JOBSEARCH_GMAIL_ACCOUNT`, grant the read-only access, and return to the app. A project in Testing status may show Google's unverified-app warning; proceed only if it is the Cloud project you created and the requested permission is the read-only Gmail scope. The app should show **Connected: your-alerts@gmail.com**.
 8. Select a CV, turn on **Match against my CV** and **Smart match**, and make sure **Sources → Gmail alerts** is on. Set the **Date posted** window you want and click **Search**. A normal search includes alert postings within the filters and date window; jobs judged before can reappear using their remembered verdicts. Gmail alerts are skipped if no CV is selected or Smart match is off.
 
 The app parses supported job links in alert emails, particularly LinkedIn and Indeed, rather than displaying every email message. Create job alerts on those sites and have them delivered to the connected inbox. The first Gmail search reads the inbox and caches parsed postings; later searches parse newly encountered messages and reuse the cache. **Reconnect** in Job alerts if access expires. External apps left in Google's **Testing** status can have authorisations, including refresh tokens, expire after seven days; the practical fix is to reconnect. [Google's testing guidance](https://support.google.com/cloud/answer/15549945?hl=en).
@@ -121,7 +217,7 @@ If Google reports `redirect_uri_mismatch`, compare the exact URI in step 5 with 
 
 1. In the left **Profile** panel, drop a CV into the upload box or browse for a **PDF, DOCX, MD, or TXT** file up to **10 MB**. Upload stores the original file unchanged. Click its name under **Available CVs** to select it; you can keep several versions.
 2. Click **Build profile from selected CV** under **Available profiles**. The profile model (or quality model if you left Profile blank) reads the CV and builds a general profile. The profile opens for editing. If it already exists, the button opens **Edit general profile** instead of charging for a rebuild.
-3. Check the headline, seniority, experience, skills and evidence, target roles, role families, and **Not a fit** list. Correct errors and click **Save profile**. A profile describes what the CV supports; do not add untrue qualifications or achievements.
+3. Check the headline, pitch, seniority and what sets it, experience, skills (with how recent each is) and evidence, target roles, role families (with how to present you for each), **Where the experience could lead**, and the **Not a fit** list. Correct errors and click **Save profile**. A profile describes what the CV supports; do not add untrue qualifications or achievements.
 4. Open **Profiles → Career intent** to record roles or sectors you want to explore, work you prefer or avoid, and eligibility. Click **Save intent**. Career intent describes what you want; it is not proof of experience. If the profile says **intent changed** or **CV changed**, review it and click **Update** to rebuild from the current information. **Pin for searches** forces a chosen stored profile to be used; a newly built general profile is pinned by the build button.
 5. To add a genuine fact missing from the CV, use **Profiles → Add evidence**: upload a supporting document or paste its text, then review each proposed fact and click **Add to CV** only when correct. You can also describe a fact to the right-hand assistant; it proposes facts for your approval. Accepted facts update the structured CV. Update the profile afterwards if you want the new evidence reflected there.
 
@@ -181,7 +277,7 @@ Public career sites do not always have a readable job list, and a site may be bl
 2. Start with a focused **Country**, one or two **Cities**, a sensible **Radius**, and a **Date posted** window such as *Last week*. Leave Country or Cities broad if you are open to remote or relocation roles. Undated saved postings are kept.
 3. Choose the sources you want. For a quick first run, turn off company career sites until their boards have been found, and select a small number of sources. For a wider run, add more sources and **Widen to adjacent roles** if you genuinely want nearby career paths. With no titles entered in the current UI, job boards use roles from the selected CV profile.
 4. Set **Match threshold**. The default is **60**. Raising it narrows the displayed matches; lowering it includes more possibilities. The AI job matcher still decides whether a job is a real match. Roles below the threshold and hard exclusions have their own tabs.
-5. Click **Search**. Watch the source counts and progress. **Stop** keeps work completed so far. If some shortlisted jobs remain unscreened, click **Continue** in the results panel. A completed search appears under **Recent searches** so you can reopen it.
+5. Click **Search**. Watch the source counts and progress. **Stop** keeps work completed so far. If some shortlisted jobs remain unscreened, click **Continue** in the results panel. If a source failed, click **Retry** under **Not used**: only the failed sources are searched again, and the new jobs they find are added to the same results. A completed search appears under **Recent searches** so you can reopen it.
 6. In **Search results**, look at **Matches**, **To check**, **Not selected** and **Excluded**. Open a job card's **Details** for fit reasons, gaps and flags. Check the job on the original site with **View on…** before applying. You can mark each job *Would apply*, *Maybe* or *No* under **Your call**. This builds a private set of examples for comparing model setups and does not change that search.
 
 ### Read the whole job description
@@ -231,18 +327,46 @@ The app keeps all its lists consistent automatically:
 - **The Applied register is never changed by deleting a job from a list.** Your applications, their stages and notes are always kept.
 - **Other open tabs of the app update immediately.** A tab that was in the background also refreshes as soon as you return to it.
 
+### Arrange the screen and choose a theme
+
+- **Columns:** drag the line between two columns to resize them. Drag a column past its
+  narrowest width, or use the three panel buttons at the top right, to collapse it to a slim
+  rail; click the rail to open it again. The layout is remembered.
+- **Sections** (Profile, Search, Job alerts, Activity, Models & usage, Recent searches and
+  others): click the title to fold or unfold, and drag the grip under a section to set its
+  height (double-click the grip to fit the content again).
+- **Windows** (Settings, Profiles, the CV editor and others): drag any edge or corner to
+  resize; double-click an edge for the default size. The minimise button, or a double-click on
+  the title, folds the window into a bar at the bottom right so you can keep working.
+- **Themes:** the palette button at the top right offers fifteen themes in Claude's colours:
+  Claude Light (the default) and Dark, Charcoal, Manilla, Kraft, Cloud, Slate, Sage, High
+  contrast, and colour-blind-friendly light and dark versions (warm, charcoal grey, and the
+  research app's pair, blue for good and orange for problems). Your choice stays until you pick another or choose **Reset to the
+  default**. It is kept by the browser you use (the Dock app keeps its own).
+
+### Stop anything that is running
+
+Every long action shows its progress with a **Stop** button: tailoring a CV, writing a cover
+letter, building or updating a profile, exporting a CV, preparing documents for several jobs,
+finding company job boards, a search, and the assistant. Stop ends it at once: model calls in
+progress are cut off, so nothing more is spent. A stopped search keeps the jobs found and
+judged so far; stopped company discovery keeps the job boards found so far. A stopped document
+is simply not created; start it again when you are ready.
+
 ### Tailor your CV to a job, step by step
 
 1. Open the job's card. Under the job, choose the options (the defaults suit most jobs):
    - **Design:** *same as my CV* keeps your Word CV's own layout, fonts and sections. *Classic*, *Modern* or *Compact* use a new layout instead.
    - **Length:** *automatic* keeps every line unless the job is clearly more junior than your experience. *Keep full length* never trims, and *Junior role (trim)* shortens it.
-   - **Emphasis** (*Leadership* or *Hands-on / wet lab*) and **Level** (*More senior* or *More junior emphasis*) change what leads the CV. They never change your actual titles or experience.
+   - **Emphasis** (*Leadership* or *Hands-on / wet lab*) and **Level** (*More senior* or *More junior emphasis*) change what leads the CV. They never change your actual titles or experience. For a more junior job, your hands-on work leads and your senior experience stays further down as extra strength.
+   - **Audience:** *automatic* writes for an academic post when the job is one. *Academic* words the summary as a research profile and moves your existing sections into the order academic readers expect (education and publications before experience). Nothing new is added. *Industry* keeps your CV's own order.
 2. Click **Tailor CV** and wait for the progress steps to finish.
 3. Click **Download .docx** and read every line before you send it.
    - The CV keeps your own headline. Up to four job-specific headline suggestions are written under it, for you to delete the ones you do not want. You can also pick one in the app, which saves a new version with only that headline.
    - Nothing is removed (unless you chose a trim). The most relevant lines lead each role and section, and the rest follow.
-   - The app only rephrases and reorders what your CV already says. It never adds facts, numbers or skills you do not have.
-4. Read the **Report** under the job. It shows the keyword coverage before and after, job keywords not found word for word, the review of the first draft, changes that were rejected and why, and any ATS warnings. A missing requirement should be handled truthfully, never by inventing a fact. If you do have that experience, add it to your CV first (see section 4).
+   - One line is added under your summary: **Relevant skills for this role**, listing skills your CV already names.
+   - The app only rephrases and reorders what your CV already says. It never adds facts, numbers or skills you do not have, and never turns taking part into leading.
+4. Read the **Report** under the job. **Fit shown by the CV** compares your original and the tailored CV, both read for this job without knowing which is which (out of 100, and how many of the job's requirements each clearly shows). Your real fit is the same; this shows how much more clearly the new CV makes the case. **Positioning and requirements** shows how the CV presents you and each requirement: *direct*, *transfers*, *related*, *gap*, or *confirm?* (plausible but not on your CV). The report also shows the keyword coverage before and after, job keywords not found word for word, the review of the first draft, changes that were rejected and why, and any ATS warnings. A missing requirement should be handled truthfully, never by inventing a fact. If you do have that experience, add it to your CV first (see section 4).
 
 The report is kept with the tailored CV. When you come back later, reload the page or open the job in another tab, the card shows it again with the date it was tailored.
 
@@ -250,7 +374,7 @@ The report is kept with the tailored CV. When you come back later, reload the pa
 
 1. On the job's card, click **Cover letter / review CV**.
 2. Choose the source: your selected CV or a saved tailored CV for this job. If you import an older Word CV for the job, review and save its text first.
-3. Click **Write cover letter** and download it. The letter draws achievements from the CV and motivation from your saved career intent.
+3. Click **Write cover letter** and download it. The letter is short (one page) and does not repeat your CV: two examples tied to the job's main requirements and, for a change of field or level, a short honest paragraph on what carries over. With a tailored CV it follows that CV's positioning. Achievements come from the CV and motivation only from your saved career intent. A hiring-manager review improves the draft once.
 4. To edit it in the app, open the **Cover letters** tab, change the greeting, paragraphs or closing, click **Save edits**, then export to Word or text.
 
 To revise a saved tailored CV in the app, use **Review and edit CV** in that job's document panel, then **Save reviewed CV**. Edits saved directly to its file in `output/cvs/` update the document shown in the app. Copies downloaded to another folder do not sync back.
@@ -265,11 +389,15 @@ The right-hand **Assistant** does things for you from plain-language requests. F
 
 | Symptom | Check |
 | --- | --- |
-| **Backend unreachable** | Keep `bash scripts/dev.sh` running; open `http://localhost:5173`; inspect `.run/logs/`. |
+| **Install says conda, npm or command line tools are missing** | Install what it names (section 1, *What you need first*), open a **new** terminal, `cd ~/job_search` and run `bash scripts/install.sh` again. |
+| **`git clone` fails or `job_search` already exists** | Check the internet connection. If the folder already exists you have the app: `cd ~/job_search` and use `git pull` to update it. |
+| **Backend unreachable**, or Chrome cannot open `localhost:8000` | On a Mac, click the Job Search icon. Otherwise run `bash scripts/start.sh` in the `job_search` folder and keep that terminal open. Startup logs are in `.run/logs/`. |
+| **The Dock icon does nothing after moving the folder** | Run `bash scripts/macos/make_app.sh` inside the folder's new location. |
 | **No AI scores / pre-filter only** | Select a CV, enable **Match against my CV** and **Smart match**, then check Settings shows both models and a working key or CLI sign-in. |
 | **No profiles yet** | Click **Build profile from selected CV**. If it fails, check the profile model and its provider credentials in Settings. |
 | **No jobs** | Open the source report and notices; widen the date or location, enable relevant sources, and inspect excluded jobs. A newly added company may have no public feed. |
 | **Gmail source unavailable** | Check the three `JOBSEARCH_GMAIL_*` values in `.env`, restart, then connect or reconnect under **Job alerts**. Keep a CV selected and Smart match on. |
+| **Gmail needs reconnecting every week** | Your Google Cloud project is in **Testing** status, so Google ends its sign-ins after 7 days. Publish it (**Google Auth Platform → Audience → Publish app**), then click **Reconnect Gmail**. After a reconnect, click **Retry** under the results to read the alerts the failed search missed. |
 | **Google redirect error** | The authorised redirect URI must be exactly `http://localhost:8000/api/gmail/callback`, unless you deliberately changed the backend redirect setting in `.env`. |
 | **Plan sign-in fails** | Confirm the CLI is installed on the app's computer and signed in with the intended **plan** account. Use the API provider choice only when you intend API billing. |
 | **Job description looks cut off** | Open **Details** and click **Show full description**. If the source only gave a snippet, use **Paste description** on the card (section 6). |

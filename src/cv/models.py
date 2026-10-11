@@ -165,6 +165,16 @@ class JDAnalysis(_Strict):
     must_have: list[str] = Field(default_factory=list)
     nice_to_have: list[str] = Field(default_factory=list)
     responsibilities: list[str] = Field(default_factory=list)
+    level_signals: list[str] = Field(
+        default_factory=list,
+        description="What the posting says about the level: autonomy, decision authority, people "
+        "led, budget, stakeholders, years asked",
+    )
+    academic: bool = Field(
+        False,
+        description="An academic post (university, research institute, fellowship, lectureship, "
+        "postdoctoral or research staff position)",
+    )
 
 
 class RewrittenBullet(_Strict):
@@ -183,9 +193,47 @@ class RoleOrder(_Strict):
     bullet_ids: list[str] = Field(default_factory=list)
 
 
+MatchClass = Literal["direct", "transferable", "adjacent", "needs_confirmation", "not_evidenced"]
+CLAIMABLE: tuple[MatchClass, ...] = ("direct", "transferable", "adjacent")
+
+
+class RequirementEvidence(_Strict):
+    """One job requirement and the CV evidence for it (checked by `tailor.check_requirements`).
+    Only direct, transferable and adjacent rows may be presented as experience."""
+
+    requirement: str = Field(description="The requirement in the job's own words")
+    priority: Literal["essential", "desirable"] = "essential"
+    match: MatchClass = Field(
+        description="direct: the CV shows this exact skill or work · transferable: equivalent "
+        "work in another context · adjacent: related but not equivalent work · "
+        "needs_confirmation: plausible but not in the CV · not_evidenced: a gap"
+    )
+    evidence: list[str] = Field(
+        default_factory=list, description="CV bullet, role or project ids that show it"
+    )
+    note: str = Field("", description="How the evidence transfers, or what is missing")
+
+
+class Positioning(_Strict):
+    """How the CV presents the candidate for this job, decided before any wording."""
+
+    thesis: str = Field(description="What the candidate can deliver in this role, at what level")
+    differentiators: list[str] = Field(
+        default_factory=list, description="2-4 evidenced strengths that set them apart"
+    )
+    transfer: str = Field(
+        "", description="For a role outside their current function: what carries over"
+    )
+    level: str = Field("", description="Their evidenced level against the job's level")
+
+
 class TailoringPlan(_Strict):
     """LLM output: what to change. Applied deterministically by `tailor.apply_plan`."""
 
+    requirements: list[RequirementEvidence] = Field(
+        default_factory=list, description="Every meaningful job requirement, mapped to evidence"
+    )
+    positioning: Positioning | None = None
     headline_options: list[str] = Field(
         default_factory=list,
         description="Up to 4 alternative headlines for this job; the CV keeps its own headline "
@@ -200,6 +248,11 @@ class TailoringPlan(_Strict):
         "trimming is allowed",
     )
     skills_priority: list[str] = Field(default_factory=list)
+    role_skills: list[str] = Field(
+        default_factory=list,
+        description="Up to 8 of the CV's own skills most relevant to this job, for one "
+        "'Relevant skills for this role' line under the summary",
+    )
 
     @field_validator("bullet_order", mode="before")
     @classmethod
@@ -249,9 +302,15 @@ class CVCritique(_Strict):
     missed_requirements: list[MissedRequirement] = Field(default_factory=list)
     weak_bullets: list[BulletIssue] = Field(default_factory=list)
     order_notes: list[str] = Field(default_factory=list, description="Bullet or section order")
+    recruiter_notes: list[str] = Field(
+        default_factory=list,
+        description="At most 3: what the first page says, whether differentiators show, whether "
+        "the case for a role outside the current function is credible",
+    )
 
     def has_issues(self) -> bool:
-        return bool(self.missed_requirements or self.weak_bullets or self.order_notes)
+        points = [self.missed_requirements, self.weak_bullets, self.order_notes]
+        return any(points) or bool(self.recruiter_notes)
 
     def notes(self) -> list[str]:
         """One line per point, for the user."""
@@ -259,6 +318,7 @@ class CVCritique(_Strict):
             *(f"Surface {m.requirement} ({m.source_id})" for m in self.missed_requirements),
             *(f"Strengthen {b.source_id}: {b.issue}" for b in self.weak_bullets),
             *self.order_notes,
+            *self.recruiter_notes,
         ]
 
 
@@ -273,6 +333,56 @@ class ATSReport(_Strict):
     keyword_coverage: float = Field(ge=0, le=1, description="JD keywords found in the file text")
     missing_keywords: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+FitDimension = Literal["function", "domain", "seniority", "leadership", "sector"]
+
+
+class FitReading(_Strict):
+    """A recruiter's reading of one CV for one job, from the CV alone (LLM output)."""
+
+    function: int = Field(ge=0, le=4, description="0 another discipline .. 4 does this work now")
+    domain: int = Field(ge=0, le=4, description="0 unrelated field .. 4 same field")
+    seniority: int = Field(ge=0, le=4, description="0 far off .. 4 same level and scope")
+    leadership: int = Field(ge=0, le=4, description="0 not shown .. 4 the kind the job needs")
+    sector: int = Field(ge=0, le=4, description="0 unrelated sector .. 4 same sector")
+    requirements_shown: list[int] = Field(
+        default_factory=list,
+        description="Numbers of the listed requirements this CV clearly shows the candidate meets",
+    )
+    impression: str = Field("", description="One sentence: what the top of the CV conveys")
+
+
+class FitReadout(_Strict):
+    """Two CVs read independently, in the order given (LLM output)."""
+
+    first: FitReading
+    second: FitReading
+
+
+class DimensionChange(_Strict):
+    name: FitDimension
+    before: int = Field(ge=0, le=4)
+    after: int = Field(ge=0, le=4)
+
+
+class FitComparison(_Strict):
+    """How clearly the tailored CV shows the fit, against the CV it was made from. The
+    candidate's actual fit is the same (same facts); this measures what a reader sees."""
+
+    before: int = Field(ge=0, le=100, description="The original CV, read for this job")
+    after: int = Field(ge=0, le=100, description="The tailored CV, read for this job")
+    dimensions: list[DimensionChange] = Field(default_factory=list)
+    requirements_total: int = 0
+    requirements_before: int = 0
+    requirements_after: int = 0
+    keywords_before: float = Field(0, ge=0, le=1)
+    keywords_after: float = Field(0, ge=0, le=1)
+    first_page_before: float = Field(0, ge=0, le=1, description="Keywords on the first page")
+    first_page_after: float = Field(0, ge=0, le=1)
+    impression_before: str = ""
+    impression_after: str = ""
+    worse: list[str] = Field(default_factory=list, description="Where the tailored CV reads worse")
 
 
 class TailoredCV(_Strict):
@@ -306,6 +416,15 @@ class TailoredCV(_Strict):
         default_factory=list,
         description="How the Word file was written (same design as the original CV, or why not)",
     )
+    positioning: Positioning | None = None
+    requirements: list[RequirementEvidence] = Field(
+        default_factory=list, description="The job's requirements and the evidence, as checked"
+    )
+    role_skills: list[str] = Field(
+        default_factory=list, description="The 'Relevant skills for this role' line (CV skills)"
+    )
+    academic: bool = Field(False, description="Written for an academic post")
+    fit_check: FitComparison | None = None
 
 
 class TailoredDocument(_Strict):
@@ -362,6 +481,11 @@ class LetterSections(_Strict):
     greeting: str = "Dear Hiring Manager,"
     opening: LetterOpening
     evidence: list[LetterParagraph] = Field(min_length=1, max_length=2)
+    bridge: LetterParagraph | None = Field(
+        None,
+        description="Only for a role outside the current function or at another level: how the "
+        "experience carries over, and the candidate's stated reason for the move",
+    )
     conclusion: LetterParagraph
     closing: str = "Yours sincerely,"
 
@@ -372,10 +496,21 @@ class CoverLetterDraft(_Strict):
     greeting: str = "Dear Hiring Manager,"
     opening: LetterOpening | None = None
     evidence: list[LetterParagraph] = Field(default_factory=list)
+    bridge: LetterParagraph | None = None
     conclusion: LetterParagraph | None = None
     # Older callers can still pass paragraphs directly to apply_letter.
     paragraphs: list[LetterParagraph] = Field(default_factory=list)
     closing: str = "Yours sincerely,"
+
+
+class LetterReview(_Strict):
+    """A hiring manager's read of a drafted letter (LLM output); never a source of facts."""
+
+    issues: list[str] = Field(
+        default_factory=list,
+        description="At most 4 concrete fixes: generic or recited lines, a weak opening, the "
+        "top requirements not addressed, an unconvincing case for the move",
+    )
 
 
 class CoverLetter(_Strict):

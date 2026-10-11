@@ -156,9 +156,7 @@ def test_stop_returns_at_once_while_a_worker_thread_is_busy() -> None:
         async with search_service._running("run-stop") as run_id:
             asyncio.get_running_loop().call_later(0.05, search_service.stop_search, run_id)
             t0 = time.monotonic()
-            got = await search_service._until_stopped(
-                asyncio.to_thread(release.wait, 5), "stopped"
-            )
+            got = await search_service._until_stopped(asyncio.to_thread(release.wait, 5), "stopped")
             return str(got), time.monotonic() - t0
 
     try:
