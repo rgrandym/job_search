@@ -16,6 +16,7 @@ from src.cv.models import (
     TailoredCV,
     TailoredCVEdits,
     TailoredDocument,
+    TailoringSettings,
 )
 from src.cv.tailor import revise_tailored
 from src.jobs.models import JobPosting
@@ -53,6 +54,7 @@ def create(
     reviewed: bool = True,
     imported: bool = False,
     original_file: Path | None = None,
+    settings: TailoringSettings | None = None,
 ) -> TailoredDocument:
     """Keep the exact CV and source evidence used for an exported Word draft."""
     now = datetime.now(UTC).isoformat()
@@ -76,6 +78,7 @@ def create(
         tailored=tailored,
         reviewed=reviewed,
         imported=imported,
+        settings=settings,
     )
     _save(ws, document)
     return document

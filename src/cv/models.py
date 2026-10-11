@@ -427,6 +427,72 @@ class TailoredCV(_Strict):
     fit_check: FitComparison | None = None
 
 
+class TailoringSettings(_Strict):
+    """The choices a tailored CV was written with, so versions for one job can be told apart."""
+
+    template: str = "original"
+    emphasis: str = "auto"
+    level: str = "auto"
+    length: str = "auto"
+    audience: str = "auto"
+
+
+class FitReadings(_Strict):
+    """Several CVs read independently for one job, in the order given (LLM output)."""
+
+    readings: list[FitReading] = Field(description="One reading per CV, in the order given")
+
+
+class AreaChange(_Strict):
+    """One area of a CV version against the original it was made from."""
+
+    area: str
+    before: str
+    after: str
+    change: Literal["better", "worse", "same"]
+
+
+class VersionReading(_Strict):
+    """One CV (an original or a tailored version) read for the job, beside the others."""
+
+    id: str = Field(description='A tailored CV id, or "original:<cv id>"')
+    kind: Literal["original", "tailored"]
+    label: str
+    baseline_id: str | None = Field(None, description="The original this version was made from")
+    created_at: str | None = None
+    filename: str | None = None
+    settings: TailoringSettings | None = None
+    score: int = Field(ge=0, le=100)
+    dimensions: list[DimensionChange] = Field(
+        default_factory=list, description="before = the baseline's rating, after = this CV's"
+    )
+    requirements_shown: list[int] = Field(default_factory=list, description="1-based numbers")
+    keywords_found: list[str] = Field(default_factory=list)
+    keyword_coverage: float = Field(0, ge=0, le=1)
+    first_page_coverage: float = Field(0, ge=0, le=1)
+    impression: str = ""
+    words: int = 0
+    rejected_changes: int = 0
+    left_out: int = 0
+    areas: list[AreaChange] = Field(
+        default_factory=list, description="Against its original (empty for an original)"
+    )
+
+
+class VersionComparison(_Strict):
+    """Every chosen CV for one job read side by side by the same blind reader."""
+
+    job_id: str
+    job_title: str = ""
+    job_company: str = ""
+    created_at: str
+    requirements: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+    readings: list[VersionReading] = Field(default_factory=list)
+    best_id: str | None = None
+    summary: str = ""
+
+
 class TailoredDocument(_Strict):
     """A saved, editable tailored CV and the source used to guard later edits."""
 
@@ -449,6 +515,9 @@ class TailoredDocument(_Strict):
     tailored: TailoredCV
     reviewed: bool = True
     imported: bool = False
+    settings: TailoringSettings | None = Field(
+        default=None, description="The choices it was tailored with (None: imported or older)"
+    )
 
 
 class TailoredCVEdits(_Strict):

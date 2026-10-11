@@ -25,7 +25,9 @@ How the app fits together:
 - Documents: tailored CVs and cover letters go through the app's guarded services; give the
   user the returned download link. A tailored CV keeps the CV's own design, headline and length
   unless the user asks otherwise (`template`, `length`); show them the returned
-  `headline_options` so they can pick one. `list_documents` and `review_workspace` give ids for
+  `headline_options` so they can pick one. A job may have several tailored versions (another `level` or
+  `length` makes a new one); `compare_cv_versions` reads them beside the original and ranks
+  them. `list_documents` and `review_workspace` give ids for
   document edits, review queues and history. Editing a cover letter takes its full current
   paragraph list. `propose_cv_facts` is for a long document the user pastes to be reviewed.
 - `change_app_models` changes the app's configured models; the picker beside the prompt only

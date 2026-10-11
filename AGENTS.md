@@ -31,7 +31,8 @@ All tests run offline: the LLM is faked, HTTP is mocked, and the agent chat uses
 A three-pane web UI (`web/`) over a FastAPI backend (`src/web/app.py`):
 **left**: CV library/upload (click a CV to review and edit its parsed facts) and search filters (titles, keywords, location, radius, salary, arrangement,
 sources, threshold, smart-match toggle). **centre**: ranked results with AI fit scores, reasons,
-gaps, and tailor-to-.docx. **right**: the assistant over `/api/ws/chat`
+gaps, and tailor-to-.docx (each tailoring kept as a version on the card; **Compare versions**
+reads them beside the original: `services/cv_versions.py`). **right**: the assistant over `/api/ws/chat`
 (plain-language actions through the same services as the buttons). Searching is available
 from the sidebar's Search button or assistant (direct pipeline, stoppable). **centre** also
 has a **Saved** tab: jobs ticked and saved from a search (`services/saved.py`,
@@ -170,6 +171,8 @@ kept, up to 4 checked headline_options offered; role_skills only CV skills; ever
 and reordered unless the length choice or assess_trim allows trimming)
 ─▶ critique_cv (LLM, hiring manager + recruiter) ─▶ revise_plan ─▶ apply_plan ─▶ TailoredCV
 ─▶ fit_check.compare_fit (LLM reads original and tailored CV blind; before → after)
+   (each tailoring is a saved version with its settings; cv_versions.compare reads a job's
+   versions and their originals side by side in one blind LLM call, ranks them and saves it)
 ─▶ docx_original.write_like_original (a copy of the CV's Word design, also for a PDF CV's Word
 version, + "Relevant skills for this role" line; academic: sections moved whole into academic
 order; templates only when chosen)

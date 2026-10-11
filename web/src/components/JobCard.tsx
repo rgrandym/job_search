@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bookmark, CalendarDays, ChevronDown, Download, ExternalLink, FileText, Loader2, Mail, Trash2 } from "lucide-react";
+import { Bookmark, CalendarDays, ChevronDown, Download, ExternalLink, FileText, Loader2, Mail, Scale, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "../lib/api";
 import type { Rejection } from "../lib/api";
 import type { FitDimensions, JobStatus, JobVerdict, MatchResult, OutcomeStage, UserLabel } from "../lib/types";
 import { cn, money, scoreColor } from "../lib/utils";
 import { useSearch } from "../stores/searchStore";
+import { CVVersionCompare } from "./CVVersionCompare";
 import { TaskError, TaskProgress, useTaskId } from "./TaskProgress";
 import { TailoredCVPanel } from "./TailoredCVPanel";
 import { FitCheckDetails, FitCheckSummary, PositioningDetails } from "./TailorInsights";
@@ -403,6 +404,9 @@ export function JobCard({
   const [level, setLevel] = useState<"auto" | "senior" | "junior">("auto");
   const [audience, setAudience] = useState<"auto" | "industry" | "academic">("auto");
   const [documentsOpen, setDocumentsOpen] = useState(false);
+  // The tailored version whose report the card shows (null: the newest) and the comparison window.
+  const [versionId, setVersionId] = useState<string | null>(null);
+  const [compareOpen, setCompareOpen] = useState(false);
   const qc = useQueryClient();
   const setTracking = useSearch((s) => s.setTracking);
   const tailorTask = useTaskId();
@@ -412,6 +416,7 @@ export function JobCard({
     mutationFn: () => api.tailor(job.id, template, result, emphasis, level, length, tailorTask.next(), audience),
     onSuccess: (data) => {
       setHeadlineChoice(null);
+      setVersionId(data.document_id);
       setDocumentsOpen(true);
       void qc.invalidateQueries({ queryKey: ["tailored-cvs"] });
       if (data.tracking) setTracking(job.id, data.tracking);
@@ -420,10 +425,17 @@ export function JobCard({
       void qc.invalidateQueries({ queryKey: ["saved"] });
     },
   });
-  // The newest saved draft's report, so it is shown again after a reload or in another tab.
+  // The chosen (else newest) saved version's report, so it is shown again after a reload or in another tab.
   const drafts = useQuery({ queryKey: ["tailored-cvs", "all"], queryFn: api.allTailoredCVs, staleTime: 60_000 });
-  const savedDraft = drafts.data?.find((d) => d.job_id === job.id && d.report);
-  const report = tailor.data ?? savedDraft?.report ?? null;
+  const versions = drafts.data?.filter((d) => d.job_id === job.id) ?? [];
+  const savedDraft = versions.find((d) => d.id === versionId && d.report) ?? versions.find((d) => d.report);
+  const fresh = tailor.data && (!versionId || tailor.data.document_id === versionId) ? tailor.data : null;
+  const report = fresh ?? savedDraft?.report ?? null;
+  const pickVersion = (id: string) => {
+    setVersionId(id);
+    setHeadlineChoice(null);
+    setReportOpen(true);
+  };
   const pickHeadline = useMutation({
     meta: { syncLists: true },
     mutationFn: ({ documentId, headline }: { documentId: string; headline: string }) =>
@@ -682,14 +694,44 @@ export function JobCard({
       <TrackingControls key={`${job.id}:${result.tracking?.note ?? ""}:${result.tracking?.reason ?? ""}`} result={result} />
       {labelable && !result.excluded && <LabelControls jobId={job.id} />}
 
+      {versions.length > 0 && (
+        <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px]">
+          <span className="text-faint" title="Each tailoring is kept as its own version. Change Level, Length, Emphasis or Audience and tailor again to add one.">
+            CV versions:
+          </span>
+          {[...versions].reverse().map((v) => {
+            const shown = v.report?.document_id === report?.document_id;
+            return (
+              <button
+                key={v.id}
+                className={cn("rounded border px-2 py-0.5 hover:border-accent", shown ? "border-accent text-fg" : "border-border text-muted")}
+                title={`Show this version's report · tailored ${new Date(v.created_at).toLocaleString()}`}
+                aria-pressed={shown}
+                onClick={() => pickVersion(v.id)}
+              >
+                {v.label}
+                {v.report?.fit_check && <span className="ml-1" style={{ color: scoreColor(v.report.fit_check.after) }}>{v.report.fit_check.after}</span>}
+              </button>
+            );
+          })}
+          <button
+            className="btn-ghost ml-1 py-0.5 text-[11px]"
+            title="Read the versions beside your original CV for this job: scores, requirements, keywords, what improved or got worse"
+            onClick={() => setCompareOpen(true)}
+          >
+            <Scale size={12} /> Compare versions
+          </button>
+        </div>
+      )}
+      <CVVersionCompare open={compareOpen} onClose={() => setCompareOpen(false)} jobId={job.id} versions={versions} onPick={pickVersion} />
       {report && (
         <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md bg-surface p-2 text-[12px]">
           <a className="btn-primary py-1 text-[12px]" href={headlineChoice?.url ?? report.download_url}>
             <Download size={12} /> Download .docx
           </a>
-          {!tailor.data && savedDraft && (
+          {!fresh && savedDraft && (
             <span className="text-faint" title="Saved with this tailored CV">
-              Tailored {new Date(savedDraft.created_at).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}
+              {savedDraft.label} · {new Date(savedDraft.created_at).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}
             </span>
           )}
           <FitCheckSummary check={report.fit_check} />

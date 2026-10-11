@@ -370,6 +370,22 @@ is simply not created; start it again when you are ready.
 
 The report is kept with the tailored CV. When you come back later, reload the page or open the job in another tab, the card shows it again with the date it was tailored.
 
+### Compare several tailored CVs for one job, step by step
+
+Every time you click **Tailor CV**, the app keeps a new version; nothing is overwritten. That lets you try, for example, one CV with **Level: automatic** and one with **More senior emphasis**, and see which makes the stronger case for the job.
+
+1. Tailor the CV once, then change an option (Level, Length, Emphasis or Audience) and click **Tailor CV** again. Repeat for each version you want to try.
+2. Under the job's buttons, the **CV versions** row lists them in the order they were made: *V1 · Automatic*, *V2 · Level: more senior*, and so on, each with its fit score out of 100. Click a version to show its report and download link in the card. (CVs tailored before this feature show as *Tailored*, because their options were not recorded.)
+3. Click **Compare versions**. Tick the versions to compare (all are ticked when it opens), then click **Compare**. Your original CV is added automatically. Up to six CVs, the original included, are read in one go by the CV model: one model call.
+4. Read the report:
+   - **The verdict** at the top names the version that shows your fit most clearly and by how much it beats your original. If no version beats the original, it says so; try another option or check the wording.
+   - **The score table** has one column per CV: fit shown out of 100 with its rank, the five readings (function, domain, seniority, leadership, sector, each 0-4), requirements shown, keyword coverage, keywords on the first page, length in words, rejected rewrites and left-out lines, and the reader's first impression. Green and orange numbers show the change against the original; the best value in each row is in bold and the winning column is highlighted.
+   - **What each version changed** lists, for each version, what improved, what got worse and what did not change against your original, down to each requirement and keyword gained or lost.
+   - **Job requirements shown** and **Job keywords found** are grids of ticks per CV. Rows where the CVs differ come first.
+5. Each column has a **.docx** link to download that version, and **Show in card** to make it the version shown on the job card. Choose that version as the source when you write the cover letter.
+
+All CVs are read together, in shuffled order, without the reader being told which is the original, so the scores are comparable. As with the single before/after check, they measure how clearly each CV shows your fit, not your actual fit: your facts are the same in every version. The last comparison is saved with the job and opens again without another model call. If you edit or remove a version afterwards, the report says it is out of date; click **Compare again**. You can also ask the assistant, for example: *"Make a more senior version of my CV for this job and compare it with the first one."*
+
 ### Write a cover letter, step by step
 
 1. On the job's card, click **Cover letter / review CV**.

@@ -170,6 +170,11 @@ class DocumentArgs(BaseModel):
         description="academic: arrange and word the CV for an academic post; auto: when the "
         "job is one",
     )
+    level: Literal["auto", "senior", "junior"] = Field(
+        "auto",
+        description="senior / junior: lean the presentation more or less senior (titles and "
+        "facts unchanged); each choice makes another version to compare",
+    )
 
 
 @tool("tailor_cv", "Create a guarded, reviewed Word CV for a result or saved job.", DocumentArgs)
@@ -183,6 +188,7 @@ async def tailor_cv(args: DocumentArgs, ctx: AgentContext) -> dict[str, Any]:
         args.template,
         ctx.usage_sink("assistant"),
         ctx.ws.result(job.id),
+        level=args.level,
         length=args.length,
         audience=args.audience,
     )

@@ -37,6 +37,7 @@ import type {
   SearchQuery,
   TailoredCVView,
   TailorReport,
+  VersionComparison,
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -286,6 +287,14 @@ export const api = {
   tailoredCVs: (jobId: string) =>
     request<TailoredCVView[]>(`/api/jobs/${encodeURIComponent(jobId)}/tailored-cvs`),
   allTailoredCVs: () => request<TailoredCVView[]>("/api/tailored-cvs"),
+  cvComparison: (jobId: string) =>
+    request<{ comparison: VersionComparison | null; stale: boolean }>(
+      `/api/jobs/${encodeURIComponent(jobId)}/cv-comparison`),
+  compareCVs: (jobId: string, documentIds: string[], progressId?: string) =>
+    request<VersionComparison>(
+      tracked(`/api/jobs/${encodeURIComponent(jobId)}/cv-comparison`, progressId),
+      json("POST", { document_ids: documentIds }),
+    ),
   importOlderCV: (asset_id: string, title: string, company: string, description: string) =>
     request<TailoredCVView>("/api/tailored-cvs/import", json("POST", { asset_id, title, company, description })),
   importTailoredCV: (jobId: string, assetId: string, result?: MatchResult) =>

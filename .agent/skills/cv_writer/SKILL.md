@@ -1,6 +1,6 @@
 ---
 name: cv_writer
-description: Create or update the structured Master CV (including evidence from documents the user supplies, accepted one by one), tailor it to a job description (requirement-to-evidence map, positioning for adjacent, more junior or academic roles, STAR-format bullets, no fabricated facts; reviewed and revised once; a before/after fit check), write guarded one-page cover letters, and export them to styled Word (.docx) documents with an ATS read-back. Use when the user wants to import/edit their CV, tailor a CV to a job, write a cover letter, or produce a .docx CV.
+description: Create or update the structured Master CV (including evidence from documents the user supplies, accepted one by one), tailor it to a job description (requirement-to-evidence map, positioning for adjacent, more junior or academic roles, STAR-format bullets, no fabricated facts; reviewed and revised once; a before/after fit check; several versions per job compared side by side against the original), write guarded one-page cover letters, and export them to styled Word (.docx) documents with an ATS read-back. Use when the user wants to import/edit their CV, tailor a CV to a job, write a cover letter, or produce a .docx CV.
 ---
 
 # cv_writer
@@ -13,10 +13,11 @@ Turns a factual **Master CV** into job-specific, ATS-optimised CVs and exports t
 | `docx_templates.py` | CLI to render a CV JSON to `.docx` with a named template. |
 | `src/cv/master_cv_manager.py` | load / save / validate / import / merge-patch the Master CV |
 | `src/cv/tailor.py` | JD analysis → tailoring plan (LLM: requirement map, positioning, wording) → guarded application (deterministic) → review → one revision |
-| `src/cv/fit_check.py` | Before/after: the original and the tailored CV read for the job (`compare_fit`) |
+| `src/cv/fit_check.py` | Before/after: the original and the tailored CV read for the job (`compare_fit`); several versions side by side (`score_versions`) |
 | `src/cv/claims.py` | Shared wording checks: stock superlatives, added ownership or scope (`escalation`) |
 | `src/cv/cover_letter.py` | Cover-letter draft (LLM) → guarded paragraphs (deterministic) → hiring-manager review → one guarded redraft |
 | `src/services/tailored_documents.py` | Saved tailored drafts, guarded edits and Word versions |
+| `src/services/cv_versions.py` | A job's tailored versions compared with their originals, ranked and saved |
 | `src/services/cover_letters.py` | Saved letter text, edits and Word/text exports |
 | `src/cv/ats.py` | Reads the exported .docx back the way an ATS does |
 | `src/cv/docx_original.py` | Tailored CV written as a copy of the original Word CV (its design kept) |
@@ -280,6 +281,25 @@ shows. The score is the weighted levels (30/20/20/10/10) out of 100. `worse` lis
 dimension or requirement count that dropped. The candidate's actual fit is unchanged (same
 facts); the job_matcher's verdict judges that. A failed check never loses the CV: it is noted
 in `document_notes`.
+
+## 3b2. Comparing a job's CV versions
+
+Every tailoring is kept as its own version for the job, with the choices it was written with
+(`TailoredDocument.settings`: design, emphasis, level, length, audience) and a label numbered
+per job (`cv_versions.labels`: "V1 · Automatic", "V2 · Level: more senior"). The job card
+lists the versions and shows the chosen one's report. `cv_versions.compare(ws, job_id, ids)`
+(`POST /api/jobs/{job_id}/cv-comparison`, agent tool `compare_cv_versions`) reads the chosen
+versions and the original each came from (one per source CV; an imported Word CV has none)
+in **one** LLM call (`fit_check.score_versions`, at most `MAX_VERSIONS` = 6 CVs), in an order
+fixed by a hash of the job and each text, so no CV is identified and one reader applies the
+same standard to all. Same rubric, weights, requirement list (the newest version's) and ATS
+keywords as 3b. Code then sets each version against its original (`version_areas`: every
+dimension, requirements shown and each requirement gained or lost, keyword coverage, keywords
+on the first page, keywords added or lost: better / worse / same) and picks the best
+(`best_version`: score, then requirements, then keywords; a tailored version wins a tie). The
+comparison is saved per job (`data/cv_comparisons/`) and marked stale once a version it read
+is edited or removed. Like 3b it measures how clearly each CV shows the fit, never the
+candidate's actual fit.
 
 ## 3c. Cover letters
 

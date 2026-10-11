@@ -523,6 +523,12 @@ export interface TailoredCVView {
   job_id: string;
   job_title: string;
   job_company: string;
+  /** The library CV it was tailored from ("master": the structured Master CV). */
+  cv_id: string;
+  /** "V1 · Automatic", "V2 · Level: more senior" … numbered per job (backend `cv_versions.labels`). */
+  label: string;
+  /** The choices it was tailored with (null: imported or made before they were kept). */
+  settings: TailoringSettings | null;
   created_at: string;
   updated_at: string;
   template: string;
@@ -585,6 +591,60 @@ export interface FitComparison {
 }
 
 export type Audience = "auto" | "industry" | "academic";
+
+/** The choices one tailored CV was written with (backend `TailoringSettings`). */
+export interface TailoringSettings {
+  template: string;
+  emphasis: string;
+  level: string;
+  length: string;
+  audience: string;
+}
+
+/** One area of a tailored version against its original (backend `AreaChange`). */
+export interface AreaChange {
+  area: string;
+  before: string;
+  after: string;
+  change: "better" | "worse" | "same";
+}
+
+/** One CV read for the job beside the others (backend `VersionReading`). */
+export interface VersionReading {
+  id: string;
+  kind: "original" | "tailored";
+  label: string;
+  baseline_id: string | null;
+  created_at: string | null;
+  filename: string | null;
+  settings: TailoringSettings | null;
+  score: number;
+  /** before = its original's rating, after = this CV's (the same for an original). */
+  dimensions: { name: FitDimension; before: number; after: number }[];
+  /** 1-based numbers into `VersionComparison.requirements`. */
+  requirements_shown: number[];
+  keywords_found: string[];
+  keyword_coverage: number;
+  first_page_coverage: number;
+  impression: string;
+  words: number;
+  rejected_changes: number;
+  left_out: number;
+  areas: AreaChange[];
+}
+
+/** A job's CV versions and originals read side by side (backend `VersionComparison`). */
+export interface VersionComparison {
+  job_id: string;
+  job_title: string;
+  job_company: string;
+  created_at: string;
+  requirements: string[];
+  keywords: string[];
+  readings: VersionReading[];
+  best_id: string | null;
+  summary: string;
+}
 
 /** What tailoring did, shown under the job: coverage, keywords, headlines, rejections. */
 export interface TailorReport {

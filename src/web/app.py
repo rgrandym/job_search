@@ -55,7 +55,13 @@ from src.core.llm import usage as plan_usage
 from src.core.llm.calls import call_group, cancel_group
 from src.core.llm.catalog import ModelInfo
 from src.core.llm.codex_backend import codex_status, start_login
-from src.cv.models import MasterCV, TailoredCV, TailoredCVEdits, TailoredDocument
+from src.cv.models import (
+    MasterCV,
+    TailoredCV,
+    TailoredCVEdits,
+    TailoredDocument,
+    VersionComparison,
+)
 from src.jobs.fetcher import SELECTABLE_SOURCES, SOURCE_CATALOG, build_sources
 from src.jobs.models import (
     JobPosting,
@@ -76,6 +82,7 @@ from src.services import (
     company_discovery,
     cover_letters,
     cv_service,
+    cv_versions,
     document_files,
     enrichment,
     history,
@@ -950,9 +957,16 @@ def _tailor_report(tailored: TailoredCV, document_id: str | None, url: str) -> d
     }
 
 
-def _tailored_view(document: TailoredDocument) -> dict[str, Any]:
+def _tailored_view(
+    document: TailoredDocument, names: dict[str, str] | None = None
+) -> dict[str, Any]:
     """Return the editable CV, download link and tailoring report (kept with the draft, so it
-    is shown again after a reload), without duplicating its source snapshot."""
+    is shown again after a reload), without duplicating its source snapshot. `names`: the
+    version labels (`cv_versions.labels`), read for the document's job when not given."""
+    if names is None:
+        names = cv_versions.labels(
+            tailored_documents.list_for_job(get_workspace(), document.job_id)
+        )
     cvs_dir = get_workspace().output_dir / "cvs"
     url = _file_url(
         cvs_dir / document.filename
@@ -965,6 +979,9 @@ def _tailored_view(document: TailoredDocument) -> dict[str, Any]:
         "job_id": document.job_id,
         "job_title": document.job_title or document.jd.job_title,
         "job_company": document.job_company or document.jd.company or "",
+        "cv_id": document.cv_id,
+        "label": names.get(document.id, "Tailored CV"),
+        "settings": document.settings,
         "created_at": document.created_at,
         "updated_at": document.updated_at,
         "template": document.template,
@@ -982,13 +999,43 @@ def _tailored_view(document: TailoredDocument) -> dict[str, Any]:
 
 @app.get("/api/jobs/{job_id}/tailored-cvs")
 def tailored_cvs(job_id: str) -> list[dict[str, Any]]:
-    return [_tailored_view(d) for d in tailored_documents.list_for_job(get_workspace(), job_id)]
+    documents = tailored_documents.list_for_job(get_workspace(), job_id)
+    names = cv_versions.labels(documents)
+    return [_tailored_view(d, names) for d in documents]
 
 
 @app.get("/api/tailored-cvs")
 def all_tailored_cvs() -> list[dict[str, Any]]:
     """Saved tailored drafts remain reachable when their job card is no longer displayed."""
-    return [_tailored_view(d) for d in tailored_documents.list_all(get_workspace())]
+    documents = tailored_documents.list_all(get_workspace())
+    names = cv_versions.labels(documents)
+    return [_tailored_view(d, names) for d in documents]
+
+
+class CompareVersionsRequest(BaseModel):
+    document_ids: list[str] = Field(default_factory=list, description="Empty: every version")
+
+
+@app.get("/api/jobs/{job_id}/cv-comparison")
+def cv_comparison(job_id: str) -> dict[str, Any]:
+    """The last side-by-side reading of this job's CV versions (none yet: null)."""
+    comparison, stale = cv_versions.saved(get_workspace(), job_id)
+    return {"comparison": comparison, "stale": stale}
+
+
+@app.post("/api/jobs/{job_id}/cv-comparison")
+async def compare_cv_versions(
+    job_id: str, body: CompareVersionsRequest, progress_id: str | None = None
+) -> VersionComparison:
+    """Read the chosen tailored CVs and their originals side by side for this job."""
+    try:
+        return await progress.run(
+            progress_id,
+            "Comparing CV versions",
+            cv_versions.compare(get_workspace(), job_id, body.document_ids),
+        )
+    except (ValueError, LLMError) as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 class ImportOlderCVRequest(BaseModel):

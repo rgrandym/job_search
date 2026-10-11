@@ -126,7 +126,7 @@ export function TailoredCVPanel({ jobId, result, hasCv, onLetter, letterPending 
           <select className="input w-full" value={selected} onChange={(e) => { setChoice(e.target.value); setEditing(false); }}>
             {hasCv && <option value="">Selected CV from library</option>}
             {documents.data?.map((item) => (
-              <option key={item.id} value={item.id}>Tailored CV · {new Date(item.updated_at).toLocaleString()}</option>
+              <option key={item.id} value={item.id}>{item.label} · {new Date(item.updated_at).toLocaleString()}</option>
             ))}
           </select>
           {document ? (

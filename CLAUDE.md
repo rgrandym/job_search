@@ -79,6 +79,7 @@ src/
                history.py (+ source and role-family yield) · intent.py (career intent, per CV)
                calibration.py (read-only outcome review) · enrichment.py (evidence review queue)
                saved.py (saved jobs, data/saved_jobs.json; status from the tracker)
+               cv_versions.py (a job's tailored CV versions read side by side against the originals)
                labels.py (your yes/maybe/no per job + snapshot, data/job_labels.json; measures models;
                a "no" is set aside in later searches)
                learning.py (preferences learned from labels and applied/N/A reasons; new reasons are

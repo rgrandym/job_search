@@ -30,6 +30,7 @@ from src.cv.models import (
     TailoredCV,
     TailoredDocument,
     TailoringPlan,
+    TailoringSettings,
 )
 from src.cv.tailor import (
     Audience,
@@ -666,20 +667,39 @@ async def tailor_to_job(
     path = _new_output_path(ws, _file_stem(master_cv, job))
     tailored, template = _write_tailored(tailored, master_cv, original, path, template)
     progress.step("Checking what an ATS reads from the file")
-    keywords = tailored.matched_keywords + tailored.missing_keywords
-    tailored = tailored.model_copy(
-        update={
-            "ats": check_docx(path, tailored.cv, keywords),
-            "source_ats_keyword_coverage": _source_coverage(ws, master_cv, original, keywords),
-        }
+    tailored = _with_ats(ws, tailored, master_cv, original, path)
+    chosen = TailoringSettings(
+        template=template, emphasis=emphasis, level=level, length=length, audience=audience
     )
     document = tailored_documents.create(
-        ws, job.id, master_cv, jd, tailored, template, path, posting=job, original_file=original
+        ws,
+        job.id,
+        master_cv,
+        jd,
+        tailored,
+        template,
+        path,
+        posting=job,
+        original_file=original,
+        settings=chosen,
     )
     tailored = document.tailored
     ws.tailored[job.id] = tailored
     tracker.remember_document_job(ws, job, cv_file=path.name)
     return tailored, path
+
+
+def _with_ats(
+    ws: Workspace, tailored: TailoredCV, master: MasterCV, original: Path | None, path: Path
+) -> TailoredCV:
+    """What an ATS reads from the written file, and from the CV as it was before tailoring."""
+    keywords = tailored.matched_keywords + tailored.missing_keywords
+    return tailored.model_copy(
+        update={
+            "ats": check_docx(path, tailored.cv, keywords),
+            "source_ats_keyword_coverage": _source_coverage(ws, master, original, keywords),
+        }
+    )
 
 
 def _fit_check(

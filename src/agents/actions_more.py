@@ -267,6 +267,44 @@ async def list_documents(_: NoArgs, ctx: AgentContext) -> dict[str, Any]:
     }
 
 
+class CompareArgs(BaseModel):
+    job_id: str = Field(description="The job whose tailored CVs to compare")
+    document_ids: list[str] = Field(
+        default_factory=list, description="Tailored CV ids for this job; empty: all of them"
+    )
+
+
+@tool(
+    "compare_cv_versions",
+    "Read a job's tailored CV versions and their originals side by side; rank them.",
+    CompareArgs,
+)
+async def compare_cv_versions(args: CompareArgs, ctx: AgentContext) -> dict[str, Any]:
+    from src.services import cv_versions
+
+    comparison = await cv_versions.compare(
+        ctx.ws, args.job_id, args.document_ids, ctx.usage_sink("assistant")
+    )
+    await ctx.emit("documents_updated", {"job_id": args.job_id})
+    return {
+        "summary": comparison.summary,
+        "best_id": comparison.best_id,
+        "versions": [
+            {
+                "id": r.id,
+                "label": r.label,
+                "score": r.score,
+                "requirements_shown": f"{len(r.requirements_shown)} of "
+                f"{len(comparison.requirements)}",
+                "keyword_coverage": round(r.keyword_coverage, 2),
+                "better": [a.area for a in r.areas if a.change == "better"],
+                "worse": [a.area for a in r.areas if a.change == "worse"],
+            }
+            for r in comparison.readings
+        ],
+    }
+
+
 class TailoredEdit(BaseModel):
     document_id: str
     headline: str | None = None
