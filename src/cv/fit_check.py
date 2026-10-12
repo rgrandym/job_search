@@ -23,6 +23,7 @@ import statistics
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
+from src.core.fit_rubric import FIT_WEIGHTS, capped_score, points_for
 from src.core.llm_provider import LLMProvider
 from src.cv.models import (
     AreaChange,
@@ -30,24 +31,20 @@ from src.cv.models import (
     EvidencedReading,
     EvidencedReadings,
     FitComparison,
-    FitDimension,
     FitReading,
     FitReadout,
     JDAnalysis,
     MasterCV,
+    SearchFitBaseline,
     TailoredCV,
     VersionReading,
 )
 from src.cv.tailor import UNTRUSTED, ats_keywords, cv_to_text, printed_text
 from src.tools.search_tools import mentions
 
-WEIGHTS: dict[FitDimension, int] = {
-    "function": 30,
-    "domain": 20,
-    "seniority": 20,
-    "leadership": 10,
-    "sector": 10,
-}
+WEIGHTS: dict[str, int] = {
+    name: weight for name, weight in FIT_WEIGHTS.items() if name != "practicality"
+}  # practicality comes from the search verdict; wording cannot change the commute
 FIRST_PAGE_WORDS = 450  # what fits above the fold of page two on a typical CV
 MAX_REQUIREMENTS = 15
 MAX_VERSIONS = 6  # CVs read in one call; more and one reader's standard drifts
@@ -62,11 +59,15 @@ Identify the few capabilities and experiences central to delivering the role fro
 and outcomes. An item can be pivotal even when listed as desirable. Treat long lists of \
 tools and isolated keywords as supporting context, and judge transferable experience by \
 what it actually demonstrates.
-- function: 0 another discipline .. 4 clearly does this work now
-- domain: 0 unrelated field .. 4 the same field
-- seniority: 0 far off .. 4 the same level and scope
-- leadership: 0 not shown .. 4 the kind of leadership the job needs
-- sector: 0 unrelated sector .. 4 the same sector
+- function: 4 does this work now or in the last role; 3 did it earlier or most of it now; \
+2 adjacent work with clear transfer; 1 shares only tools or subject; 0 different discipline
+- domain: 4 same field or technology; 3 close neighbour; 2 related with transferable core \
+knowledge; 1 distant link; 0 unrelated
+- seniority: 4 same level and scope; 3 one step; 2 two steps or unclear; 1 three steps; 0 far off
+- leadership: 4 same kind and size (or none required); 3 one step different; 2 different \
+mode; 1 much more than shown; 0 a kind never shown that the role centres on
+- sector: 4 same industry and organisation type; 3 same industry, different organisation \
+type; 2 different type with real overlap; 1 distant; 0 unrelated
 When torn between two ratings, give the lower one. `requirements_shown`: the numbers of the \
 listed requirements that a specific line of the CV shows the candidate meets; leave out any \
 you would have to infer. `impression`: one sentence on what the top of the CV conveys for \
@@ -89,11 +90,15 @@ best supports the rating, copied word for word (you may shorten it with "..."); 
 Identify the few capabilities and experiences central to delivering the role from its work \
 and outcomes. An item can be pivotal even when listed as desirable. Treat isolated keywords \
 as supporting context and assess genuinely transferable experience on its substance.
-- function: 0 another discipline .. 4 clearly does this work now
-- domain: 0 unrelated field .. 4 the same field
-- seniority: 0 far off .. 4 the same level and scope
-- leadership: 0 not shown .. 4 the kind of leadership the job needs
-- sector: 0 unrelated sector .. 4 the same sector
+- function: 4 does this work now or in the last role; 3 did it earlier or most of it now; \
+2 adjacent work with clear transfer; 1 shares only tools or subject; 0 different discipline
+- domain: 4 same field or technology; 3 close neighbour; 2 related with transferable core \
+knowledge; 1 distant link; 0 unrelated
+- seniority: 4 same level and scope; 3 one step; 2 two steps or unclear; 1 three steps; 0 far off
+- leadership: 4 same kind and size (or none required); 3 one step different; 2 different \
+mode; 1 much more than shown; 0 a kind never shown that the role centres on
+- sector: 4 same industry and organisation type; 3 same industry, different organisation \
+type; 2 different type with real overlap; 1 distant; 0 unrelated
 When torn between two ratings, give the lower one. `requirements_met`: each listed requirement \
 a specific line of the CV shows the candidate meets, with that line copied word for word as \
 `quote`; leave out any you would have to infer. Quotes are checked against the CV: a rating \
@@ -125,8 +130,41 @@ def _first_page(text: str) -> str:
 
 
 def _score(reading: FitReading) -> int:
-    points = sum(getattr(reading, name) / 4 * weight for name, weight in WEIGHTS.items())
-    return int(round(100 * points / sum(WEIGHTS.values())))
+    levels: dict[str, int] = {name: getattr(reading, name) for name in WEIGHTS}
+    levels["practicality"] = 2  # neutral only when there is no saved search verdict
+    return sum(points_for(levels).values())
+
+
+def anchored_score(baseline: SearchFitBaseline, original: FitReading, version: FitReading) -> int:
+    """Apply CV visibility changes to the saved six-dimension search assessment.
+
+    The candidate and job are unchanged. Only a dimension with a different CV reading
+    moves; practicality stays fixed. The original score remains exactly the search score.
+    Both sides go through the matcher's own capped total, so a capped search score moves
+    only as far as the matcher itself would move it.
+    """
+    unmet = (baseline.cap_reason or "").startswith("core requirement unmet:")
+    checked = baseline.requirements_checked and not (baseline.cap_reason or "").startswith(
+        "requirements not checked:"
+    )
+    old = capped_score(points_for(baseline.ratings), unmet=unmet, checked=checked)
+    new = capped_score(
+        points_for(anchored_levels(baseline, original, version)), unmet=unmet, checked=checked
+    )
+    return max(0, min(100, baseline.score + new - old))
+
+
+def anchored_levels(
+    baseline: SearchFitBaseline, original: FitReading, version: FitReading
+) -> dict[str, int]:
+    """Search levels adjusted only by differences the two CV readings show."""
+    old = baseline.ratings
+    if set(old) != set(FIT_WEIGHTS) or any(not 0 <= value <= 4 for value in old.values()):
+        raise ValueError("Saved search ratings are incomplete")
+    new = dict(old)
+    for name in WEIGHTS:
+        new[name] = max(0, min(4, old[name] + getattr(version, name) - getattr(original, name)))
+    return new
 
 
 def _read(
@@ -153,7 +191,12 @@ def _shown(reading: FitReading, total: int) -> int:
 
 
 def compare_fit(
-    source: MasterCV, tailored: TailoredCV, jd: JDAnalysis, jd_text: str, llm: LLMProvider
+    source: MasterCV,
+    tailored: TailoredCV,
+    jd: JDAnalysis,
+    jd_text: str,
+    llm: LLMProvider,
+    search_fit: SearchFitBaseline | None = None,
 ) -> FitComparison:
     """Read the original and the tailored CV for this job and compare what each shows."""
     before_text = cv_to_text(source, tags=False)
@@ -161,17 +204,27 @@ def compare_fit(
     keywords = ats_keywords(jd)
     requirements = requirements_for(tailored, jd)
     before, after = _read(before_text, after_text, requirements, jd_text, llm)
+    adjusted = anchored_levels(search_fit, before, after) if search_fit else None
     dimensions = [
-        DimensionChange(name=name, before=getattr(before, name), after=getattr(after, name))
-        for name in WEIGHTS
+        DimensionChange(
+            name=name,
+            before=search_fit.ratings[name]
+            if search_fit
+            else (2 if name == "practicality" else getattr(before, name)),
+            after=adjusted[name]
+            if adjusted
+            else (2 if name == "practicality" else getattr(after, name)),
+        )
+        for name in FIT_WEIGHTS
     ]
     worse = [f"{d.name}: {d.before} → {d.after}" for d in dimensions if d.after < d.before]
     shown_before, shown_after = _shown(before, len(requirements)), _shown(after, len(requirements))
     if shown_after < shown_before:
         worse.append(f"requirements shown: {shown_before} → {shown_after}")
     return FitComparison(
-        before=_score(before),
-        after=_score(after),
+        before=search_fit.score if search_fit else _score(before),
+        after=anchored_score(search_fit, before, after) if search_fit else _score(after),
+        search_anchored=search_fit is not None,
         dimensions=dimensions,
         requirements_total=len(requirements),
         requirements_before=shown_before,
@@ -328,8 +381,12 @@ def _measure(
         update={
             "score": _score(reading),
             "dimensions": [
-                DimensionChange(name=n, before=getattr(reading, n), after=getattr(reading, n))
-                for n in WEIGHTS
+                DimensionChange(
+                    name=n,
+                    before=2 if n == "practicality" else getattr(reading, n),
+                    after=2 if n == "practicality" else getattr(reading, n),
+                )
+                for n in FIT_WEIGHTS
             ],
             "requirements_shown": sorted(
                 {n for n in reading.requirements_shown if 1 <= n <= total}
@@ -441,6 +498,7 @@ def score_versions(
     readings: list[FitReading],
     requirements: list[str],
     keywords: list[str],
+    search_fit: SearchFitBaseline | None = None,
 ) -> list[VersionReading]:
     """Measure every CV and set each tailored version against its original (`baseline_id`,
     which must be among `items`), with its verdict."""
@@ -448,6 +506,30 @@ def score_versions(
         _measure(item, text, reading, len(requirements), keywords)
         for item, text, reading in zip(items, texts, readings, strict=True)
     ]
+    if search_fit is not None:
+        original = readings[0]
+        measured[0] = measured[0].model_copy(
+            update={
+                "score": search_fit.score,
+                "dimensions": [
+                    DimensionChange(
+                        name=n, before=search_fit.ratings[n], after=search_fit.ratings[n]
+                    )
+                    for n in FIT_WEIGHTS
+                ],
+            }
+        )
+        for index in range(1, len(measured)):
+            levels = anchored_levels(search_fit, original, readings[index])
+            measured[index] = measured[index].model_copy(
+                update={
+                    "score": anchored_score(search_fit, original, readings[index]),
+                    "dimensions": [
+                        DimensionChange(name=n, before=levels[n], after=levels[n])
+                        for n in FIT_WEIGHTS
+                    ],
+                }
+            )
     by_id = {m.id: m for m in measured}
     out: list[VersionReading] = []
     for item in measured:
@@ -469,12 +551,11 @@ def score_versions(
     return out
 
 
-def _tiebreak(r: VersionReading) -> tuple[int, int, bool, float, int]:
+def _tiebreak(r: VersionReading) -> tuple[int, int, float, int]:
     """For close scores, use checked requirements and score before literal keywords."""
     return (
         len(r.requirements_shown),
         r.score,
-        r.kind == "tailored",
         r.first_page_coverage,
         len(r.keywords_found),
     )
@@ -492,14 +573,12 @@ def _why_first(best: VersionReading, other: VersionReading, total: int) -> tuple
         why = f"it shows more of the job's requirements ({req[0]} vs {req[1]} of {total})"
     elif best.score != other.score:
         why = f"its score is a little higher ({best.score} vs {other.score}), within the margin"
-    elif best.kind != other.kind:
-        why = "they show the same substantive fit; the tailored version is preferred"
     elif best.first_page_coverage != other.first_page_coverage:
         why = "more job keywords are on its first page"
     elif kw[0] != kw[1]:
         why = f"it has more of the job's keywords word for word ({kw[0]} vs {kw[1]})"
     else:
-        why = "they read the same; a tailored version is preferred"
+        why = "the readings are otherwise the same"
     better: list[str] = []
     if kw[1] > kw[0]:
         found = [k for k in other.keywords_found if k not in best.keywords_found]
@@ -519,6 +598,18 @@ def best_version(readings: list[VersionReading], total: int) -> tuple[str | None
     top = max(r.score for r in readings)
     close = [r for r in readings if top - r.score < NOISE_MARGIN]
     best = max(close, key=_tiebreak)
+    equal = [
+        r
+        for r in close
+        if r.score == best.score and set(r.requirements_shown) == set(best.requirements_shown)
+    ]
+    if len(equal) > 1:
+        labels = " and ".join(r.label for r in equal[:2])
+        return None, (
+            f"{labels} show the same substantive fit for this job "
+            f"({best.score}/100, {len(best.requirements_shown)} of {total} requirements). "
+            "No version shows a measurable improvement yet."
+        )
     others = sorted((r for r in close if r is not best), key=_tiebreak, reverse=True)
     shown = f"; {len(best.requirements_shown)} of {total} requirements shown" if total else ""
     if others:

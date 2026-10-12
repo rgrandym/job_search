@@ -574,7 +574,7 @@ async def _rejudge(
     errors = await _screen(
         ws, summary, jobs, req.query, report, threshold, emit, usage_sink,
         screening_base(cv, req.query), previous, intent_text(intent),
-        area_thresholds(summary, req, [r.job for r in report.scored()]),
+        area_thresholds(summary, req, [r.job for r in report.scored()]), _judged_cv(ws, cv),
     )  # fmt: skip
     outcome.errors = {k: v for k, v in outcome.errors.items() if not k.startswith("screening")}
     outcome.errors |= {f"screening {i}": e for i, e in enumerate(errors)}
@@ -595,25 +595,26 @@ async def _rejudge(
 async def _set_aside(
     ws: Workspace, jobs: list[JobPosting], emit: Emit
 ) -> tuple[list[JobPosting], list[MatchResult], list[MatchResult]]:
-    """Jobs already applied for, ruled out (N/A) or labelled "no" leave before screening (no
-    model calls); a "no" carries its note as the reason."""
+    """Jobs already applied for, ruled out (N/A), deleted from a search or labelled (reviewed
+    already) leave before screening (no model calls); a label carries its note as the reason."""
     keep, applied, dismissed = tracker.set_aside(ws, jobs)
-    said_no = labels.said_no(ws)
-    searchable, labelled_no = [], 0
+    ruled_out = len(dismissed)
+    label_of = labels.labelled(ws)
+    searchable, labelled = [], 0
     for job in keep:
-        item = said_no(job)
+        item = label_of(job)
         if item is None:
             searchable.append(job)
             continue
-        labelled_no += 1
-        reason = "you labelled it no" + (f": {item.note}" if item.note else "")
+        labelled += 1
+        reason = f"you labelled it {item.label}" + (f": {item.note}" if item.note else "")
         dismissed.append(MatchResult(job=job, excluded=True, exclusion_reasons=[reason]))
     if applied or dismissed:
         await _say(
             emit,
             "prefilter",
-            f"Set aside {len(applied)} already applied for, {len(dismissed) - labelled_no} "
-            f"marked N/A and {labelled_no} you labelled no",
+            f"Set aside {len(applied)} already applied for, {ruled_out} marked N/A or deleted "
+            f"and {labelled} you labelled (reviewed already)",
         )
     return searchable, _once(applied), _once(dismissed)
 
@@ -972,8 +973,14 @@ async def _screen_shortlist(
         ws, summary, shortlist, ctx.query, report, threshold, emit, usage_sink,
         screening_base(ctx.cv, ctx.query), None, intent_text(ctx.intent),
         area_thresholds(summary, ctx.req, [r.job for r in report.scored()]),
+        _judged_cv(ws, ctx.cv),
     )  # fmt: skip
     return from_memory, errors
+
+
+def _judged_cv(ws: Workspace, cv: Any) -> str:
+    """The library id of the CV a search judges with ('' when it uses none)."""
+    return (ws.active_cv_id or "") if cv is not None else ""
 
 
 def screening_base(cv: Any, query: SearchQuery) -> str:
@@ -1032,6 +1039,7 @@ async def _screen(
     previous: dict[str, JobVerdict] | None = None,
     intent: str = "",
     thresholds: dict[str, float] | None = None,
+    cv_id: str = "",
 ) -> list[str]:
     settings = ws.settings
     model = ws.llm.model_for("screening")
@@ -1077,6 +1085,8 @@ async def _screen(
         review_progress=review_progress,
         thresholds=thresholds,
     )
+    # Tailored CVs are scored against this verdict only when they come from the same CV.
+    verdicts = {k: v.model_copy(update={"cv_id": cv_id}) for k, v in verdicts.items()}
     remembered = sum(v.from_memory for v in verdicts.values())
     if remembered:
         await _say(emit, "screen", f"{remembered} verdict(s) reused from earlier searches")
@@ -1229,7 +1239,11 @@ def remove_result(ws: Workspace, job_id: str, history_id: str | None) -> bool:
     """Delete a posting from the current results, every retained search (`history_id`, the
     search on screen, included) and the saved jobs, so no list shows it again. Its tracker
     entry (an application, a status, a note) and its label are kept: the register of
-    applications is never changed by tidying a list."""
+    applications is never changed by tidying a list. The deletion is remembered, so later
+    searches set the posting aside."""
+    found = ws.result(job_id)
+    if found is not None:
+        tracker.mark_removed(ws, found.job)
     removed = ws.last_report is not None and history.drop_job(ws.last_report, job_id)
     removed = history.remove_job_everywhere(ws, job_id) > 0 or removed
     removed = saved.remove(ws, [job_id]) > 0 or removed

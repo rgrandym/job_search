@@ -15,6 +15,7 @@ const DIMENSION_LABEL: Record<string, string> = {
   seniority: "Seniority",
   leadership: "Leadership",
   sector: "Sector",
+  practicality: "Practicality",
 };
 
 const pct = (v: number) => `${Math.round(v * 100)}%`;
@@ -108,7 +109,7 @@ function ScoreTable({ comparison, downloads, onPick }: {
         </thead>
         <tbody>
           <tr className="border-t border-border">
-            <td className="p-2 font-medium" title="Weighted from the five readings below (function 30, domain 20, seniority 20, leadership 10, sector 10)">Fit shown /100</td>
+            <td className="p-2 font-medium" title="Original search score plus weighted changes in the five CV evidence dimensions; practicality stays fixed">Job fit shown /100</td>
             {readings.map((r) => {
               const base = r.baseline_id ? byId[r.baseline_id] : undefined;
               return (
@@ -281,6 +282,11 @@ function Report({ comparison, downloads, onPick }: {
           <p className="mt-0.5 text-[11px] text-faint">Read {when(comparison.created_at)}</p>
         </div>
       </div>
+      <p className="text-[11px] text-muted">
+        {comparison.search_fit_score == null
+          ? `${comparison.search_fit_note || "No saved search verdict was available for this job."} Scores use the search weights with neutral practicality, the same for every version.`
+          : `Original ${comparison.search_fit_score}/100 is the saved search score. Tailored scores apply changes in CV evidence to that score using the same dimension weights. Location and working pattern stay fixed.`}
+      </p>
       <ScoreTable comparison={comparison} downloads={downloads} onPick={onPick} />
       {tailored.length > 0 && (
         <div className="space-y-2">
@@ -336,7 +342,7 @@ export function CVVersionCompare({ open, onClose, jobId, versions, onPick }: {
     onSuccess: (data) => qc.setQueryData(["cv-comparison", jobId], { comparison: data, stale: false }),
   });
   const total = chosen.length + 1; // the one original
-  const comparison = run.data ?? saved.data?.comparison ?? null;
+  const comparison = run.data ?? (saved.data?.stale ? null : saved.data?.comparison) ?? null;
   const downloads = Object.fromEntries(versions.map((v) => [v.id, v.download_url]));
   const toggle = (id: string) => setChosen((c) => (c.includes(id) ? c.filter((x) => x !== id) : [...c, id]));
   return (
@@ -388,7 +394,7 @@ export function CVVersionCompare({ open, onClose, jobId, versions, onPick }: {
         {saved.isPending && <p className="text-[12px] text-muted">Loading the last comparison…</p>}
         {saved.error && <p className="text-[12px] text-bad">{(saved.error as Error).message}</p>}
         {!run.data && saved.data?.stale && (
-          <p className="text-[12px] text-warn">A version or the original CV was edited or removed since this comparison; compare again for current scores.</p>
+          <p className="text-[12px] text-warn">The saved report uses an older comparison method. Select Compare to recalculate it.</p>
         )}
         {comparison ? (
           <Report comparison={comparison} downloads={downloads} onPick={onPick && ((id) => { onPick(id); onClose(); })} />

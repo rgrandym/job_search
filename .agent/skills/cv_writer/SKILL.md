@@ -158,6 +158,17 @@ These hold for every tailored CV (user's decision; mandatory):
 
 ## 3a. Rewrite bullets as STAR accomplishments, without hallucinating
 
+**Optimised draft mode (`mode="optimised"`).** The same guarded plan leads with the few
+pivotal job capabilities and strongest evidenced outcomes. A focused model call then proposes
+up to eight plausible omissions: a routine skill, or an experience sentence attached to an
+existing role where its background quote appears in a bullet. Every proposal also quotes the
+posting, carries the relevant requirement and a reason, and is checked against both texts.
+It remains separate from `TailoredCV.cv` and prints in red with `[CONFIRM ... BEFORE USE]`.
+The user reviews each in the app: delete, or edit and explicitly confirm. Confirmation adds
+the corrected fact to the selected source CV and produces a new Word version; pending text
+never contributes to scores, keyword coverage, or cover letters. The standard mode retains
+the existing small red skills line.
+
 `tailor.propose_plan(..., steer) -> TailoringPlan`, then `tailor.apply_plan(...)` enforces
 the rules. `Steering` carries the job_matcher's verdict on this job (fit summary, reasons,
 transferable evidence, gaps), the stored **profile** (`profile_memory.profile_brief`: pitch,
@@ -178,10 +189,11 @@ The plan works in order:
    differentiators, what carries over to a role outside their function, and their level
    against the job's. Dropped if it adds numbers the CV lacks or uses superlatives.
 3. **Wording**, starting from the CV's achievements, not the job's language.
-   Keep any job-relevant skill named only in the source summary; the summary guard rejects
-   a rewrite that drops its only mention.
-   The writer may suggest up to five posting-named techniques missing from the CV when its
-   documented background makes them plausible. Each suggestion quotes real CV words, appears
+   Keep any job-relevant skill named only in the source summary; when the rewrite omits it,
+   code promotes the source term to the confirmed relevant-skills line so the new summary can
+   still be used.
+   The writer may suggest up to five techniques missing from the CV when its documented
+   background makes them plausible for quoted posting work. Each suggestion quotes real CV words, appears
    in a separate red "Skills to confirm before use (not yet claimed)" line in Word, and is
    shown in the report. It is not added to the factual CV, fit score or letter evidence.
 
@@ -285,7 +297,13 @@ line). One LLM call reads both CVs as a recruiter, labelled CV 1 and CV 2 in an 
 a hash of the job text (so it cannot learn which is tailored), rating function, domain,
 seniority, leadership and sector 0-4 from the page alone and listing which of the job's
 essential requirements (the requirement map, else must-haves; at most 15) each clearly
-shows. The score is the weighted levels (30/20/20/10/10) out of 100. `worse` lists any
+shows. When the search verdict is available, its score is the original baseline and the
+reader's before/after level changes adjust that score using the job matcher's exact weighted
+point conversion (30/20/20/10/10); practicality (10) is held fixed. Both sides go through the
+matcher's own capped total (`fit_rubric.capped_score`: unmet core requirement 55, unread posting
+62, a weak dimension 65), and the score moves by the difference, so a capped search score moves
+only as far as the matcher would move it. Without a saved verdict, practicality is neutral (level 2) and both CVs are scored
+from the same rubric. `worse` lists any
 dimension or requirement count that dropped. The candidate's actual fit is unchanged (same
 facts); the job_matcher's verdict judges that. A failed check never loses the CV: it is noted
 in `document_notes`.
@@ -301,11 +319,19 @@ agent tool `compare_cv_versions`) reads the chosen versions and **one** original
 library as it is now (the Master CV, else the selected CV, unless the user picks another; a
 deleted CV is refused), every version set against it, side by side in one LLM call (`fit_check.score_versions`, at most `MAX_VERSIONS` = 6 CVs), in an order
 fixed by a hash of the job and each text, so no CV is identified and one reader applies the
-same standard to all. Same rubric, weights, requirement list (the newest version's) and ATS
+same standard to all. The original's text is the oldest chosen draft's source CV as tailoring
+read it, without red suggestions confirmed since (`tailored_documents.as_tailored`): the CV
+the search scored, so a confirmed fact shows as an improvement of the version holding it, and
+confirming keeps the anchor. The saved search score is reused for the original when every
+version comes from that CV and the verdict judged it (`JobVerdict.cv_id`; verdicts from before
+it was recorded are taken as they are); each version's changed dimension ratings adjust that
+score with the search weights while practicality stays fixed. Older drafts may use the retained
+job verdict. Otherwise every CV uses neutral practicality and `search_fit_note` says why. Same
+rubric, requirement list (the newest version's) and ATS
 keywords as 3b. Code then sets each version against its original (`version_areas`: every
 dimension, requirements shown and each requirement gained or lost, keyword coverage, keywords
 on the first page, keywords added or lost: better / worse / same) and picks the best
-(`best_version`: score, then requirements, then keywords; a tailored version wins a tie). The
+(`best_version`: checked requirements and scores decide; an equal reading has no winner). The
 comparison is saved per job (`data/cv_comparisons/`) and marked stale once a version it read
 is edited or removed, or its original leaves the library.
 

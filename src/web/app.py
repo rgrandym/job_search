@@ -17,6 +17,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import nullcontext
+from datetime import date
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -559,7 +560,7 @@ def cv_source(asset_id: str) -> FileResponse:
 
 @app.get("/api/cv/preview/{asset_id:path}")
 async def cv_preview(asset_id: str) -> FileResponse:
-    """The CV as the browser can show it: PDFs and text as stored, Word files as Word's PDF."""
+    """The CV as the browser can show it: PDFs and text as stored, Word files as HTML."""
     try:
         path = await asyncio.to_thread(cv_service.preview_file, get_workspace(), asset_id)
     except ValueError as exc:
@@ -931,6 +932,7 @@ class TailorRequest(BaseModel):
     level: Literal["auto", "senior", "junior"] = "auto"
     length: Literal["auto", "full", "junior"] = "auto"
     audience: Literal["auto", "industry", "academic"] = "auto"
+    mode: Literal["standard", "optimised"] = "standard"
 
 
 def _tailor_report(tailored: TailoredCV, document_id: str | None, url: str) -> dict[str, Any]:
@@ -953,6 +955,7 @@ def _tailor_report(tailored: TailoredCV, document_id: str | None, url: str) -> d
         "requirements": tailored.requirements,
         "role_skills": tailored.role_skills,
         "skills_to_confirm": tailored.skills_to_confirm,
+        "review_additions": tailored.review_additions,
         "academic": tailored.academic,
         "fit_check": tailored.fit_check,
         "rejected": sum(not c.accepted for c in tailored.changes),
@@ -1101,6 +1104,24 @@ def edit_tailored_cv(document_id: str, edits: TailoredCVEdits) -> dict[str, Any]
         raise HTTPException(422, str(exc)) from exc
 
 
+class ReviewAdditionRequest(BaseModel):
+    decision: Literal["confirm", "delete"]
+    text: str | None = None
+
+
+@app.put("/api/tailored-cvs/{document_id}/additions/{addition_id}")
+def review_cv_addition(
+    document_id: str, addition_id: str, body: ReviewAdditionRequest
+) -> dict[str, Any]:
+    try:
+        document = tailored_documents.review_addition(
+            get_workspace(), document_id, addition_id, body.decision, body.text
+        )
+        return _tailored_view(document)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 def _document_result(ws: Workspace, job_id: str, body: TailorRequest) -> MatchResult | None:
     """Use the displayed posting, or find it in saved jobs and retained searches."""
     if body.result is not None:
@@ -1146,6 +1167,7 @@ async def tailor_job(
                 level=body.level,
                 length=body.length,
                 audience=body.audience,
+                mode=body.mode,
             ),
         )
     except (ValueError, LLMError) as exc:
@@ -1237,7 +1259,7 @@ def edit_cover_letter(document_id: str, edits: cover_letters.LetterEdits) -> dic
 
 @app.get("/api/cover-letters/{document_id}/preview")
 def preview_cover_letter(document_id: str) -> FileResponse:
-    """The letter as Word lays it out (PDF), shown in the app's viewer."""
+    """The letter as an HTML page view, shown in the app's viewer (Word is not started)."""
     try:
         path = cover_letters.preview(get_workspace(), document_id)
     except ValueError as exc:
@@ -1320,6 +1342,16 @@ def delete_tracker(entry_id: str) -> dict[str, bool]:
     if not tracker.delete_entry(get_workspace(), entry_id):
         raise HTTPException(404, "That job is not in the tracker")
     return {"deleted": True}
+
+
+class ClearApplied(BaseModel):
+    before: date
+
+
+@app.post("/api/tracker/clear-applied")
+def clear_applied(body: ClearApplied) -> dict[str, int]:
+    """Remove applications made before a date from the register (the user asked)."""
+    return {"removed": tracker.clear_applied(get_workspace(), body.before)}
 
 
 class JobIds(BaseModel):

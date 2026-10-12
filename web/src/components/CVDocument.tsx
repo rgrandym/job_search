@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import type { CVAsset } from "../lib/types";
 
-/** The CV, including edits saved in Word and the assistant's edits. Word files are shown as Word's own PDF rendering. */
+/** The CV, including edits saved in Word and the assistant's edits. Word files are shown as an HTML page view; Word opens only on request. */
 export function CVDocument({ asset }: { asset: CVAsset }) {
   const open = useMutation({ mutationFn: (app: "default" | "word") => api.openCVSource(asset.id, app) });
   const name = asset.filename.toLowerCase();
@@ -55,10 +55,10 @@ export function CVDocument({ asset }: { asset: CVAsset }) {
         <div className="cv-desk flex flex-1 items-center justify-center p-8 text-center text-[12px] text-bad">{(revision.error ?? preview.error)?.message}</div>
       ) : revision.isPending || preview.isPending ? (
         <div className="cv-desk flex flex-1 items-center justify-center gap-2 text-[12px] text-muted">
-          <Loader2 size={14} className="animate-spin" /> {word ? "Word is preparing the page view…" : "Loading…"}
+          <Loader2 size={14} className="animate-spin" /> {word ? "Preparing the page view…" : "Loading…"}
         </div>
       ) : url ? (
-        <iframe title={asset.filename} src={url} className="cv-desk min-h-0 w-full flex-1 border-0" />
+        <iframe title={asset.filename} src={url} sandbox={preview.data?.type.startsWith("text/html") ? "" : undefined} className="cv-desk min-h-0 w-full flex-1 border-0" />
       ) : null}
     </div>
   );

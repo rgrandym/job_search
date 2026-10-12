@@ -2,13 +2,15 @@
 
 Stored in `data/job_tracker.json` (git-ignored, personal data), one entry per role:
 
-- **Applied** (set by the user) and **N/A** (ruled
-  out) jobs are set aside *before* screening, so they cost no model calls and never take a
-  place in the ranked matches. They are listed once, in the report's `applied` / `dismissed`.
+- **Applied** (set by the user), **N/A** (ruled out) and **deleted** (removed from a search's
+  results, `removed_at`) jobs are set aside *before* screening, so they cost no model calls and
+  never take a place in the ranked matches. They are listed once, in the report's `applied` /
+  `dismissed`.
 - Every other job that reaches the matches or "not selected" is **New** the first search it
   appears in and **Open** afterwards.
-- A role matches when it is the same posting (id or URL), or the same employer with the same
-  title (or the same role words at the same level). Another role at the same employer is never
+- A role matches when it is the same posting (id or URL), or the same employer (`same_employer`:
+  "IQVIA" = "Iqvia IES UK Limited") with the same title (or the same role words at the same
+  level). Another role at the same employer is never
   skipped; it carries a one-line `related` note instead.
 - An application older than `APPLIED_LOOKBACK_DAYS` is history, not a reason to skip: a
   re-advertised role is ranked again, with the earlier date shown.
@@ -39,10 +41,11 @@ from src.jobs.models import (
 )
 from src.jobs.sources.base import stable_id
 from src.services.workspace import Workspace
-from src.tools.search_tools import company_key, seniority_level, title_core
+from src.tools.search_tools import company_key, same_employer, seniority_level, title_core
 
 APPLIED_LOOKBACK_DAYS = 365
-FORGET_SEEN_DAYS = 180  # jobs only ever seen (never acted on) are forgotten after this
+FORGET_SEEN_DAYS = 180  # jobs only seen, or deleted from a search, are forgotten after this
+MAX_SEEN = 5000  # and at most this many are kept, newest first (~200 are seen a day)
 StoredStatus = Literal["seen", "applied", "na"]
 
 
@@ -75,6 +78,7 @@ class TrackedJob(BaseModel):
     family: str | None = None  # role family the search attributed it to
     document_postings: dict[str, JobPosting] = Field(default_factory=dict)
     application_result: MatchResult | None = None
+    removed_at: str | None = None  # the user deleted it from a search's results (ISO date)
 
 
 class ManualApplication(BaseModel):
@@ -102,16 +106,26 @@ def load(ws: Workspace) -> dict[str, TrackedJob]:
 
 
 def _save(ws: Workspace, entries: dict[str, TrackedJob], today: date) -> None:
+    """Keep every decision (applied, N/A) and every job used for a document; jobs only seen or
+    deleted go after `FORGET_SEEN_DAYS`, and beyond `MAX_SEEN` the oldest of them go first."""
     cutoff = (today - timedelta(days=FORGET_SEEN_DAYS)).isoformat()
-    kept = [
-        e
-        for e in entries.values()
-        if e.status != "seen" or e.last_seen >= cutoff or e.document_postings
-    ]
+    passive = sorted(
+        (e for e in entries.values() if e.status == "seen" and not e.document_postings),
+        key=_last_touched,
+        reverse=True,
+    )
+    forgotten = {e.id for e in passive[MAX_SEEN:]} | {
+        e.id for e in passive if _last_touched(e) < cutoff
+    }
+    kept = [e for e in entries.values() if e.id not in forgotten]
     path = _path(ws)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"version": 1, "jobs": [e.model_dump(mode="json") for e in kept]}
     path.write_text(json.dumps(payload, indent=1), encoding="utf-8")
+
+
+def _last_touched(entry: TrackedJob) -> str:
+    return max(entry.last_seen, entry.removed_at or "")
 
 
 def _title(text: str) -> str:
@@ -123,29 +137,44 @@ def role_id(title: str, company: str) -> str:
     return stable_id(company_key(company), _title(title))
 
 
-def _same_role(entry: TrackedJob, job: JobPosting) -> bool:
-    if company_key(entry.company) != company_key(job.company):
+def same_role(title: str, company: str, job: JobPosting) -> bool:
+    """`job` is the role `title` at `company`, perhaps under another name for the employer."""
+    if not same_employer(company, job.company):
         return False
-    if _title(entry.title) == _title(job.title):
+    if _title(title) == _title(job.title):
         return True
     core = title_core(job.title)
     return (
         bool(core)
-        and core == title_core(entry.title)
-        and (seniority_level(entry.title) == seniority_level(job.title))
+        and core == title_core(title)
+        and (seniority_level(title) == seniority_level(job.title))
     )
 
 
 def find(entries: dict[str, TrackedJob], job: JobPosting) -> TrackedJob | None:
-    """The tracked role this posting is: same posting id, same URL, or same role."""
-    hit = entries.get(role_id(job.title, job.company))
-    if hit is not None:
-        return hit
+    """The tracked role this posting is: same posting id, same URL, or same role. An entry the
+    user decided on (applied, N/A, deleted) wins over one only seen: the same role seen under
+    the employer's legal name must not hide the application made under its usual name."""
     url = (job.url or "").split("?")[0].rstrip("/")
-    for entry in entries.values():
-        if entry.job_id == job.id or (url and (entry.url or "").split("?")[0].rstrip("/") == url):
-            return entry
-    return next((e for e in entries.values() if _same_role(e, job)), None)
+    direct = entries.get(role_id(job.title, job.company))
+    linked = [
+        e
+        for e in entries.values()
+        if e.job_id == job.id or (url and (e.url or "").split("?")[0].rstrip("/") == url)
+    ]
+    hits = [e for e in (direct, *linked) if e is not None]
+    decided = next((e for e in hits if _decided(e)), None) or next(
+        (e for e in entries.values() if _decided(e) and same_role(e.title, e.company, job)), None
+    )
+    if decided is not None:
+        return decided
+    if hits:
+        return hits[0]
+    return next((e for e in entries.values() if same_role(e.title, e.company, job)), None)
+
+
+def _decided(entry: TrackedJob) -> bool:
+    return entry.status != "seen" or entry.removed_at is not None
 
 
 def _recent(applied_at: str | None, today: date) -> bool:
@@ -202,6 +231,9 @@ def set_aside(
             dismissed.append(
                 MatchResult(job=job, excluded=True, exclusion_reasons=[reason], tracking=tracking)
             )
+        elif entry is not None and entry.removed_at and entry.status == "seen":
+            reason = f"you deleted it from a search on {entry.removed_at}"
+            dismissed.append(MatchResult(job=job, excluded=True, exclusion_reasons=[reason]))
         else:
             keep.append(job)
     return keep, applied, dismissed
@@ -462,3 +494,38 @@ def delete_entry(ws: Workspace, entry_id: str) -> bool:
         return False
     _save(ws, entries, date.today())
     return True
+
+
+def mark_removed(ws: Workspace, job: JobPosting, today: date | None = None) -> None:
+    """Remember a posting the user deleted from a search, so later searches set it aside."""
+    today = today or date.today()
+    entries = load(ws)
+    entry = find(entries, job) or TrackedJob(
+        id=role_id(job.title, job.company),
+        title=job.title,
+        company=job.company,
+        location=job.location,
+        url=job.url,
+        job_id=job.id,
+        source=job.source,
+        first_seen=today.isoformat(),
+        last_seen=today.isoformat(),
+    )
+    entry.removed_at = today.isoformat()
+    entries[entry.id] = entry
+    _save(ws, entries, today)
+
+
+def clear_applied(ws: Workspace, before: date) -> int:
+    """Remove applications made before `before` from the register (the user's choice); their
+    roles may then be ranked again. Returns how many were removed."""
+    entries = load(ws)
+    old = [
+        key
+        for key, e in entries.items()
+        if e.status == "applied" and (e.applied_at or e.first_seen) < before.isoformat()
+    ]
+    for key in old:
+        del entries[key]
+    _save(ws, entries, date.today())
+    return len(old)

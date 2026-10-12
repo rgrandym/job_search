@@ -23,6 +23,7 @@ from src.tools.docx_tools import (
     remove_paragraph,
     set_paragraph_text,
 )
+from src.tools.search_tools import mentions
 
 
 class DocumentSync(BaseModel):
@@ -96,3 +97,34 @@ def sync_bullets(ws: Workspace, before: MasterCV, after: MasterCV) -> DocumentSy
         doc.save(str(path))
         cv_service.mirror_copy(ws, path)
     return out
+
+
+def sync_confirmed_skill(ws: Workspace, skill: str) -> DocumentSync:
+    """Put a user-confirmed skill into the selected Word CV when one exists."""
+    path = _document(ws)
+    if path is None:
+        return DocumentSync()
+    doc = Document(str(path))
+    if any(mentions(p.text, skill) for p in doc.paragraphs):
+        return DocumentSync(file=str(path))
+    heading = next(
+        (
+            p
+            for p in doc.paragraphs
+            if p.text.strip().casefold()
+            in {"skills", "technical skills", "core skills", "key skills"}
+        ),
+        None,
+    )
+    line = f"Additional confirmed skill: {skill}"
+    if heading is not None:
+        paragraphs = doc.paragraphs
+        index = next(i for i, p in enumerate(paragraphs) if p._p is heading._p)
+        body_style = paragraphs[index + 1].style if index + 1 < len(paragraphs) else "Normal"
+        paragraph = insert_paragraph_after(heading, line)
+        paragraph.style = body_style
+    else:
+        doc.add_paragraph(line)
+    doc.save(str(path))
+    cv_service.mirror_copy(ws, path)
+    return DocumentSync(file=str(path), written=[line])

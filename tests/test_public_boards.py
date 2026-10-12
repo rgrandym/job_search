@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -415,8 +416,22 @@ def _chrome(settings: Settings, pages: dict[str, str]) -> Any:
         opened.append(cmd)
         return pages[cmd[-1]]
 
-    fetcher = BrowserFetcher(settings, chrome="/chrome", run=run, http=robots)
+    enabled = settings.model_copy(update={"browser_enabled": True})
+    fetcher = BrowserFetcher(enabled, chrome="/chrome", run=run, http=robots)
     return fetcher, opened
+
+
+def test_chrome_is_never_started_when_turned_off(settings: Settings) -> None:
+    from src.jobs.sources.browser import BrowserFetcher
+
+    assert settings.browser_enabled  # on by default, run silently
+    started: list[list[str]] = []
+    off = settings.model_copy(update={"browser_enabled": False})
+    fetcher = BrowserFetcher(off, chrome="/chrome", run=lambda cmd, _t: started.append(cmd) or "")
+    assert not fetcher.available
+    with pytest.raises(SourceError, match="not available"):
+        fetcher.page("https://careers.example/jobs/1")
+    assert started == []
 
 
 def test_chrome_reads_linkedin_about_the_job_signed_out(settings: Settings) -> None:
@@ -431,7 +446,7 @@ def test_chrome_reads_linkedin_about_the_job_signed_out(settings: Settings) -> N
     full = fetcher.enrich(card)
     assert "design novel algorithms" in full.description
     cmd = opened[0]
-    assert "--headless=new" in cmd and "--dump-dom" in cmd
+    assert "--headless=new" in cmd and "--dump-dom" in cmd and "--use-mock-keychain" in cmd
     assert any(c.startswith("--user-data-dir=") and "jobsearch-chrome-" in c for c in cmd)
 
 
@@ -536,3 +551,23 @@ def test_linkedin_postings_do_not_hold_other_boards_back(
     ]
     out = search_service._enrich(jobs, [], {}, settings)
     assert set(out) == {"linkedin:1", "c:1"}
+
+
+def test_on_macos_only_a_headless_shell_is_used_so_no_dock_icon_bounces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.jobs.sources import browser
+
+    assert browser.locate_chrome(None, tmp_path, "darwin") is None  # never Google Chrome.app
+    assert not any("Google Chrome.app" in path for path in browser.CHROME_PATHS)
+    versions = {"131": (131, 0), "151": (151, 0)}
+    for build, folder in [
+        ("131", ".cache/puppeteer/chrome-headless-shell/mac_arm-131"),
+        ("151", "Library/Caches/ms-playwright/chromium_headless_shell-1234"),
+    ]:
+        shell = tmp_path / folder / "chrome-headless-shell-mac-arm64" / "chrome-headless-shell"
+        shell.parent.mkdir(parents=True)
+        shell.write_text(build)
+    monkeypatch.setattr(browser, "_version", lambda p: versions[p.read_text()])
+    found = browser.locate_chrome(None, tmp_path, "darwin")
+    assert found is not None and "chromium_headless_shell-1234" in found  # the newest

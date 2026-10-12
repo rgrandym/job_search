@@ -313,6 +313,8 @@ export interface TrackedJob {
   first_seen: string;
   last_seen: string;
   applied_at: string | null;
+  /** The user deleted it from a search's results (ISO date); later searches set it aside. */
+  removed_at?: string | null;
   cv_file: string | null;
   reason?: string;
   stage?: OutcomeStage | null;
@@ -552,6 +554,18 @@ export interface TailoredCVView {
   report: TailorReport | null;
 }
 
+export interface ReviewAddition {
+  id: string;
+  kind: "skill" | "experience";
+  text: string;
+  role_id: string | null;
+  requirement: string;
+  background_quote: string;
+  job_quote: string;
+  reason: string;
+  status: "pending" | "confirmed" | "deleted";
+}
+
 export type MatchClass = "direct" | "transferable" | "adjacent" | "needs_confirmation" | "not_evidenced";
 
 /** One job requirement and the CV evidence for it (backend `RequirementEvidence`). */
@@ -572,12 +586,13 @@ export interface Positioning {
   level: string;
 }
 
-export type FitDimension = "function" | "domain" | "seniority" | "leadership" | "sector";
+export type FitDimension = "function" | "domain" | "seniority" | "leadership" | "sector" | "practicality";
 
 /** The original and the tailored CV read for the same job (backend `FitComparison`). */
 export interface FitComparison {
   before: number;
   after: number;
+  search_anchored?: boolean;
   dimensions: { name: FitDimension; before: number; after: number }[];
   requirements_total: number;
   requirements_before: number;
@@ -600,6 +615,7 @@ export interface TailoringSettings {
   level: string;
   length: string;
   audience: string;
+  mode?: "standard" | "optimised";
 }
 
 /** One area of a tailored version against its original (backend `AreaChange`). */
@@ -663,6 +679,8 @@ export interface VersionComparison {
   job_id: string;
   job_title: string;
   job_company: string;
+  search_fit_score?: number | null;
+  search_fit_note?: string;
   created_at: string;
   requirements: string[];
   keywords: string[];
@@ -695,6 +713,7 @@ export interface TailorReport {
   requirements?: RequirementEvidence[];
   role_skills?: string[];
   skills_to_confirm?: { skill: string; background_quote: string; reason: string }[];
+  review_additions?: ReviewAddition[];
   academic?: boolean;
   fit_check?: FitComparison | null;
   rejected: number;

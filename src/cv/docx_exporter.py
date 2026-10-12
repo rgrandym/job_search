@@ -15,7 +15,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt, RGBColor
 from pydantic import BaseModel, Field
 
-from src.cv.models import CoverLetter, MasterCV, TailoredCV
+from src.cv.models import CoverLetter, MasterCV, ReviewAddition, TailoredCV
 from src.tools import docx_tools as dt
 
 Section = Literal[
@@ -98,7 +98,10 @@ def export_docx(cv: MasterCV | TailoredCV, path: Path, template: str = "classic"
         "languages": _languages,
     }
     for section in sections:
-        renderers[section](doc, master, tpl)
+        if section == "experience" and isinstance(cv, TailoredCV):
+            _experience(doc, master, tpl, cv.review_additions)
+        else:
+            renderers[section](doc, master, tpl)
         if section == "summary" and isinstance(cv, TailoredCV) and cv.role_skills:
             doc.add_paragraph(f"Relevant skills for this role: {' · '.join(cv.role_skills)}")
         if section == "summary" and isinstance(cv, TailoredCV) and cv.skills_to_confirm:
@@ -108,6 +111,11 @@ def export_docx(cv: MasterCV | TailoredCV, path: Path, template: str = "classic"
                 + " · ".join(s.skill for s in cv.skills_to_confirm)
             )
             run.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
+        if section == "summary" and isinstance(cv, TailoredCV):
+            for item in cv.review_additions:
+                if item.status == "pending" and item.kind == "skill":
+                    run = doc.add_paragraph().add_run(f"[CONFIRM SKILL BEFORE USE] {item.text}")
+                    run.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(path))
@@ -154,7 +162,12 @@ def _summary(doc: DocxDocument, cv: MasterCV, tpl: DocxTemplate) -> None:
         doc.add_paragraph(cv.basics.summary)
 
 
-def _experience(doc: DocxDocument, cv: MasterCV, tpl: DocxTemplate) -> None:
+def _experience(
+    doc: DocxDocument,
+    cv: MasterCV,
+    tpl: DocxTemplate,
+    additions: list[ReviewAddition] | None = None,
+) -> None:
     if not cv.experience:
         return
     _heading(doc, "Experience", tpl)
@@ -169,6 +182,10 @@ def _experience(doc: DocxDocument, cv: MasterCV, tpl: DocxTemplate) -> None:
             dt.add_text(doc, e.location, italic=True, size_pt=tpl.body_pt - 0.5, space_after_pt=1)
         for bullet in e.bullets:
             dt.add_bullet(doc, bullet.text)
+        for item in additions or []:
+            if item.status == "pending" and item.kind == "experience" and item.role_id == e.id:
+                run = dt.add_bullet(doc, f"[CONFIRM EXPERIENCE BEFORE USE] {item.text}").runs[0]
+                run.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
 
 
 def _skills(doc: DocxDocument, cv: MasterCV, tpl: DocxTemplate) -> None:

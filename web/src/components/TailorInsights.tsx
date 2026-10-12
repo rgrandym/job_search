@@ -29,7 +29,7 @@ export function FitCheckSummary({ check }: { check: FitComparison | null | undef
   if (!check) return <span className="text-faint">Before/after fit check not available for this draft</span>;
   return (
     <span className="text-muted" title="Both CVs read for this job by a recruiter model that does not know which is which. Your actual fit is the same (same facts); this measures how clearly each CV shows it.">
-      Fit shown by the CV: <Change before={check.before} after={check.after} text={`${check.before} → ${check.after}`} />/100
+      {check.search_anchored ? "Search fit, adjusted for CV evidence" : "CV evidence shown"}: <Change before={check.before} after={check.after} text={`${check.before} → ${check.after}`} />/100
       {check.requirements_total > 0 && (
         <>
           {" · requirements shown "}

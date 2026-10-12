@@ -208,7 +208,7 @@ export const api = {
     request<{ stopped: boolean }>(`/api/progress/${encodeURIComponent(taskId)}/stop`, { method: "POST" }),
   cvSourceUrl: (assetId: string) => `/api/cv/source/${encodeURIComponent(assetId)}`,
   cvRevision: (assetId: string) => request<{ revision: string }>(`/api/cv/revision/${encodeURIComponent(assetId)}`),
-  /** The CV as the browser can show it (Word files arrive as Word's own PDF rendering). */
+  /** The CV as the browser can show it (Word files arrive as an HTML page view). */
   cvPreview: async (assetId: string) =>
     (await checked(`/api/cv/preview/${encodeURIComponent(assetId)}`, { cache: "no-store" })).blob(),
   openCVSource: (assetId: string, app: "default" | "word" = "default") =>
@@ -281,15 +281,18 @@ export const api = {
     request<TrackedJob>(`/api/tracker/${encodeURIComponent(id)}`, json("PUT", { status, note, ...extra })),
   deleteTracked: (id: string) =>
     request<{ deleted: boolean }>(`/api/tracker/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  /** Remove applications made before `before` (YYYY-MM-DD) from the register. */
+  clearApplied: (before: string) =>
+    request<{ removed: number }>("/api/tracker/clear-applied", json("POST", { before })),
   sourceYield: () => request<SourceYield[]>("/api/sources/yield"),
   tailor: (jobId: string, template: string, result?: MatchResult,
     emphasis: "auto" | "leadership" | "hands_on" = "auto",
     level: "auto" | "senior" | "junior" = "auto",
     length: "auto" | "full" | "junior" = "auto", progressId?: string,
-    audience: Audience = "auto") =>
+    audience: Audience = "auto", mode: "standard" | "optimised" = "standard") =>
     request<TailorReport & { tracking: JobTracking | null }>(
       tracked(`/api/jobs/${encodeURIComponent(jobId)}/tailor`, progressId),
-      json("POST", { template, result, emphasis, level, length, audience }),
+      json("POST", { template, result, emphasis, level, length, audience, mode }),
     ),
   tailoredCVs: (jobId: string) =>
     request<TailoredCVView[]>(`/api/jobs/${encodeURIComponent(jobId)}/tailored-cvs`),
@@ -309,13 +312,18 @@ export const api = {
       json("POST", { asset_id: assetId, result })),
   editTailoredCV: (id: string, edits: { headline?: string; summary?: string; bullets?: Record<string, string> }) =>
     request<TailoredCVView>(`/api/tailored-cvs/${encodeURIComponent(id)}`, json("PUT", edits)),
+  reviewCVAddition: (id: string, additionId: string, decision: "confirm" | "delete", text?: string) =>
+    request<TailoredCVView>(
+      `/api/tailored-cvs/${encodeURIComponent(id)}/additions/${encodeURIComponent(additionId)}`,
+      json("PUT", { decision, text }),
+    ),
   coverLetter: (jobId: string, template: string, result?: MatchResult, tailored_cv_id?: string, progressId?: string) =>
     request<{ id: string | null; download_url: string; paragraphs: number; flags: LetterFlag[]; notes: string[] }>(
       tracked(`/api/jobs/${encodeURIComponent(jobId)}/cover-letter`, progressId),
       json("POST", { template, result, tailored_cv_id }),
     ),
   coverLetters: () => request<CoverLetterView[]>("/api/cover-letters"),
-  /** The letter as Word lays it out (a PDF). */
+  /** The letter as an HTML page view. */
   coverLetterPreview: async (id: string) =>
     (await checked(`/api/cover-letters/${encodeURIComponent(id)}/preview`, { cache: "no-store" })).blob(),
   openCoverLetter: (id: string, app: "default" | "word" = "word") =>

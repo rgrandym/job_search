@@ -82,12 +82,14 @@ function Register() {
     onSuccess: refresh,
   });
   const remove = useMutation({ meta: { syncLists: true }, mutationFn: api.deleteTracked, onSuccess: refresh });
-  const error = (edit.error ?? remove.error ?? register.error) as Error | null;
+  const clear = useMutation({ meta: { syncLists: true }, mutationFn: api.clearApplied, onSuccess: refresh });
+  const error = (edit.error ?? remove.error ?? clear.error ?? register.error) as Error | null;
   const items = register.data ?? [];
 
   return (
     <div className="space-y-3 text-[12px]">
       <AddApplication onAdded={refresh} />
+      <ClearApplied items={items} busy={clear.isPending} cleared={clear.data?.removed} onClear={(before) => clear.mutate(before)} />
       {error && <p className="text-bad">{error.message}</p>}
       {register.isPending ? (
         <p className="flex items-center gap-1 text-faint">
@@ -110,6 +112,54 @@ function Register() {
           ))}
         </ul>
       )}
+    </div>
+  );
+}
+
+const REMIND_DAYS = 180; // jobs only seen or deleted are forgotten after this; applications stay until cleared
+
+const isoDaysAgo = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+
+/** Applications stay until the user clears them: a reminder once any is six months old, and a
+ *  "clear before a date" control (the job tracker forgets seen and deleted jobs by itself). */
+function ClearApplied({ items, busy, cleared, onClear }: {
+  items: TrackedJob[];
+  busy: boolean;
+  cleared: number | undefined;
+  onClear: (before: string) => void;
+}) {
+  const remindBefore = isoDaysAgo(REMIND_DAYS);
+  const [before, setBefore] = useState(remindBefore);
+  const applied = items.filter((e) => e.status === "applied");
+  const olderThan = (date: string) => applied.filter((e) => (e.applied_at ?? e.first_seen) < date).length;
+  const old = olderThan(remindBefore);
+  const chosen = olderThan(before);
+  const run = (date: string, count: number) => {
+    if (window.confirm(`Remove ${count} application${count === 1 ? "" : "s"} made before ${date} from the register? Their roles may then appear in searches again.`)) onClear(date);
+  };
+  if (applied.length === 0) return null;
+  return (
+    <div className="space-y-1">
+      {old > 0 && (
+        <div className="flex flex-wrap items-center gap-2 rounded-md border border-warn/40 p-2">
+          <span className="text-warn">{old} application{old === 1 ? " is" : "s are"} over six months old. Clear them to keep the register short.</span>
+          <button type="button" className="btn-ghost py-1 text-[11px]" disabled={busy} onClick={() => run(remindBefore, old)}>
+            <Trash2 size={11} /> Clear before {remindBefore}
+          </button>
+        </div>
+      )}
+      <details>
+        <summary className="cursor-pointer text-muted">Clear older applications</summary>
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <label className="text-muted">Applied before
+            <input type="date" className="input ml-2 w-auto py-1 text-[12px]" value={before} onChange={(e) => setBefore(e.target.value)} />
+          </label>
+          <button type="button" className="btn-ghost py-1 text-[11px]" disabled={busy || !before || chosen === 0} onClick={() => run(before, chosen)}>
+            {busy ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />} Clear {chosen}
+          </button>
+        </div>
+      </details>
+      {cleared !== undefined && <p className="text-faint">Removed {cleared} from the register.</p>}
     </div>
   );
 }

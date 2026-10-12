@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Download, Loader2 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import type { MatchResult, TailoredCVView } from "../lib/types";
 
@@ -9,6 +9,13 @@ function Editor({ document, onSaved }: { document: TailoredCVView; onSaved: () =
   const [headline, setHeadline] = useState(document.cv.basics.headline ?? "");
   const [summary, setSummary] = useState(document.cv.basics.summary ?? "");
   const [bullets, setBullets] = useState<Record<string, string>>({});
+  const [additionText, setAdditionText] = useState<Record<string, string>>({});
+  const review = useMutation({
+    meta: { syncLists: true },
+    mutationFn: ({ id, decision }: { id: string; decision: "confirm" | "delete" }) =>
+      api.reviewCVAddition(document.id, id, decision, additionText[id]),
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ["tailored-cvs"] }); void qc.invalidateQueries({ queryKey: ["cv-comparison", document.job_id] }); },
+  });
   const save = useMutation({
     meta: { syncLists: true },
     mutationFn: () => {
@@ -26,6 +33,25 @@ function Editor({ document, onSaved }: { document: TailoredCVView; onSaved: () =
   return (
     <div className="space-y-2 rounded-md border border-border bg-panel p-3 text-[12px]">
       <p className="text-muted">Review the text before linking it to a letter. Changes are checked against this draft's source CV; saving edits creates a new Word version.</p>
+      {!!document.report?.review_additions?.some((item) => item.status === "pending") && (
+        <div className="space-y-2 rounded border border-warn/40 p-2">
+          <p className="font-medium text-warn">Confirm or delete each red suggestion before using this CV</p>
+          <p className="text-muted">These are questions prompted by your background and the job, not verified claims. Edit wording to what you actually did before confirming. Confirmation also adds it to the selected source CV.</p>
+          {document.report.review_additions.filter((item) => item.status === "pending").map((item) => (
+            <div key={item.id} className="space-y-1 rounded border border-border p-2">
+              <p className="font-medium text-warn">{item.kind === "skill" ? "Skill" : `Experience · ${document.cv.experience.find((r) => r.id === item.role_id)?.title ?? item.role_id}`}: {item.requirement}</p>
+              <textarea className="input w-full text-bad" rows={2} value={additionText[item.id] ?? item.text}
+                onChange={(event) => setAdditionText((previous) => ({ ...previous, [item.id]: event.target.value }))} />
+              <p className="text-faint">Why ask: {item.reason} · CV: “{item.background_quote}” · Job: “{item.job_quote}”</p>
+              <div className="flex gap-2">
+                <button className="btn-primary py-1 text-[11px]" disabled={review.isPending} onClick={() => review.mutate({ id: item.id, decision: "confirm" })}>Confirm edited fact</button>
+                <button className="btn-ghost py-1 text-[11px]" disabled={review.isPending} onClick={() => review.mutate({ id: item.id, decision: "delete" })}>Delete suggestion</button>
+              </div>
+            </div>
+          ))}
+          {review.error && <p className="text-bad">{(review.error as Error).message}</p>}
+        </div>
+      )}
       <label className="block">Headline
         <input className="input mt-1 w-full" value={headline} onChange={(e) => setHeadline(e.target.value)} />
       </label>
@@ -100,6 +126,9 @@ export function TailoredCVPanel({ jobId, result, hasCv, onLetter, letterPending 
   );
   const selected = choice ?? documents.data?.[0]?.id ?? "";
   const document = documents.data?.find((item) => item.id === selected);
+  useEffect(() => {
+    if (document?.report?.review_additions?.some((item) => item.status === "pending")) setEditing(true);
+  }, [document?.id]); // eslint-disable-line react-hooks/exhaustive-deps -- open on selection, not after every edit
   return (
     <div className="mt-2 space-y-2 rounded-md bg-surface p-3 text-[12px]">
       <p className="font-medium">Review CV</p>
@@ -136,7 +165,11 @@ export function TailoredCVPanel({ jobId, result, hasCv, onLetter, letterPending 
                 {editing ? "Close editor" : "Review and edit CV"}
               </button>
               <span className={document.reviewed ? "text-muted" : "text-warn"}>
-                {document.reviewed ? "The letter will cite this saved CV." : "Review and save this imported CV before writing the letter."}
+                {document.reviewed
+                  ? "The letter will cite this saved CV."
+                  : document.imported
+                    ? "Review and save this imported CV before writing the letter."
+                    : "Resolve red suggestions before writing the letter."}
               </span>
             </div>
           ) : <p className="text-muted">{hasCv ? "The letter will cite your selected CV. Older Word drafts can be selected in the CV library." : "No saved tailored CV is available for this job."}</p>}

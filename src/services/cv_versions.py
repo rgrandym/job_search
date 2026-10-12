@@ -34,6 +34,7 @@ from src.cv.fit_check import (
 from src.cv.models import (
     DimensionChange,
     FitReading,
+    SearchFitBaseline,
     SettingEffect,
     TailoredDocument,
     VersionComparison,
@@ -44,13 +45,14 @@ from src.services import cv_service, tailored_documents
 from src.services.workspace import Workspace
 
 SETTING_LABELS = {
+    "mode": {"standard": "Standard CV", "optimised": "Optimised draft"},
     "level": {"senior": "Level: more senior", "junior": "Level: more junior"},
     "length": {"full": "Full length", "junior": "Trimmed (junior)"},
     "emphasis": {"leadership": "Leadership", "hands_on": "Hands-on"},
     "audience": {"industry": "Industry", "academic": "Academic"},
     "template": {"classic": "Classic design", "modern": "Modern design", "compact": "Compact"},
 }
-METHOD_VERSION = 2
+METHOD_VERSION = 5
 
 
 def _describe(document: TailoredDocument) -> str:
@@ -63,6 +65,8 @@ def _describe(document: TailoredDocument) -> str:
         for field, names in SETTING_LABELS.items()
         if (value := getattr(document.settings, field)) in names
     ]
+    if document.settings.mode == "standard":
+        chosen = [name for name in chosen if name != "Standard CV"]
     return " · ".join(chosen) or "Automatic"
 
 
@@ -76,7 +80,7 @@ def labels(documents: list[TailoredDocument]) -> dict[str, str]:
     return out
 
 
-EFFECT_FIELDS = ("level", "length", "emphasis", "audience")  # the design does not change text
+EFFECT_FIELDS = ("mode", "level", "length", "emphasis", "audience")
 
 
 def _value(field: str, value: str) -> str:
@@ -222,9 +226,9 @@ def _baseline(
     asset = next((a for a in cv_service.list_cvs(ws) if a.id == cv_id), None)
     if cv_id is None or asset is None:
         raise ValueError("Choose a CV from your library to compare against")
-    snapshot = next((d for d in documents if not d.imported and d.cv_id == cv_id), None)
-    if snapshot is not None:  # the CV as tailoring read it, newest first
-        text = cv_to_text(snapshot.source_cv, tags=False)
+    snapshot = _oldest([d for d in documents if not d.imported and d.cv_id == cv_id])
+    if snapshot is not None:  # the CV as the first of these tailorings read it
+        text = cv_to_text(tailored_documents.as_tailored(snapshot), tags=False)
     elif cv_id == "master":
         text = cv_to_text(mgr.load(ws.settings.master_cv_path), tags=False)
     else:
@@ -268,6 +272,29 @@ def _entries(
     return items, texts
 
 
+def _oldest(documents: list[TailoredDocument]) -> TailoredDocument | None:
+    return min(documents, key=lambda d: d.created_at, default=None)
+
+
+def _search_fit(
+    ws: Workspace, job_id: str, documents: list[TailoredDocument], cv_id: str
+) -> tuple[SearchFitBaseline | None, str]:
+    """The search verdict every version's score is anchored to, or why there is none. The
+    oldest draft's saved verdict goes with the original, which is that draft's source CV."""
+    if any(d.cv_id != cv_id for d in documents):
+        return None, "The versions come from different CVs, so no one search score applies."
+    saved = _oldest([d for d in documents if d.search_fit is not None])
+    if saved is not None:
+        return saved.search_fit, ""
+    result = ws.result(job_id)
+    found = cv_service.search_fit_baseline(result, cv_id)
+    if found is not None:
+        return found, ""
+    if result is not None and result.verdict is not None and result.verdict.ratings is not None:
+        return None, "The saved search verdict judged another CV; search with this CV to use it."
+    return None, "No saved search verdict was available for this job."
+
+
 def _job_text(document: TailoredDocument) -> str:
     """The job as tailoring read it (`cv_service._job_text`)."""
     title = document.job_title or document.jd.job_title
@@ -293,6 +320,9 @@ async def compare(
             f"choose at most {MAX_VERSIONS} in all"
         )
     items, texts = _entries(ws, documents, names, baseline_id)
+    search_fit, search_note = _search_fit(
+        ws, job_id, documents, items[0].id.removeprefix("original:")
+    )
     lead = next((d for d in documents if not d.imported), documents[0])
     requirements = requirements_for(lead.tailored, lead.jd)
     keywords = ats_keywords(lead.jd)
@@ -303,13 +333,15 @@ async def compare(
     known = _known(ws, keys)  # CVs read before for this job: same scores, no re-roll
     fit = await asyncio.to_thread(read_versions, texts, requirements, jd_text, llm, known)
     _remember(ws, keys, fit)
-    readings = score_versions(items, texts, fit, requirements, keywords)
+    readings = score_versions(items, texts, fit, requirements, keywords, search_fit)
     progress.step("Ranking the versions")
     best_id, summary = best_version(readings, len(requirements))
     comparison = VersionComparison(
         job_id=job_id,
         job_title=lead.job_title or lead.jd.job_title,
         job_company=lead.job_company or lead.jd.company or "",
+        search_fit_score=search_fit.score if search_fit is not None else None,
+        search_fit_note=search_note,
         created_at=datetime.now(UTC).isoformat(),
         requirements=requirements,
         keywords=keywords,

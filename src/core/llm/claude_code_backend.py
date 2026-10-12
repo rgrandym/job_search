@@ -73,6 +73,19 @@ def claude_binary() -> str | None:
 USAGE_TIMEOUT_S = 30
 
 
+@lru_cache(maxsize=4)
+def no_chrome(binary: str) -> tuple[str, ...]:
+    """`--no-chrome` when this CLI has it: Claude in Chrome may turn itself on and start the
+    user's Chrome, which the app must never do. An older CLI without the flag gets nothing."""
+    try:
+        out = subprocess.run(
+            [binary, "--help"], capture_output=True, text=True, timeout=15, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ()
+    return ("--no-chrome",) if "--no-chrome" in out.stdout else ()
+
+
 def claude_usage_text() -> str:
     """The plan usage Claude Code reports for `/usage` (its share of each window and when it
     resets). A local command: `claude -p /usage` answers without a model call or tokens."""
@@ -80,7 +93,7 @@ def claude_usage_text() -> str:
     if binary is None:
         raise LLMError("Claude Code CLI not found")
     cmd = [binary, "-p", "/usage", "--output-format", "json", "--no-session-persistence"]
-    cmd += ["--tools", "", "--strict-mcp-config", "--setting-sources", ""]
+    cmd += ["--tools", "", "--strict-mcp-config", "--setting-sources", "", *no_chrome(binary)]
     with tempfile.TemporaryDirectory(prefix="jobsearch-claude-") as workdir:
         try:
             out = subprocess.run(
@@ -190,6 +203,7 @@ def _command(
         "",
         "--system-prompt",
         system,
+        *no_chrome(binary),
     ]
     if model:
         cmd += ["--model", model]
@@ -412,6 +426,7 @@ def _native_command(
         system,
         "--resume" if resume else "--session-id",
         session_id,
+        *no_chrome(binary),
     ]
     if model:
         cmd += ["--model", model]

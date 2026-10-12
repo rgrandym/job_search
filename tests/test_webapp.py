@@ -166,6 +166,7 @@ def test_smart_search_uses_job_matcher_verdicts(ws: Workspace) -> None:
     assert rep.screened and rep.summary == SUMMARY
     assert [r.job.id for r in rep.matches] == ["job-strong"]
     assert rep.matches[0].verdict and rep.matches[0].verdict.fit_score == 91
+    assert rep.matches[0].verdict.cv_id == ws.active_cv_id  # the CV it judged
     partial = next(r for r in rep.below_threshold if r.job.id == "job-partial")
     assert partial.verdict and not partial.verdict.match
     assert {r.job.id for r in rep.excluded} == {"job-cert", "job-onsite"}
@@ -912,7 +913,7 @@ def test_cv_source_is_viewed_and_opened_exactly_as_uploaded(
     assert client.get("/api/cv/source/master").status_code == 404
 
 
-def test_cv_preview_shows_pdfs_as_stored_and_word_files_via_word(
+def test_cv_preview_shows_pdfs_as_stored_and_word_files_as_html(
     client: TestClient, ws: Workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from src.services import document_files
@@ -929,25 +930,60 @@ def test_cv_preview_shows_pdfs_as_stored_and_word_files_via_word(
         for item in client.get("/api/state").json()["cv_files"]["available"]
         if item["filename"] == "cv.docx"
     )
-    rendered = ws.settings.data_dir / "word.pdf"
-    rendered.write_bytes(b"%PDF-1.7 rendered by Word")
+    rendered = ws.settings.data_dir / "word.html"
+    rendered.write_bytes(b"<html>page view</html>")
     calls: list[Path] = []
 
-    def fake_word(source: Path, cache_dir: Path) -> Path | None:
+    def fake_view(source: Path, cache_dir: Path) -> Path | None:
         calls.append(source)
         return rendered
 
-    monkeypatch.setattr(document_files, "word_pdf_preview", fake_word)
+    monkeypatch.setattr(document_files, "html_preview", fake_view)
     shown = client.get(f"/api/cv/preview/{asset['id']}")
-    assert shown.content == b"%PDF-1.7 rendered by Word"
+    assert shown.content == b"<html>page view</html>"
     working = ws.output_dir / "cvs" / "cv.docx"  # the copy edits land in, not the stored file
     assert calls == [working] and working.read_bytes() == b"PK saved from Word"
     assert edited.read_bytes() == b"PK saved from Word"
 
-    monkeypatch.setattr(document_files, "word_pdf_preview", lambda source, cache_dir: None)
+    monkeypatch.setattr(document_files, "html_preview", lambda source, cache_dir: None)
     missing = client.get(f"/api/cv/preview/{asset['id']}")
     assert missing.status_code == 422
     assert "Open in Word" in missing.json()["detail"]
+
+
+def test_word_page_view_comes_from_quick_look_never_from_word(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+    import sys
+
+    from src.services import document_files
+
+    tool = tmp_path / "qlmanage"
+    tool.write_text("")
+    monkeypatch.setattr(document_files, "QUICK_LOOK", str(tool))
+    monkeypatch.setattr(sys, "platform", "darwin")
+    commands: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_: object) -> subprocess.CompletedProcess[bytes]:
+        commands.append(cmd)
+        bundle = Path(cmd[3]) / "document.docx.qlpreview"
+        bundle.mkdir()
+        (bundle / "Preview.html").write_text('<html><head></head><img src="Attachment1.png">')
+        (bundle / "Attachment1.png").write_bytes(b"png")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(document_files.subprocess, "run", fake_run)
+    source = tmp_path / "cv.docx"
+    source.write_bytes(b"PK word file")
+    page = document_files.html_preview(source, tmp_path / "cache")
+    assert page is not None and page.suffix == ".html"
+    html = page.read_text()
+    assert 'src="data:image/png;base64,cG5n"' in html and "background:#fff" in html
+    assert commands[0][:3] == [str(tool), "-p", "-o"]
+    assert not any("osascript" in part or "Word" in part for part in commands[0])
+    assert document_files.html_preview(source, tmp_path / "cache") == page  # cached
+    assert len(commands) == 1
 
 
 def test_upload_saves_an_identical_copy_to_output_cvs_immediately(
@@ -1657,6 +1693,79 @@ def test_applied_and_na_jobs_are_set_aside_before_screening(ws: Workspace) -> No
     assert not rep.matches  # an applied role never takes a ranked place
 
 
+def test_deleted_and_labelled_jobs_stay_out_of_later_searches(ws: Workspace) -> None:
+    from src.services import labels, search_service
+
+    req = SearchRequest(query=SearchQuery(sources=["demo"]), smart=True, threshold=70)
+    first = asyncio.run(run_search(ws, req))
+    assert search_service.remove_result(ws, "job-strong", first.history_id)
+    assert labels.set_label(ws, "job-partial", "maybe")
+    rep = asyncio.run(run_search(ws, req)).report
+    scored = {r.job.id for r in rep.scored()}
+    assert "job-strong" not in scored and "job-partial" not in scored
+    reasons = {r.job.id: r.exclusion_reasons[0] for r in rep.dismissed}
+    assert reasons["job-strong"].startswith("you deleted it from a search on")
+    assert reasons["job-partial"] == "you labelled it maybe"
+
+
+def test_seen_and_deleted_jobs_are_forgotten_and_applications_cleared_on_request(
+    ws: Workspace, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import date
+
+    from src.services import tracker
+
+    def job(n: int) -> JobPosting:
+        return JobPosting(id=f"j{n}", title=f"Scientist {n}", company=f"Co{n}")
+
+    tracker.set_status(ws, job(1), "applied", today=date(2026, 1, 5))
+    tracker.set_status(ws, job(2), "applied", today=date(2026, 9, 1))
+    tracker.mark_removed(ws, job(3), today=date(2026, 3, 1))
+    tracker.mark_removed(ws, job(4), today=date(2026, 9, 1))
+    entries = tracker.load(ws)
+    for n in range(5, 9):  # only seen, in searches in October
+        day = f"2026-10-0{n}"
+        entries[f"s{n}"] = tracker.TrackedJob(
+            id=f"s{n}", title=f"Scientist {n}", company=f"Co{n}", job_id=f"j{n}",
+            first_seen=day, last_seen=day,
+        )  # fmt: skip
+    monkeypatch.setattr(tracker, "MAX_SEEN", 3)
+    tracker._save(ws, entries, date(2026, 10, 12))
+    left = {e.job_id for e in tracker.load(ws).values()}
+    # applications stay; the deletion of March lapsed; the 3 newest only-seen or deleted remain
+    assert left == {"j1", "j2", "j8", "j7", "j6"}
+
+    cleared = client.post("/api/tracker/clear-applied", json={"before": "2026-04-01"})
+    assert cleared.json() == {"removed": 1}
+    assert [e.job_id for e in tracker.register(ws)] == ["j2"]
+
+
+def test_an_application_is_found_under_the_employers_legal_name(ws: Workspace) -> None:
+    from datetime import date
+
+    from src.services import tracker
+    from src.tools.search_tools import same_employer
+
+    assert same_employer("IQVIA", "Iqvia IES UK Limited")
+    assert same_employer("Oxford Nanopore Technologies", "Oxford Nanopore")
+    assert not same_employer("Orbit", "Orbit 2") and not same_employer("Novartis", "Novo")
+    title = "Senior Technical Specialist - Stem Cell"
+    tracker.set_status(
+        ws, JobPosting(id="a", title=title, company="IQVIA"), "applied", today=date(2026, 10, 8)
+    )
+    board = JobPosting(id="totaljobs:1", title=title, company="Iqvia Ies Uk Limited")
+    # an earlier search recorded the posting under the legal name, as only seen
+    entries = tracker.load(ws)
+    seen = tracker.role_id(board.title, board.company)
+    entries[seen] = tracker.TrackedJob(
+        id=seen, title=title, company=board.company, job_id=board.id,
+        first_seen="2026-10-12", last_seen="2026-10-12",
+    )  # fmt: skip
+    tracker._save(ws, entries, date(2026, 10, 12))
+    keep, aside, _ = tracker.set_aside(ws, [board], today=date(2026, 10, 12))
+    assert [r.job.id for r in aside] == ["totaljobs:1"] and keep == []
+
+
 def test_clearing_applied_restores_job_to_open_search(ws: Workspace) -> None:
     from src.services import history, tracker
 
@@ -1859,3 +1968,14 @@ def test_a_saved_search_keeps_its_progress_log(
     _, saved = history.open_entry(ws, out.history_id)
     assert any("Pre-filter" in line for line in saved.progress_log)
     assert saved.progress_log[0].strip().split("s ")[0].replace(".", "").isdigit()  # timed
+
+
+def test_the_gmail_alert_cache_keeps_listed_then_newest_emails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.jobs.sources import gmail_alerts
+
+    cache = gmail_alerts.AlertCache(account="me", messages={f"m{i}": [] for i in range(6)})
+    monkeypatch.setattr(gmail_alerts, "MAX_CACHED_ALERTS", 3)
+    gmail_alerts._keep_newest(cache, {"m0"})
+    assert list(cache.messages) == ["m0", "m4", "m5"]

@@ -17,6 +17,7 @@ from src.cv.docx_exporter import export_docx
 from src.cv.docx_original import academic_order, write_like_original
 from src.cv.fit_check import compare_fit
 from src.cv.models import (
+    AdditionCandidates,
     CoverLetterDraft,
     CVCritique,
     Education,
@@ -31,6 +32,7 @@ from src.cv.models import (
     Positioning,
     RequirementEvidence,
     RewrittenBullet,
+    SkillSuggestions,
     TailoringPlan,
 )
 from src.cv.tailor import (
@@ -41,6 +43,8 @@ from src.cv.tailor import (
     check_requirements,
     level_note,
     printed_text,
+    propose_review_additions,
+    suggest_skills_to_confirm,
     tailor,
 )
 from src.jobs.models import ExpansionRoute, ProfileSummary, RoleFamily
@@ -123,8 +127,9 @@ def test_summary_keeps_the_only_mention_of_a_job_skill(master_cv: MasterCV) -> N
     source.basics.summary = "Experienced in technology transfer and experimental design."
     job = JDAnalysis(job_title="Principal Scientist", hard_skills=["Technology transfer"])
     missing = apply_plan(source, _plan(summary="Experienced in experimental design."), job)
-    assert missing.cv.basics.summary == source.basics.summary
-    assert "Technology transfer" in (missing.changes[-1].reason or "")
+    assert missing.cv.basics.summary == "Experienced in experimental design."
+    assert missing.role_skills == ["Technology transfer"]
+    assert "Technology transfer" in printed_text(missing)
     kept = apply_plan(
         source, _plan(summary="Experienced in experimental design and technology transfer."), job
     )
@@ -194,6 +199,168 @@ def test_unverified_job_technique_is_red_and_not_counted_as_confirmed(
         assert "RT-PCR" in line.text
         assert all(str(run.font.color.rgb) == "C00000" for run in line.runs)
         assert check_docx(target, tailored.cv, ["RT-PCR"]).keyword_coverage == 0
+
+
+def test_optimised_review_additions_are_anchored_red_and_excluded_from_fit(
+    master_cv: MasterCV, tmp_path: Path
+) -> None:
+    job_text = "Lead Azure deployment pipelines and model handover."
+    jd = JDAnalysis(job_title="ML lead", hard_skills=["Azure"])
+    tailored = apply_plan(master_cv, TailoringPlan(), jd)
+    raw = AdditionCandidates.model_validate(
+        {
+            "items": [
+                {
+                    "kind": "skill",
+                    "text": "Azure",
+                    "requirement": "Azure deployment",
+                    "background_quote": "Led migration of model training pipelines to Kubernetes",
+                    "job_quote": "Azure deployment pipelines",
+                    "reason": "Confirm hands-on use",
+                },
+                {
+                    "kind": "experience",
+                    "text": "Supported Azure deployment and model handover",
+                    "role_id": "nimbus",
+                    "requirement": "model handover",
+                    "background_quote": "Led migration of model training pipelines to Kubernetes",
+                    "job_quote": "model handover",
+                    "reason": "Confirm the actual contribution",
+                },
+                {
+                    "kind": "experience",
+                    "text": "Led Azure deployment globally",
+                    "role_id": "lexa",
+                    "requirement": "Azure deployment",
+                    "background_quote": "Led migration of model training pipelines to Kubernetes",
+                    "job_quote": "Azure deployment pipelines",
+                    "reason": "Wrong role anchor",
+                },
+            ]
+        }
+    )
+    additions = propose_review_additions(
+        master_cv, tailored, jd, job_text, FakeLLM({AdditionCandidates: raw})
+    )
+    assert [a.kind for a in additions] == ["skill", "experience"]
+    tailored.review_additions = additions
+    assert "Azure" not in printed_text(tailored)
+    original = tmp_path / "original.docx"
+    export_docx(master_cv, original)
+    for target, copy_original in (
+        (tmp_path / "same.docx", True),
+        (tmp_path / "classic.docx", False),
+    ):
+        if copy_original:
+            write_like_original(
+                original,
+                master_cv,
+                tailored.cv,
+                target,
+                review_additions=tailored.review_additions,
+            )
+        else:
+            export_docx(tailored, target)
+        lines = [p for p in Document(target).paragraphs if p.text.startswith("[CONFIRM ")]
+        assert len(lines) == 2
+        assert all(str(run.font.color.rgb) == "C00000" for p in lines for run in p.runs)
+        assert check_docx(target, tailored.cv, ["Azure"]).keyword_coverage == 0
+
+
+def test_optimised_mode_uses_focused_proposal_pass(master_cv: MasterCV) -> None:
+    job_text = "Lead Azure deployment pipelines and model handover."
+    raw = AdditionCandidates.model_validate(
+        {
+            "items": [
+                {
+                    "kind": "skill",
+                    "text": "Azure",
+                    "requirement": "Azure deployment",
+                    "background_quote": "Led migration of model training pipelines to Kubernetes",
+                    "job_quote": "Azure deployment pipelines",
+                    "reason": "Confirm hands-on use",
+                },
+            ]
+        }
+    )
+    llm = FakeLLM({TailoringPlan: TailoringPlan(), AdditionCandidates: raw})
+    out = tailor(
+        master_cv,
+        job_text,
+        llm,
+        jd=JDAnalysis(job_title="ML lead", hard_skills=["Azure"]),
+        review=False,
+        mode="optimised",
+    )
+    assert [item.text for item in out.review_additions] == ["Azure"]
+    assert "<optimised_draft>" in llm.calls[0][0]
+    assert [model for _, model in llm.calls] == [TailoringPlan, AdditionCandidates]
+
+
+def test_focused_suggestion_can_link_an_implied_technique_to_the_job(
+    master_cv: MasterCV,
+) -> None:
+    source = master_cv.model_copy(deep=True)
+    source.education.append(Education(institution="U", degree="PhD", field="Cell Biology"))
+    job_text = "Develop cell characterisation methods for new therapies."
+    proposals = SkillSuggestions.model_validate(
+        {
+            "items": [
+                {
+                    "skill": "RT-PCR",
+                    "background_quote": "PhD Cell Biology U",
+                    "job_quote": "cell characterisation methods",
+                    "reason": "The training makes it worth confirming for this work",
+                },
+                {
+                    "skill": "Western blot",
+                    "background_quote": "PhD Cell Biology U",
+                    "job_quote": "not in the posting",
+                    "reason": "Unsupported job link",
+                },
+            ]
+        }
+    )
+    llm = FakeLLM({SkillSuggestions: proposals})
+    suggestions = suggest_skills_to_confirm(
+        source, JDAnalysis(job_title="Scientist"), job_text, llm
+    )
+    assert [item.skill for item in suggestions] == ["RT-PCR"]
+
+
+def test_tailoring_runs_a_focused_suggestion_pass_when_plan_has_none(
+    master_cv: MasterCV,
+) -> None:
+    source = master_cv.model_copy(deep=True)
+    source.education.append(Education(institution="U", degree="PhD", field="Cell Biology"))
+    suggestion = SkillSuggestions.model_validate(
+        {
+            "items": [
+                {
+                    "skill": "RT-PCR",
+                    "background_quote": "PhD Cell Biology U",
+                    "job_quote": "cell characterisation methods",
+                    "reason": "Worth confirming for the role",
+                }
+            ]
+        }
+    )
+    llm = FakeLLM(
+        {
+            TailoringPlan: TailoringPlan(),
+            CVCritique: CVCritique(),
+            SkillSuggestions: suggestion,
+        }
+    )
+    out = tailor(
+        source,
+        "Develop cell characterisation methods.",
+        llm,
+        jd=JDAnalysis(job_title="Scientist"),
+        suggest_unverified=True,
+    )
+    assert [s.skill for s in out.skills_to_confirm] == ["RT-PCR"]
+    assert [model for _, model in llm.calls].count(SkillSuggestions) == 1
 
 
 def test_job_wording_needs_the_bullet_mapped_to_that_requirement(master_cv: MasterCV) -> None:

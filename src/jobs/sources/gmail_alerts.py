@@ -47,6 +47,18 @@ class AlertSeen(_PrivateModel):
     by_cv: dict[str, list[str]] = Field(default_factory=dict)
 
 
+MAX_CACHED_ALERTS = 2000  # parsed alert emails kept; the oldest go first
+
+
+def _keep_newest(cache: AlertCache, listed: set[str]) -> None:
+    """Cap the parsed-alert cache: emails still in the inbox listing stay, then the newest."""
+    excess = len(cache.messages) - MAX_CACHED_ALERTS
+    if excess <= 0:
+        return
+    for message_id in [k for k in cache.messages if k not in listed][:excess]:
+        del cache.messages[message_id]  # dict order is the order they were read in
+
+
 def _write_private(path: Path, payload: dict[str, Any]) -> None:
     """Atomically write ignored credential or alert state with owner-only permissions."""
     tmp: Path | None = None
@@ -281,6 +293,7 @@ class GmailAlertSource:
         for message_id in message_ids:
             if message_id not in cache.messages:
                 cache.messages[message_id] = self._message_jobs(message_id, headers)
+        _keep_newest(cache, set(message_ids))
         _write_private(self.cache_path, cache.model_dump(mode="json"))
         seen = set(self._seen().by_cv.get(self.cv_key, [])) if self.only_new else set()
         jobs: dict[str, JobPosting] = {}

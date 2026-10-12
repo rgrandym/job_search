@@ -404,6 +404,7 @@ export function JobCard({
   const [emphasis, setEmphasis] = useState<"auto" | "leadership" | "hands_on">("auto");
   const [level, setLevel] = useState<"auto" | "senior" | "junior">("auto");
   const [audience, setAudience] = useState<"auto" | "industry" | "academic">("auto");
+  const [cvMode, setCvMode] = useState<"standard" | "optimised">("standard");
   const [documentsOpen, setDocumentsOpen] = useState(false);
   // The tailored version whose report the card shows (null: the newest) and the comparison window.
   const [versionId, setVersionId] = useState<string | null>(null);
@@ -414,7 +415,7 @@ export function JobCard({
   const letterTask = useTaskId();
   const tailor = useMutation({
     meta: { syncLists: true },
-    mutationFn: () => api.tailor(job.id, template, result, emphasis, level, length, tailorTask.next(), audience),
+    mutationFn: () => api.tailor(job.id, template, result, emphasis, level, length, tailorTask.next(), audience, cvMode),
     onSuccess: (data) => {
       setHeadlineChoice(null);
       setVersionId(data.document_id);
@@ -434,9 +435,11 @@ export function JobCard({
   // The cover letter cites the newest reviewed tailored CV for this job, else the selected CV.
   const letterSource = versions.find((d) => d.reviewed);
   const canWriteLetter = !!letterSource || canTailor;
-  const savedDraft = versions.find((d) => d.id === versionId && d.report) ?? versions.find((d) => d.report);
+  const savedDraft = versionId
+    ? versions.find((d) => d.id === versionId && d.report)
+    : versions.find((d) => d.report);
   const fresh = tailor.data && (!versionId || tailor.data.document_id === versionId) ? tailor.data : null;
-  const report = fresh ?? savedDraft?.report ?? null;
+  const report = savedDraft?.report ?? fresh ?? null;
   const pickVersion = (id: string) => {
     setVersionId(id);
     setHeadlineChoice(null);
@@ -672,6 +675,10 @@ export function JobCard({
               <option value="industry">Industry</option>
               <option value="academic">Academic</option>
             </select>
+            <select aria-label="CV writing mode" title="Optimised draft makes the strongest evidenced case and places plausible missing skills or experience in red for your review" className="input w-auto py-1 text-[12px]" value={cvMode} onChange={(e) => setCvMode(e.target.value as typeof cvMode)}>
+              <option value="standard">Standard CV</option>
+              <option value="optimised">Optimised draft · review red text</option>
+            </select>
             <button className="btn-ghost py-1 text-[12px]" disabled={tailor.isPending} onClick={() => tailor.mutate()}>
               {tailor.isPending ? <Loader2 size={12} className="animate-spin" /> : <FileText size={12} />}
               Tailor CV
@@ -748,6 +755,9 @@ export function JobCard({
       {report && (
         <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md bg-surface p-2 text-[12px]">
           <CVViewButton downloadUrl={headlineChoice?.url ?? report.download_url} title={`Tailored CV · ${job.title}`} />
+          {!!report.review_additions?.some((item) => item.status === "pending") && (
+            <span className="text-warn">Review red suggestions before using this CV</span>
+          )}
           {jobLetter && <LetterViewButton id={jobLetter.id} title={`Cover letter · ${job.title}`} downloadUrl={jobLetter.docx_url} />}
           {!fresh && savedDraft && (
             <span className="text-faint" title="Saved with this tailored CV">

@@ -27,12 +27,12 @@ const TAB_LABEL: Record<Tab, string> = {
   to_check: "To check",
   below_threshold: "Not selected",
   excluded: "Excluded",
-  dismissed: "N/A & no",
+  dismissed: "Set aside",
 };
 const TAB_HINT: Partial<Record<Tab, string>> = {
   to_check:
     "Would match on the title and snippet, but the full posting could not be read yet, so its requirements were not checked. Fetch it, or paste the description",
-  dismissed: "Jobs you marked N/A or labelled no: set aside before screening, with your reason",
+  dismissed: "Jobs you marked N/A, deleted from a search or labelled (reviewed already): set aside before screening, with your reason",
 };
 
 const SOURCE_NAMES: Record<string, string> = {

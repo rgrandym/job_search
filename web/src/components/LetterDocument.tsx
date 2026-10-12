@@ -38,7 +38,7 @@ export function CVViewButton({ downloadUrl, title }: { downloadUrl: string; titl
   );
 }
 
-/** The letter's Word file shown as Word lays it out; edits saved in Word show on returning. */
+/** The letter's Word file as an HTML page view (Word opens only on request); edits saved in Word show on returning. */
 function LetterDocument({ id, title, downloadUrl }: { id: string; title: string; downloadUrl: string }) {
   const open = useMutation({ mutationFn: () => api.openCoverLetter(id, "word") });
   const preview = useQuery({
@@ -57,7 +57,7 @@ function LetterDocument({ id, title, downloadUrl }: { id: string; title: string;
   return (
     <div className="flex h-full flex-col">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-border bg-surface px-4 py-2 text-[12px]">
-        <p className="min-w-0 flex-1 text-muted">Your cover letter as Word lays it out. Open in Word to edit it.</p>
+        <p className="min-w-0 flex-1 text-muted">Your cover letter. Open in Word to edit it.</p>
         {open.isPending && <Loader2 size={13} className="animate-spin text-muted" />}
         <a className="btn-ghost py-1" href={downloadUrl} download><Download size={13} /> Download</a>
         <button type="button" className="btn-primary py-1" disabled={open.isPending} onClick={() => open.mutate()}>
@@ -70,10 +70,10 @@ function LetterDocument({ id, title, downloadUrl }: { id: string; title: string;
         <div className="cv-desk flex flex-1 items-center justify-center p-8 text-center text-[12px] text-bad">{preview.error.message}</div>
       ) : preview.isPending ? (
         <div className="cv-desk flex flex-1 items-center justify-center gap-2 text-[12px] text-muted">
-          <Loader2 size={14} className="animate-spin" /> Word is preparing the page view…
+          <Loader2 size={14} className="animate-spin" /> Preparing the page view…
         </div>
       ) : url ? (
-        <iframe title={title} src={url} className="cv-desk min-h-0 w-full flex-1 border-0" />
+        <iframe title={title} src={url} sandbox="" className="cv-desk min-h-0 w-full flex-1 border-0" />
       ) : null}
     </div>
   );

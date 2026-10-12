@@ -317,6 +317,32 @@ class TailoredEdit(BaseModel):
     bullets: dict[str, str] = Field(default_factory=dict)
 
 
+class CVAdditionDecision(BaseModel):
+    document_id: str
+    addition_id: str
+    decision: Literal["confirm", "delete"]
+    text: str | None = Field(None, description="Corrected wording when confirming a true fact")
+
+
+@tool(
+    "review_cv_addition",
+    "Confirm a red CV suggestion only on the user's explicit instruction, or delete it.",
+    CVAdditionDecision,
+)
+async def review_cv_addition(args: CVAdditionDecision, ctx: AgentContext) -> dict[str, Any]:
+    from src.services import tailored_documents
+
+    document = tailored_documents.review_addition(
+        ctx.ws, args.document_id, args.addition_id, args.decision, args.text
+    )
+    await ctx.emit("documents_updated", {"job_id": document.job_id})
+    return {
+        "document_id": document.id,
+        "reviewed": document.reviewed,
+        "download_url": f"/api/files/cvs/{document.filename}",
+    }
+
+
 @tool("edit_tailored_cv", "Revise a tailored CV draft with source-fact guards.", TailoredEdit)
 async def edit_tailored_cv(args: TailoredEdit, ctx: AgentContext) -> dict[str, Any]:
     from src.cv.models import TailoredCVEdits

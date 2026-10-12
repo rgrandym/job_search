@@ -233,9 +233,39 @@ class Positioning(_Strict):
 class SkillToConfirm(_Strict):
     """A job technique plausibly familiar from the background, not evidenced by the CV."""
 
-    skill: str = Field(description="Exact technique or tool named in the job posting")
+    skill: str = Field(description="Routine technique or tool relevant to the job")
     background_quote: str = Field(description="Exact CV words making this worth asking about")
+    job_quote: str = Field("", description="Exact posting words this technique would serve")
     reason: str = Field(description="Why the background makes it worth asking the user")
+
+
+class SkillSuggestions(_Strict):
+    """A focused follow-up when the main tailoring plan omitted review suggestions."""
+
+    items: list[SkillToConfirm] = Field(default_factory=list)
+
+
+class AdditionCandidate(_Strict):
+    """A possible omitted fact proposed by the writer, never a confirmed CV claim."""
+
+    kind: Literal["skill", "experience"]
+    text: str = Field(min_length=1, description="CV wording to review, without invented metrics")
+    role_id: str | None = Field(None, description="Existing role for an experience proposal")
+    requirement: str = Field(description="The pivotal job need this would address")
+    background_quote: str = Field(description="Exact words in the source CV")
+    job_quote: str = Field(description="Exact words in the posting")
+    reason: str = Field(description="Why this is plausible and what the user must verify")
+
+
+class AdditionCandidates(_Strict):
+    items: list[AdditionCandidate] = Field(default_factory=list)
+
+
+class ReviewAddition(AdditionCandidate):
+    """A candidate sentence kept separate from factual CV text until the user confirms it."""
+
+    id: str
+    status: Literal["pending", "confirmed", "deleted"] = "pending"
 
 
 class TailoringPlan(_Strict):
@@ -351,7 +381,7 @@ class ATSReport(_Strict):
     warnings: list[str] = Field(default_factory=list)
 
 
-FitDimension = Literal["function", "domain", "seniority", "leadership", "sector"]
+FitDimension = Literal["function", "domain", "seniority", "leadership", "sector", "practicality"]
 
 
 class FitReading(_Strict):
@@ -429,6 +459,7 @@ class FitComparison(_Strict):
 
     before: int = Field(ge=0, le=100, description="The original CV, read for this job")
     after: int = Field(ge=0, le=100, description="The tailored CV, read for this job")
+    search_anchored: bool = False
     dimensions: list[DimensionChange] = Field(default_factory=list)
     requirements_total: int = 0
     requirements_before: int = 0
@@ -484,6 +515,7 @@ class TailoredCV(_Strict):
         default_factory=list,
         description="Unverified job techniques shown in red, outside the confirmed CV facts",
     )
+    review_additions: list[ReviewAddition] = Field(default_factory=list)
     academic: bool = Field(False, description="Written for an academic post")
     fit_check: FitComparison | None = None
 
@@ -496,6 +528,7 @@ class TailoringSettings(_Strict):
     level: str = "auto"
     length: str = "auto"
     audience: str = "auto"
+    mode: Literal["standard", "optimised"] = "standard"
 
 
 class AreaChange(_Strict):
@@ -569,6 +602,10 @@ class VersionComparison(_Strict):
     job_id: str
     job_title: str = ""
     job_company: str = ""
+    search_fit_score: int | None = Field(
+        None, ge=0, le=100, description="Search matcher's score, a different assessment"
+    )
+    search_fit_note: str = Field("", description="Why scores are not anchored to a search score")
     created_at: str
     requirements: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
@@ -579,6 +616,15 @@ class VersionComparison(_Strict):
     reads: int = Field(1, description="Independent readings per CV; the median counts")
     margin: int = Field(0, description="Score points below which two CVs read the same")
     method_version: int = Field(1, description="Comparison rubric and ranking version")
+
+
+class SearchFitBaseline(_Strict):
+    """The search verdict for the CV used to make this draft, saved at tailoring time."""
+
+    score: int = Field(ge=0, le=100)
+    ratings: dict[str, int] = Field(description="The matcher's six 0-4 ratings")
+    cap_reason: str | None = None
+    requirements_checked: bool = Field(True, description="False: capped as an unread posting")
 
 
 class TailoredDocument(_Strict):
@@ -606,6 +652,8 @@ class TailoredDocument(_Strict):
     settings: TailoringSettings | None = Field(
         default=None, description="The choices it was tailored with (None: imported or older)"
     )
+    search_fit: SearchFitBaseline | None = None
+    search_fit_invalidated: bool = False  # older drafts only; no longer set or used
 
 
 class TailoredCVEdits(_Strict):

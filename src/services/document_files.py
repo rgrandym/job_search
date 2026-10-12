@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from src.services.workspace import Workspace
@@ -47,55 +50,62 @@ def remove_upload_copies(ws: Workspace, data: bytes) -> None:
             path.unlink()
 
 
-# Word for Mac is sandboxed: it can always read and write its own container, so previews are
-# converted from a copy there. A copy also never disturbs a document the user has open.
-WORD_CONTAINER_TMP = Path.home() / "Library/Containers/com.microsoft.Word/Data/tmp"
-_WORD_TO_PDF = """
-on run argv
-    tell application "Microsoft Word"
-        open (POSIX file (item 1 of argv))
-        repeat 60 times
-            if exists document (item 3 of argv) then exit repeat
-            delay 0.5
-        end repeat
-        set doc to document (item 3 of argv)
-        save as doc file name (item 2 of argv) file format format PDF
-        close doc saving no
-    end tell
-end run
-"""
+# macOS Quick Look renders Word files to HTML in a fraction of a second, without starting Word
+# or asking for any permission: the viewer never opens Word (only "Open in Word" does).
+QUICK_LOOK = "/usr/bin/qlmanage"
+_LOCAL_IMAGE = re.compile(r'src="([^":/]+\.(png|jpe?g|gif|bmp|tiff?|svg))"', re.IGNORECASE)
+_IMAGE_TYPES = {"jpg": "jpeg", "tif": "tiff", "svg": "svg+xml"}
+# A white page on a grey desk, readable in the app's dark themes too.
+_PAPER = (
+    "<style>html{background:#e8e8e8;color-scheme:light}"
+    "body>div{margin:16px auto;background:#fff;color:#000;box-shadow:0 1px 4px #0003}</style>"
+)
 
 
-def word_pdf_preview(source: Path, cache_dir: Path) -> Path | None:
-    """PDF rendering of a Word file made by Microsoft Word itself; None when Word is unavailable."""
+def html_preview(source: Path, cache_dir: Path) -> Path | None:
+    """An HTML page view of a Word file made by macOS Quick Look; None when unavailable."""
     digest = hashlib.sha256(source.read_bytes()).hexdigest()[:24]
-    cached = cache_dir / f"{digest}.pdf"
+    cached = cache_dir / f"{digest}.html"
     if cached.is_file():
         return cached
-    if sys.platform != "darwin" or not WORD_CONTAINER_TMP.is_dir():
+    if sys.platform != "darwin" or not Path(QUICK_LOOK).is_file():
         return None
-    work_docx = WORD_CONTAINER_TMP / f"cv-preview-{digest}.docx"
-    work_pdf = work_docx.with_suffix(".pdf")
-    shutil.copyfile(source, work_docx)
-    try:
-        subprocess.run(
-            ["osascript", "-", str(work_docx), str(work_pdf), work_docx.name],
-            input=_WORD_TO_PDF,
-            text=True,
-            capture_output=True,
-            timeout=120,
-            check=False,
-        )
-        if not work_pdf.is_file():
+    with tempfile.TemporaryDirectory(prefix="cv-preview-") as tmp:
+        # A plain name: Quick Look names its output folder after the file.
+        work = Path(tmp) / "document.docx"
+        shutil.copyfile(source, work)
+        try:
+            subprocess.run(
+                [QUICK_LOOK, "-p", "-o", tmp, str(work)],
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
             return None
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        shutil.move(work_pdf, cached)
-        return cached
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    finally:
-        work_docx.unlink(missing_ok=True)
-        work_pdf.unlink(missing_ok=True)
+        bundle = Path(tmp) / "document.docx.qlpreview"
+        page = bundle / "Preview.html"
+        if not page.is_file():
+            return None
+        html = _inline_images(page.read_text(encoding="utf-8", errors="replace"), bundle)
+    html = html.replace("<head>", f"<head>{_PAPER}", 1)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cached.write_text(html, encoding="utf-8")
+    return cached
+
+
+def _inline_images(html: str, folder: Path) -> str:
+    """Images Quick Look writes beside the page, embedded so the page stands alone."""
+
+    def embed(match: re.Match[str]) -> str:
+        image = folder / match.group(1)
+        if not image.is_file() or image.parent != folder:
+            return match.group(0)
+        kind = match.group(2).lower()
+        data = base64.b64encode(image.read_bytes()).decode()
+        return f'src="data:image/{_IMAGE_TYPES.get(kind, kind)};base64,{data}"'
+
+    return _LOCAL_IMAGE.sub(embed, html)
 
 
 def _available_path(directory: Path, name: str) -> Path:

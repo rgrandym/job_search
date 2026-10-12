@@ -30,7 +30,7 @@ from docx.document import Document as DocxDocument
 from docx.shared import RGBColor
 from docx.text.paragraph import Paragraph
 
-from src.cv.models import Bullet, Experience, MasterCV, SkillGroup, SkillToConfirm
+from src.cv.models import Bullet, Experience, MasterCV, ReviewAddition, SkillGroup, SkillToConfirm
 from src.tools.docx_tools import (
     all_paragraphs,
     find_paragraph,
@@ -253,6 +253,7 @@ def write_like_original(
     role_skills: Sequence[str] = (),
     academic: bool = False,
     skills_to_confirm: Sequence[SkillToConfirm] = (),
+    review_additions: Sequence[ReviewAddition] = (),
 ) -> list[str]:
     """Save `tailored` as a copy of `original` (the Word file `source` was read from) at
     `out`; returns notes on anything kept as in the original. `headline_options` are written
@@ -280,6 +281,7 @@ def write_like_original(
     notes += _headline_options(headline, tailored.basics.headline, headline_options)
     notes += _role_skills_line(doc, role_skills)
     notes += _skills_to_confirm_line(doc, skills_to_confirm)
+    notes += _review_addition_lines(doc, blocks, review_additions)
     if academic:
         notes += academic_order(doc)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -380,6 +382,44 @@ def _skills_to_confirm_line(doc: DocxDocument, suggestions: Sequence[SkillToConf
     for run in paragraph.runs:
         run.font.color.rgb = REVIEW_RED
     return [] if lines else ["Skills to confirm placed at the end (no profile section found)"]
+
+
+def _review_addition_lines(
+    doc: DocxDocument,
+    blocks: dict[str, list[Paragraph]],
+    additions: Sequence[ReviewAddition],
+) -> list[str]:
+    """Place pending suggestions beside the role or profile, visibly marked in red."""
+    notes: list[str] = []
+    anchors: dict[str, Paragraph] = {}
+    for item in additions:
+        if item.status != "pending":
+            continue
+        label = (
+            "[CONFIRM EXPERIENCE BEFORE USE]"
+            if item.kind == "experience"
+            else "[CONFIRM SKILL BEFORE USE]"
+        )
+        text = f"{label} {item.text}"
+        if item.kind == "experience":
+            lines = blocks.get(item.role_id or "", [])
+            anchor = anchors.get(item.role_id or "") or next(
+                (line for line in reversed(lines) if line._p.getparent() is not None), None
+            )
+            if anchor is None:
+                paragraph = doc.add_paragraph(text)
+                notes.append(f"Review suggestion for {item.role_id} placed at the end")
+            else:
+                paragraph = insert_paragraph_after(anchor, text)
+                anchors[item.role_id or ""] = paragraph
+        else:
+            lines = profile_paragraphs(doc)
+            anchor = anchors.get("profile") or (lines[-1] if lines else None)
+            paragraph = insert_paragraph_after(anchor, text) if anchor else doc.add_paragraph(text)
+            anchors["profile"] = paragraph
+        for run in paragraph.runs:
+            run.font.color.rgb = REVIEW_RED
+    return notes
 
 
 def _section_kind(paragraph: Paragraph) -> str | None:

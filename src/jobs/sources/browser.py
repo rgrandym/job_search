@@ -1,4 +1,4 @@
-"""Full postings through the user's installed Chrome, headless and signed out.
+"""Full postings through headless Chrome, signed out and out of sight.
 
 The last way to read a shortlisted posting that is still too thin for the job_matcher to check
 its requirements: after the posting's own source and its page's JSON-LD (`pages.py`). Chrome
@@ -15,6 +15,11 @@ Rules (CLAUDE.md, "Job Sources"):
   left for the rest of the search, and the user can paste the description instead. No
   disguised identity, no proxies, no solving.
 - At most `browser_max_pages` pages per search; Stop kills a page that is loading.
+- **Silent (user's decision, 2026-10-12):** on macOS only Google's `chrome-headless-shell` is
+  used (from the Puppeteer or Playwright caches, or `chrome_path`). Starting the executable
+  inside "Google Chrome.app", even headless, makes Chrome's Dock icon bounce; the shell has no
+  app bundle and registers as a UI element, which macOS never shows in the Dock. Without a
+  shell this reader is skipped (`npx @puppeteer/browsers install chrome-headless-shell@stable`).
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -41,10 +47,12 @@ from src.jobs.sources.base import (
 )
 from src.jobs.sources.public_boards import linkedin_details
 
-CHROME_PATHS = (
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/usr/bin/google-chrome",
-    "/usr/bin/chromium",
+# Elsewhere a headless Chrome has no Dock to show in; on macOS only a headless shell is used.
+CHROME_PATHS = ("/usr/bin/google-chrome", "/usr/bin/chromium")
+HEADLESS_SHELLS = (  # where Puppeteer and Playwright keep Google's chrome-headless-shell
+    ".cache/puppeteer/chrome-headless-shell/*/chrome-headless-shell-*/chrome-headless-shell",
+    "Library/Caches/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-*/"
+    "chrome-headless-shell",
 )
 # Hosts whose robots.txt disallows every crawler; their postings are read slowly and capped.
 NO_ROBOTS_HOSTS = ("linkedin.com", "indeed.")
@@ -61,11 +69,34 @@ Runner = Callable[[list[str], float], str]
 
 
 def find_chrome(settings: Settings) -> str | None:
-    """The configured Chrome (`chrome_path`), else an installed Chrome or Chromium."""
-    if settings.chrome_path:
-        return settings.chrome_path if Path(settings.chrome_path).exists() else None
+    """The configured Chrome (`chrome_path`), else the newest chrome-headless-shell; outside
+    macOS also an installed Chrome or Chromium."""
+    return locate_chrome(settings.chrome_path, Path.home(), sys.platform)
+
+
+def locate_chrome(chrome_path: str | None, home: Path, platform: str) -> str | None:
+    """`find_chrome` for a given home folder and platform."""
+    if chrome_path:
+        return chrome_path if Path(chrome_path).exists() else None
+    shells = [p for pattern in HEADLESS_SHELLS for p in home.glob(pattern) if p.is_file()]
+    if shells:
+        return str(max(shells, key=_version))
+    if platform == "darwin":
+        return None  # never "Google Chrome.app": its Dock icon would bounce for every page
     found = next((p for p in CHROME_PATHS if Path(p).exists()), None)
     return found or shutil.which("google-chrome") or shutil.which("chromium")
+
+
+def _version(binary: Path) -> tuple[int, ...]:
+    """The shell's version ("Google Chrome for Testing 151.0.7922.34"), (0,) if unreadable."""
+    try:
+        out = subprocess.run(
+            [str(binary), "--version"], capture_output=True, text=True, timeout=10, check=False
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return (0,)
+    found = re.search(r"(\d+(?:\.\d+)+)", out)
+    return tuple(int(n) for n in found.group(1).split(".")) if found else (0,)
 
 
 def _run_chrome(cmd: list[str], timeout: float) -> str:
@@ -142,6 +173,8 @@ class BrowserFetcher:
             cmd = [
                 str(self.chrome), "--headless=new", "--disable-gpu", "--no-first-run",
                 "--no-default-browser-check", "--disable-extensions", f"--user-data-dir={profile}",
+                # never the macOS Keychain ("Chrome Safe Storage" prompts) for a throwaway profile
+                "--use-mock-keychain", "--password-store=basic", "--mute-audio",
                 f"--virtual-time-budget={self.settings.browser_wait_ms}", "--dump-dom", url,
             ]  # fmt: skip
             dom = self.run(cmd, self.settings.browser_timeout_s)

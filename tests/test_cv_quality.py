@@ -729,10 +729,10 @@ def test_a_cover_letter_can_be_viewed_and_opened_in_word(
     )
     saved = cover_letters.create(ws, job, letter, master_cv, "role", "classic", path)
     assert cover_letters.find_by_file(ws, path.name) == saved
-    rendered = settings.data_dir / "letter.pdf"
-    rendered.write_bytes(b"%PDF-1.7 letter rendered by Word")
+    rendered = settings.data_dir / "letter.html"
+    rendered.write_bytes(b"<html>letter page view</html>")
     seen: list[tuple[Path, str | None]] = []
-    monkeypatch.setattr(document_files, "word_pdf_preview", lambda source, cache: rendered)
+    monkeypatch.setattr(document_files, "html_preview", lambda source, cache: rendered)
     monkeypatch.setattr(
         document_files, "open_in_default_app", lambda p, app=None: seen.append((p, app)) or True
     )
@@ -740,12 +740,12 @@ def test_a_cover_letter_can_be_viewed_and_opened_in_word(
     client = TestClient(webapp.app)
     assert client.get("/api/cover-letters").json()[0]["job_id"] == "letter-job"  # shown on its card
     shown = client.get(f"/api/cover-letters/{saved.id}/preview")
-    assert shown.status_code == 200 and shown.content.startswith(b"%PDF")
+    assert shown.status_code == 200 and shown.content.startswith(b"<html>")
     assert shown.headers["content-disposition"].startswith("inline")
     assert client.post(f"/api/cover-letters/{saved.id}/open?app=word").json() == {"opened": True}
     assert seen == [(path, "Microsoft Word")]
     assert client.post("/api/cover-letters/unknown/open").status_code == 404
-    monkeypatch.setattr(document_files, "word_pdf_preview", lambda source, cache: None)
+    monkeypatch.setattr(document_files, "html_preview", lambda source, cache: None)
     missing = client.get(f"/api/cover-letters/{saved.id}/preview")
     assert missing.status_code == 422 and "Open in Word" in missing.json()["detail"]
 

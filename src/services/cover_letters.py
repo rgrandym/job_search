@@ -314,11 +314,11 @@ def export(ws: Workspace, document_id: str, format: Literal["docx", "txt"]) -> P
 
 
 def preview(ws: Workspace, document_id: str) -> Path:
-    """The letter's Word file as Microsoft Word lays it out (a PDF), like the CV viewer."""
+    """The letter's Word file as an HTML page view (Word itself is never started)."""
     path = export(ws, document_id, "docx")
-    rendered = document_files.word_pdf_preview(path, _directory(ws) / ".preview")
+    rendered = document_files.html_preview(path, _directory(ws) / ".preview")
     if rendered is None:
-        raise ValueError("Microsoft Word is needed to show this letter; use Open in Word")
+        raise ValueError("This letter cannot be shown here; use Download or Open in Word")
     return rendered
 
 

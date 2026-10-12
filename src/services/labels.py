@@ -1,9 +1,10 @@
 """Your own call on jobs ("would apply" / "maybe" / "no"): a labelled set to measure the models.
 
 Stored in `data/job_labels.json` (git-ignored, personal data). Labels record what you would
-have chosen, so the job_matcher's verdicts can be checked against it. A "no" also sets the
-posting aside in later searches (`said_no`), like N/A in `services.tracker`; its note, with the
-reasons on applied and N/A jobs, feeds the profile through `services.learning`.
+have chosen, so the job_matcher's verdicts can be checked against it. Any label means the job
+was reviewed, so it also sets the posting aside in later searches (`labelled`), like N/A in
+`services.tracker`; a note, with the reasons on applied and N/A jobs, feeds the profile through
+`services.learning`.
 
 One label per posting: the same job on another board or in a later search (same id, same
 link, or the same title at the same employer, as the tracker matches roles) shares the label.
@@ -184,14 +185,21 @@ class _Index:
             self.ids.get(job.id)
             or self.roles.get(tracker.role_id(job.title, job.company))
             or self.urls.get(_url(job.url) or "\0")
+            or next(
+                (
+                    x
+                    for x in self.roles.values()
+                    if tracker.same_role(x.job.title, x.job.company, job)
+                ),
+                None,
+            )
         )
 
 
-def said_no(ws: Workspace) -> Callable[[JobPosting], LabelledJob | None]:
-    """Finds a posting's "no" label (same id, link, or role), for searches to set it aside."""
-    store = load(ws)
-    index = _Index(LabelStore(labels=[x for x in store.labels if x.label == "no"]))
-    return index.find
+def labelled(ws: Workspace) -> Callable[[JobPosting], LabelledJob | None]:
+    """Finds a posting's label (same id, link, or role), for searches to set it aside: a
+    labelled job has been reviewed already."""
+    return _Index(load(ws)).find
 
 
 def _remember(

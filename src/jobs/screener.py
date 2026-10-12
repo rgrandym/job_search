@@ -24,6 +24,12 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from src.core.fit_rubric import (
+    CAP_SCORE,
+    UNCHECKED_CAP,
+    WEAK_DIMENSION_SHARE,
+    capped_score,
+)
 from src.core.llm.calls import call_group, cancel_group
 from src.core.llm.fallback import served_by
 from src.core.llm_provider import LLMError, LLMProvider
@@ -130,20 +136,9 @@ gaps cite specifics from the posting and the profile.
 - Be concise: fit_summary is one sentence; every list has at most 3 items (the most \
 important first), each a short clause of under 20 words. The scores carry the judgement."""
 
-# A total is capped here when any one dimension is below this share of its weight: keyword
-# density must not hide a real mismatch.
-CAP_SCORE = 65
-# A role missing a core requirement is never a match: its score is capped below the listing
-# floor (60) and `match` is false whatever the threshold. There is no point applying for a
-# role that needs what the CV does not show.
-UNMET_CAP = 55
-# A role whose requirements could not be read may still be listed, but never as a high scorer:
-# capped as a low stretch, under the checked matches, until its full posting is read.
-UNCHECKED_CAP = 62
 # Less posting text than this (and no structured requirements) cannot show the requirements:
 # alert listings and cards LinkedIn refused to open.
 CHECKABLE_CHARS = 600
-WEAK_DIMENSION_SHARE = 0.4
 # Scores this close to the threshold (either side) are flagged: different models, or the same
 # model on another run, typically differ by ~10 points, so these could fall either way.
 BORDERLINE_MARGIN = 5
@@ -202,16 +197,14 @@ def finalize(
     total = sum(min(dims[name], weight) for name, weight in FIT_WEIGHTS.items())
     weak = [n for n, w in FIT_WEIGHTS.items() if dims[n] < WEAK_DIMENSION_SHARE * w]
     unmet = bool(assessment.essential_unmet)
-    cap, cap_reason = total, None
+    cap_reason = None
     if unmet:
-        cap = UNMET_CAP
         cap_reason = "core requirement unmet: " + "; ".join(assessment.essential_unmet)
     elif not checked and total > UNCHECKED_CAP:
-        cap = UNCHECKED_CAP
         cap_reason = "requirements not checked: the full posting could not be read yet"
     elif total > CAP_SCORE and weak:
-        cap, cap_reason = CAP_SCORE, "weak on " + ", ".join(weak)
-    score = min(total, cap)
+        cap_reason = "weak on " + ", ".join(weak)
+    score = capped_score(dims, unmet=unmet, checked=checked)  # shared with the CV fit check
     blocked = bool(assessment.dealbreakers)
     eligible = not blocked and not unmet
     lists = ("reasons", "transferable", "gaps", "essential_unmet", "unknowns", "dealbreakers")

@@ -27,6 +27,7 @@ from src.cv.models import (
     CoverLetter,
     JDAnalysis,
     MasterCV,
+    SearchFitBaseline,
     TailoredCV,
     TailoredDocument,
     TailoringPlan,
@@ -298,14 +299,14 @@ def source_text(ws: Workspace) -> str | None:
 
 def preview_file(ws: Workspace, asset_id: str) -> Path:
     """A browser-viewable rendering of a CV's working copy (the stored file plus the user's and
-    the assistant's edits): the file itself, or Word's PDF of a .docx."""
+    the assistant's edits): the file itself, or an HTML page view of a .docx."""
     sync_copies(ws)
     source = working_copy(ws, asset_id)
     if source.suffix.lower() != ".docx":
         return source
-    preview = document_files.word_pdf_preview(source, _asset_dir(ws) / PREVIEW_DIRNAME)
+    preview = document_files.html_preview(source, _asset_dir(ws) / PREVIEW_DIRNAME)
     if preview is None:
-        raise ValueError("Microsoft Word is needed to show this Word file; use Open in Word")
+        raise ValueError("This Word file cannot be shown here; use Download or Open in Word")
     return preview
 
 
@@ -641,6 +642,7 @@ async def tailor_to_job(
     level: LevelEmphasis = "auto",
     length: LengthChoice = "auto",
     audience: Audience = "auto",
+    mode: Literal["standard", "optimised"] = "standard",
 ) -> tuple[TailoredCV, Path]:
     """Tailor the Master CV to `job` (steered by the job_matcher's verdict on it and the
     stored profile, then reviewed and revised), export it to .docx, check what an ATS reads
@@ -659,17 +661,36 @@ async def tailor_to_job(
     guidance = matcher_guidance(result.verdict if result is not None else None)
     profile = stored_profile(ws, result.family if result is not None else None)
     tailored = await asyncio.to_thread(
-        tailor, master_cv, text, llm, guidance, True, jd, emphasis, level, length, profile, audience
+        tailor,
+        master_cv,
+        text,
+        llm,
+        guidance,
+        True,
+        jd,
+        emphasis,
+        level,
+        length,
+        profile,
+        audience,
+        mode == "standard",
+        mode,
     )
     progress.step("Comparing how well each CV shows your fit for this job")
-    tailored = await asyncio.to_thread(_fit_check, master_cv, tailored, jd, text, llm)
+    search_fit = search_fit_baseline(result, ws.active_cv_id)
+    tailored = await asyncio.to_thread(_fit_check, master_cv, tailored, jd, text, llm, search_fit)
     progress.step("Writing the Word file in your CV's design")
     path = _new_output_path(ws, _file_stem(master_cv, job))
     tailored, template = _write_tailored(tailored, master_cv, original, path, template)
     progress.step("Checking what an ATS reads from the file")
     tailored = _with_ats(ws, tailored, master_cv, original, path)
     chosen = TailoringSettings(
-        template=template, emphasis=emphasis, level=level, length=length, audience=audience
+        template=template,
+        emphasis=emphasis,
+        level=level,
+        length=length,
+        audience=audience,
+        mode=mode,
     )
     document = tailored_documents.create(
         ws,
@@ -682,11 +703,29 @@ async def tailor_to_job(
         posting=job,
         original_file=original,
         settings=chosen,
+        search_fit=search_fit,
+        reviewed=not any(a.status == "pending" for a in tailored.review_additions),
     )
     tailored = document.tailored
     ws.tailored[job.id] = tailored
     tracker.remember_document_job(ws, job, cv_file=path.name)
     return tailored, path
+
+
+def search_fit_baseline(result: MatchResult | None, cv_id: str | None) -> SearchFitBaseline | None:
+    """The search verdict a tailored CV's scores are anchored to: one with ratings, judged
+    with the CV `cv_id` (a verdict from before verdicts named their CV is taken as it)."""
+    verdict = result.verdict if result is not None else None
+    if verdict is None or verdict.ratings is None:
+        return None
+    if verdict.cv_id is not None and verdict.cv_id != cv_id:
+        return None  # judged another CV (or none): its score is not this CV's
+    return SearchFitBaseline(
+        score=verdict.fit_score,
+        ratings=verdict.ratings.model_dump(),
+        cap_reason=verdict.cap_reason,
+        requirements_checked=verdict.requirements_checked,
+    )
 
 
 def _with_ats(
@@ -703,12 +742,17 @@ def _with_ats(
 
 
 def _fit_check(
-    source: MasterCV, tailored: TailoredCV, jd: JDAnalysis, text: str, llm: LLMProvider
+    source: MasterCV,
+    tailored: TailoredCV,
+    jd: JDAnalysis,
+    text: str,
+    llm: LLMProvider,
+    search_fit: SearchFitBaseline | None = None,
 ) -> TailoredCV:
     """The before/after reading; a failed check never costs the user the tailored CV."""
     try:
         return tailored.model_copy(
-            update={"fit_check": compare_fit(source, tailored, jd, text, llm)}
+            update={"fit_check": compare_fit(source, tailored, jd, text, llm, search_fit)}
         )
     except Exception as exc:  # noqa: BLE001 - the CV is written whatever the check's fate
         note = f"The before/after fit check could not run: {exc}"
@@ -808,6 +852,7 @@ def _write_tailored(
             tailored.role_skills,
             tailored.academic,
             tailored.skills_to_confirm,
+            tailored.review_additions,
         )
         notes.insert(0, f"Written in the design of {original.name}")
     elif template == tailored_documents.ORIGINAL:
@@ -901,7 +946,9 @@ async def write_cover_letter(
     """Export a guarded letter citing the selected CV or an explicitly linked tailored draft."""
     document = tailored_documents.load(ws, tailored_cv_id, job.id) if tailored_cv_id else None
     if document is not None and not document.reviewed:
-        raise ValueError("Review and save the imported CV before using it for a cover letter")
+        if document.imported:
+            raise ValueError("Review and save the imported CV before using it for a cover letter")
+        raise ValueError("Resolve the CV's red suggestions before using it for a cover letter")
     progress.step("Reading your CV", total=8)
     master_cv = (
         document.tailored.cv

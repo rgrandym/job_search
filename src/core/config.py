@@ -156,6 +156,7 @@ class Settings(BaseSettings):
         "screen meanwhile, so it can wait out LinkedIn's slow-downs)",
     )
     # Headless Chrome, signed out, for postings still too thin to check (sources/browser.py).
+    # It runs out of sight: a background-only process, no window, Dock icon or Keychain prompt.
     browser_enabled: bool = True
     chrome_path: str | None = Field(None, description="None: an installed Chrome or Chromium")
     browser_max_pages: int = Field(30, ge=0, description="Posting pages Chrome opens per search")

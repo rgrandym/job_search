@@ -10,7 +10,7 @@ Pipeline (`src/services/search_service.py::run_search`, shared by the UI, the AP
 ```
 filters ─▶ 1 capture ─▶ 1b set aside ─▶ 2 pre-filter ─▶ 3 enrich ─▶ 4 profile summary ─▶ 5 job_matcher ─▶ ranked true matches
            sources      applied / N/A /  deterministic    full text    saved or built      semantic verdict
-                        labelled no      (hard rules)     for short-   with quality;        per posting
+                        deleted/labelled (hard rules)     for short-   with quality;        per posting
                                                           list         remembered by CV
 ```
 
@@ -149,12 +149,14 @@ open full postings only for the shortlist, and wait (or stop) when a site asks t
 directories, Totaljobs and jobs.ac.uk stay within robots.txt; LinkedIn's public search does not
 check it (it disallows every crawler) but is slow and capped.
 
-## 1b. Set aside: already applied, N/A (`services/tracker.py`)
+## 1b. Set aside: already applied, N/A, deleted, labelled (`services/tracker.py`)
 
 `data/job_tracker.json` keeps one entry per role. Before the pre-filter, `tracker.set_aside`
-removes roles the user **applied** for (within `APPLIED_LOOKBACK_DAYS` = 365) and roles marked
-**N/A**: they cost no model calls and never take a ranked place. They are returned once in
-`MatchReport.applied` / `.dismissed` (UI tabs "Already applied" / "N/A") with the reason.
+removes roles the user **applied** for (within `APPLIED_LOOKBACK_DAYS` = 365), roles marked
+**N/A** and postings the user **deleted** from a search (`removed_at`): they cost no model calls
+and never take a ranked place. They are returned once in `MatchReport.applied` / `.dismissed`
+(UI tabs "Already applied" / "Set aside") with the reason. The employer may appear under another
+name (`search_tools.same_employer`: "IQVIA" = "Iqvia IES UK Limited").
 
 - Same role = same posting id or URL, or same employer (`company_key`) with the same title, or
   the same role words (`title_core`) at the same seniority. **Never skip on the employer
@@ -165,11 +167,15 @@ removes roles the user **applied** for (within `APPLIED_LOOKBACK_DAYS` = 365) an
   job (the user's rule: a tailored CV means applied; set it back to Open if not).
 - `tracker.annotate` gives every match and "not selected" job a status: **New** (first search it
   appears in) or **Open** (seen before), plus the user's **note**, which the app never rewrites.
-  Jobs only ever seen are forgotten after 180 days; applied / N/A entries are kept.
-- A job you **labelled "no"** (`labels.said_no`: same id, link or role) is set aside with N/A,
-  its note as the reason. *Delete* on a result card (`DELETE /api/results/{job_id}`) only
-  tidies the list: it drops the posting from the current report and its history entry, and
-  keeps its status, note and label.
+  Jobs only seen or deleted are forgotten 180 days after they were last seen or deleted, and
+  at most `MAX_SEEN` (5,000) are kept; applied / N/A entries are kept until the user clears
+  them (`tracker.clear_applied`: applications before a date; the register reminds them when
+  any is over six months old). The Gmail alert cache keeps at most 2,000 parsed emails.
+- A job you **labelled** yes, maybe or no (`labels.labelled`: same id, link or role) has been
+  reviewed already, so it is set aside with N/A, its label and note as the reason. *Delete* on
+  a result card (`DELETE /api/results/{job_id}`) drops the posting from the current report and
+  its history entry, keeps its status, note and label, and records `removed_at` in the tracker
+  so later searches set it aside.
 - `GET /api/tracker` (register), `POST /api/tracker` (manual application),
   `PUT|DELETE /api/tracker/{id}`, `PUT /api/jobs/{job_id}/tracking`.
 - **Outcomes:** an application records dated `stages` (screening, interview, final_round,
@@ -268,14 +274,20 @@ then the shortlist is re-scored (`search_service._enrich`):
 2. then, if still thin, the posting's own page (`sources/pages.PostingPages`): its schema.org
    JobPosting JSON-LD, **only where that host's robots.txt allows**, at most
    `page_max_details` (40) per search; LinkedIn and Indeed hosts are never read this way.
-3. then, if still thin and Chrome is installed, the page in **headless Chrome**
+3. then, if still thin and a headless Chrome is available, the page in **headless Chrome**
    (`sources/browser.BrowserFetcher`, `--dump-dom`): a fresh empty profile per page, signed
    out; robots.txt kept except for LinkedIn and Indeed postings; `browser_delay_s` (4 s)
    between pages on one host, at most `browser_max_pages` (30) per search; it reads the
    page's JSON-LD, LinkedIn's "About the job", Indeed's description, else the main text. A
    challenge or sign-in wall is never solved; after `browser_host_strikes` (3) of them that
    host is left for the search (paste the text instead).
-   `browser_enabled = false` turns it off.
+   It runs out of sight: on macOS only Google's `chrome-headless-shell` is used (the newest in
+   the Puppeteer or Playwright caches, or `chrome_path`), never "Google Chrome.app", whose Dock
+   icon bounces for every page even headless; without a shell this step is skipped
+   (`npx @puppeteer/browsers install chrome-headless-shell@stable` adds one). It never uses the
+   macOS Keychain (`--use-mock-keychain`). `browser_enabled = false` turns it off. Model calls
+   through the Claude Code CLI pass `--no-chrome`, so Claude in Chrome never starts the user's
+   Chrome either.
 Postings are opened in two lanes in parallel, LinkedIn and every other board, so LinkedIn's
 slower pace (and its waits after a 429) never hold the other boards back. Each posting opened
 is reported in the progress log ("LinkedIn: opening full posting 7/40 …", then how many were

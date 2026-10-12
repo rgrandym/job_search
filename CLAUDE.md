@@ -81,7 +81,7 @@ src/
                saved.py (saved jobs, data/saved_jobs.json; status from the tracker)
                cv_versions.py (a job's tailored CV versions read side by side against the originals)
                labels.py (your yes/maybe/no per job + snapshot, data/job_labels.json; measures models;
-               a "no" is set aside in later searches)
+               a labelled job is set aside in later searches: it was reviewed already)
                learning.py (preferences learned from labels and applied/N/A reasons; new reasons are
                added automatically at the start of a search, the user can remove any)
                model_compare.py (CLI: score model setups against your labels) · compare_usage.py
@@ -141,11 +141,16 @@ A CV is a factual document. Tailoring may rephrase and reorder. It may never inv
 - Every accept/reject is recorded in `TailoredCV.changes` with a reason. Surface rejections and
   `missing_keywords` to the user.
 - New facts go into the Master CV (after the user confirms them), never straight into a tailored CV.
-- The writer may put up to five unverified, posting-named techniques in a separate red Word
+- The writer may put up to five unverified techniques relevant to quoted posting work in a separate red Word
   line labelled "Skills to confirm before use (not yet claimed)". Each quotes actual CV
   background as the reason to ask. These suggestions stay outside confirmed CV facts,
   comparison readings, keyword coverage and cover-letter evidence. The user edits or removes
   them before applying; confirmed facts should be added to the Master CV.
+- The optional `optimised` tailoring mode also proposes red, role-placed experience or skills.
+  Each proposal quotes source-CV and posting text, is labelled CONFIRM BEFORE USE, and stays
+  outside the factual CV, fit score, ATS keyword coverage and letters. Confirming corrected
+  wording explicitly adds it to the selected source CV and a new Word version; deleting it
+  removes it. A draft with pending proposals is not reviewed for cover-letter use.
 - Cover letters (user's decision 2026-10-11): the same checks run on every paragraph, but a
   questioned paragraph is kept and flagged in red with its reason (`CoverLetter.flags`) for the
   user to edit or keep; a letter is never refused by a check.
@@ -185,9 +190,10 @@ Every tailored CV is written the same way (`tailor.apply_plan`, `cv/docx_origina
   for a higher one, never claim the level. Every plan maps the job's requirements to CV
   evidence (`check_requirements`); the job's wording goes only into bullets mapped to that
   requirement, and no rewrite adds ownership or scope (`claims.escalation`).
-- **Every tailored CV gets a before/after fit check** (`fit_check.compare_fit`, user's decision
-  2026-10-10): both CVs read blind for the job; it measures how clearly each shows the fit,
-  never the candidate's actual fit.
+- **Every tailored CV gets a before/after fit check** (`fit_check.compare_fit`): both CVs
+  read blind for the job. The saved search verdict is the original score when available;
+  verified changes in CV presentation adjust its five evidence dimensions with the search
+  weights. Practicality stays fixed. This measures presentation, not new experience.
 - Anything the Word writer cannot place safely is left as in the original and reported
   (`TailoredCV.document_notes`).
 Changing these rules means updating `tailor.py`, `docx_original.py`, `fit_check.py`, the
@@ -216,8 +222,12 @@ Personal job-search tool: public job pages may be read, within reason.
   shortlist). LinkedIn ignores robots.txt but is slow (`linkedin_delay_s`), capped
   (`linkedin_max_pages`, `linkedin_max_details`, `linkedin_max_search_requests`) and waits when asked to slow down (429/999, honouring Retry-After; `linkedin_cooldown_s`, at most `linkedin_max_cooldowns` per search) and only then gives up; the
   others stay within their robots.txt.
-- **Headless Chrome (user's decision, 2026-10-07):** a shortlisted posting still too thin to
-  check its requirements may be opened in the user's installed Chrome, headless, through
+- **Headless Chrome (user's decision, 2026-10-07; silent, 2026-10-12):** a shortlisted posting
+  still too thin to check its requirements may be opened in headless Chrome. On macOS that is
+  only Google's `chrome-headless-shell` (Puppeteer/Playwright caches or `chrome_path`), never
+  the "Google Chrome.app" executable, whose Dock icon bounces even when headless; no shell, no
+  Chrome reader. No Keychain (`--use-mock-keychain`), and `claude -p` calls pass `--no-chrome`.
+  It runs through
   `sources/browser.BrowserFetcher` only: a fresh empty profile per page (signed out, never the
   user's profile or cookies), robots.txt kept except for LinkedIn and Indeed postings (opened
   slowly, `browser_delay_s`), at most `browser_max_pages` per search, Stop kills it. A

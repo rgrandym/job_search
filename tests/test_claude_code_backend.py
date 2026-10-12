@@ -94,7 +94,10 @@ def test_status_when_cli_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     assert status["logged_in"] is False
 
 
-def test_command_is_headless_toolless_and_skips_haiku_effort() -> None:
+def test_command_is_headless_toolless_and_skips_haiku_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(backend, "no_chrome", lambda binary: ("--no-chrome",))
     cfg = _config()
     sonnet = backend._command("/bin/claude", cfg, "claude-sonnet-5-5", "sys", {"type": "object"})
     haiku = backend._command("/bin/claude", cfg, "claude-haiku-4-5", "sys", {"type": "object"})
@@ -106,6 +109,20 @@ def test_command_is_headless_toolless_and_skips_haiku_effort() -> None:
     assert "--strict-mcp-config" in sonnet
     assert sonnet[sonnet.index("--effort") + 1] == "medium"
     assert "--effort" not in haiku
+    assert "--no-chrome" in sonnet  # Claude in Chrome must never start the user's Chrome
+
+
+def test_no_chrome_is_passed_only_when_the_cli_knows_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    helps = {"/new/claude": "  --no-chrome  Disable Claude in Chrome", "/old/claude": "  -p"}
+
+    def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 0, helps[cmd[0]], "")
+
+    monkeypatch.setattr(backend.subprocess, "run", fake_run)
+    backend.no_chrome.cache_clear()
+    assert backend.no_chrome("/new/claude") == ("--no-chrome",)
+    assert backend.no_chrome("/old/claude") == ()
+    backend.no_chrome.cache_clear()
 
 
 def test_subprocess_env_drops_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:

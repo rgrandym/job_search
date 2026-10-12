@@ -115,9 +115,10 @@ UI filters ─▶ SearchQuery          career intent (services/intent, per CV)
               run before capture when companies are unchecked)
               · LinkedIn public search · Totaljobs · jobs.ac.uk · NHS Jobs
               · LinkedIn/Indeed alert emails & saved postings · demo           → JobPosting[]
-1b set aside  services/tracker: roles already applied for (12-month look-back) or marked N/A,
-              and services/labels: postings you labelled "no" (same id, link or role; the note
-              is the reason) leave here, before any scoring or model call
+1b set aside  services/tracker: roles already applied for (12-month look-back), marked N/A or
+              deleted from a search, and services/labels: postings you labelled (reviewed
+              already; same id, link or role; the label and note are the reason) leave here,
+              before any scoring or model call
               → report.applied / .dismissed
 2 pre-filter  scorer.hard_exclusions (closed, arrangement, location, salary floor, certs,
               undeclared essential languages; seniority only when the user sets a level range)

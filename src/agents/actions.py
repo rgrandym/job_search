@@ -184,6 +184,9 @@ class DocumentArgs(BaseModel):
         description="senior / junior: lean the presentation more or less senior (titles and "
         "facts unchanged); each choice makes another version to compare",
     )
+    mode: Literal["standard", "optimised"] = Field(
+        "standard", description="optimised: strongest evidenced CV plus red suggestions to review"
+    )
 
 
 @tool("tailor_cv", "Create a guarded, reviewed Word CV for a result or saved job.", DocumentArgs)
@@ -200,6 +203,7 @@ async def tailor_cv(args: DocumentArgs, ctx: AgentContext) -> dict[str, Any]:
         level=args.level,
         length=args.length,
         audience=args.audience,
+        mode=args.mode,
     )
     await ctx.emit("documents_updated", {"job_id": job.id})
     return {
@@ -211,6 +215,7 @@ async def tailor_cv(args: DocumentArgs, ctx: AgentContext) -> dict[str, Any]:
         "headline_options": tailored.headline_options,
         "trim": tailored.trim.model_dump() if tailored.trim else None,
         "document_notes": tailored.document_notes,
+        "review_additions": [a.model_dump() for a in tailored.review_additions],
         "rejections": [change.reason for change in tailored.changes if not change.accepted],
         "positioning": tailored.positioning.model_dump() if tailored.positioning else None,
         "gaps": [r.requirement for r in tailored.requirements if r.match == "not_evidenced"],

@@ -12,6 +12,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from src.core.fit_rubric import FIT_WEIGHTS as FIT_WEIGHTS
+from src.core.fit_rubric import points_for
 from src.cv.models import WorkArrangement
 from src.tools.search_tools import jaccard, mentions, parse_salary, shares_role_words, title_core
 
@@ -430,20 +432,8 @@ class FitDimensions(_Strict):
     )
 
 
-FIT_WEIGHTS: dict[str, int] = {
-    "function": 30,
-    "domain": 20,
-    "seniority": 20,
-    "leadership": 10,
-    "sector": 10,
-    "practicality": 10,
-}
-
-
 # Rank points a match loses when it goes against the career intent (its fit score is kept).
 ALIGNMENT_PENALTY = 10
-
-RATING_LEVELS = 4  # each dimension is rated 0..4; code converts levels to points
 
 
 class FitRatings(_Strict):
@@ -460,13 +450,7 @@ class FitRatings(_Strict):
 
 def rating_points(ratings: FitRatings) -> FitDimensions:
     """Points per dimension: level / 4 of its weight, rounded half up (30: 0, 8, 15, 23, 30)."""
-    levels = ratings.model_dump()
-    return FitDimensions(
-        **{
-            n: (levels[n] * w * 2 + RATING_LEVELS) // (2 * RATING_LEVELS)
-            for n, w in FIT_WEIGHTS.items()
-        }
-    )
+    return FitDimensions(**points_for(ratings.model_dump()))
 
 
 Alignment = Literal["against", "neutral", "aligned"]
@@ -541,6 +525,9 @@ class JobVerdict(_AssessmentText):
     )
     model: str = Field(
         "", description="provider:model that judged it (another plan's when its own was spent)"
+    )
+    cv_id: str | None = Field(
+        None, description="Library id of the CV it judged ('': no CV; None: older searches)"
     )
 
 
@@ -618,7 +605,7 @@ class MatchReport(_Strict):
     )
     dismissed: list[MatchResult] = Field(
         default_factory=list,
-        description="Marked N/A or labelled no by the user: set aside before screening",
+        description="Marked N/A, deleted or labelled by the user: set aside before screening",
     )
     not_retrieved: list[str] = Field(default_factory=list, description="Job ids cut at retrieval")
     screened: bool = Field(False, description="True if the job_matcher judged matches")

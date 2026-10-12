@@ -324,6 +324,17 @@ def company_key(name: str) -> str:
     return aliases.get(core, core) or " ".join(name.lower().split())
 
 
+def same_employer(a: str, b: str) -> bool:
+    """One employer under two names: equal `company_key`s, or one name's words leading the
+    other's ("IQVIA" = "Iqvia IES UK Limited", "Oxford Nanopore" = "... Technologies")."""
+    ka, kb = company_key(a).split(), company_key(b).split()
+    if not ka or not kb:
+        return False
+    short, long = sorted((ka, kb), key=len)
+    # "Orbit 2" is another organisation: only words (an entity or trade suffix) may follow
+    return long[: len(short)] == short and all(w.isalpha() for w in long[len(short) :])
+
+
 def posting_description(text: str) -> str:
     """Normalize presentation-only differences without discarding job requirements."""
     plain = re.sub(r"^\s*(?:job )?description[ \t]*(?::|[-–]|\n)\s*", "", text, flags=re.I)

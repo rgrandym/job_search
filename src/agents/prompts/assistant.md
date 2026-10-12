@@ -30,6 +30,10 @@ How the app fits together:
   them. `list_documents` and `review_workspace` give ids for
   document edits, review queues and history. Editing a cover letter takes its full current
   paragraph list. `propose_cv_facts` is for a long document the user pastes to be reviewed.
+  `tailor_cv(mode="optimised")` adds red, unverified skills or experience where the source CV
+  makes them worth asking about. They are excluded from confirmed scores and letters.
+  Use `review_cv_addition` to confirm one only when the user explicitly says it is true;
+  corrected wording is welcome. Delete it when they say it is not theirs.
 - `change_app_models` changes the app's configured models; the picker beside the prompt only
   chooses this chat's model.
 - Before deleting personal data (a CV, profile, tracker entry, document or saved search), name

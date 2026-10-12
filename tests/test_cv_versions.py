@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,6 +12,7 @@ from fastapi.testclient import TestClient
 from src.core.config import Settings
 from src.cv.fit_check import (
     NOISE_MARGIN,
+    anchored_score,
     best_version,
     consensus,
     read_versions,
@@ -27,14 +29,17 @@ from src.cv.models import (
     MetRequirement,
     RatedLine,
     RequirementEvidence,
+    ReviewAddition,
+    SearchFitBaseline,
     TailoredDocument,
     TailoringPlan,
     TailoringSettings,
     VersionReading,
 )
 from src.cv.tailor import apply_plan
-from src.jobs.models import JobPosting
-from src.services import cv_versions, tailored_documents
+from src.jobs.models import FitRatings, JobAssessment, JobPosting, MatchResult
+from src.jobs.screener import finalize
+from src.services import cv_service, cv_versions, tailored_documents
 from src.services.workspace import Workspace
 from tests.conftest import FakeLLM
 
@@ -311,7 +316,264 @@ def test_keyword_loss_alone_does_not_make_the_tailored_cv_worse() -> None:
     )
     judged, reason = verdict(tailored, original)
     assert judged == "same" and "Technology transfer" in reason
-    assert best_version([original, tailored], 2)[0] == tailored.id
+    best, summary = best_version([original, tailored], 2)
+    assert best is None and "No version shows a measurable improvement" in summary
+
+
+def test_search_score_is_the_exact_baseline_and_only_cv_dimensions_can_move_it() -> None:
+    original = FitReading(function=2, domain=3, seniority=3, leadership=2, sector=3)
+    improved = original.model_copy(update={"function": 3})
+    baseline = SearchFitBaseline(
+        score=89,
+        ratings={
+            "function": 3,
+            "domain": 4,
+            "seniority": 3,
+            "leadership": 3,
+            "sector": 4,
+            "practicality": 2,
+        },
+    )
+    assert anchored_score(baseline, original, original) == 89
+    assert anchored_score(baseline, original, improved) == 96
+    assert anchored_score(baseline, original, original.model_copy(update={"function": 1})) == 81
+    blocked = baseline.model_copy(update={"score": 55, "cap_reason": "core requirement unmet: GMP"})
+    assert anchored_score(blocked, original, improved) == 55
+
+
+def test_capped_search_scores_move_as_the_matcher_would_move_them() -> None:
+    original = FitReading(function=3, domain=3, seniority=3, leadership=3, sector=3)
+    weaker = original.model_copy(update={"function": 2})
+    # raw 79, capped at 65 for weak practicality: one level less on function is raw 71,
+    # which the matcher still caps at 65, so the version is not shown as worse.
+    weak = SearchFitBaseline(
+        score=65,
+        ratings={
+            "function": 3,
+            "domain": 4,
+            "seniority": 4,
+            "leadership": 3,
+            "sector": 3,
+            "practicality": 0,
+        },
+        cap_reason="weak on practicality",
+    )
+    assert anchored_score(weak, original, weaker) == 65
+    # an unread posting below its cap has no cap reason; the cap still applies upward
+    unread = SearchFitBaseline(
+        score=60,
+        ratings={
+            "function": 2,
+            "domain": 3,
+            "seniority": 3,
+            "leadership": 2,
+            "sector": 2,
+            "practicality": 2,
+        },
+        requirements_checked=False,
+    )
+    better = original.model_copy(update={"function": 4, "domain": 4})
+    assert anchored_score(unread, original, better) == 62
+
+
+def test_matcher_and_fit_check_share_one_capped_total() -> None:
+    from src.core.fit_rubric import capped_score, points_for
+
+    levels = {
+        "function": 3,
+        "domain": 3,
+        "seniority": 3,
+        "leadership": 3,
+        "sector": 3,
+        "practicality": 0,
+    }
+    assessment = JobAssessment(job_id="j", fit_summary="x", ratings=FitRatings(**levels))
+    assert finalize(assessment, threshold=60).fit_score == capped_score(points_for(levels)) == 65
+    unread = finalize(assessment, threshold=60, checked=False)
+    baseline = cv_service.search_fit_baseline(MatchResult(job=JOB, verdict=unread), "master")
+    assert baseline is not None and baseline.score == 62 and not baseline.requirements_checked
+
+
+def test_comparison_reuses_saved_search_score_for_the_source_cv(
+    ws: Workspace, master_cv: MasterCV, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    version = _version(ws, master_cv, TailoringSettings(), role_skills=["PyTorch"])
+    assessment = JobAssessment(
+        job_id=JOB.id,
+        fit_summary="Relevant ML work",
+        ratings=FitRatings(
+            function=3, domain=4, seniority=3, leadership=3, sector=4, practicality=2
+        ),
+    )
+    result = MatchResult(job=JOB, verdict=finalize(assessment, threshold=70))
+    monkeypatch.setattr(ws, "result", lambda _job_id: result)
+    comparison = asyncio.run(cv_versions.compare(ws, JOB.id, [version.id]))
+    original, tailored = comparison.readings
+    assert comparison.search_fit_score == result.verdict.fit_score  # type: ignore[union-attr]
+    assert original.score == comparison.search_fit_score
+    assert original.dimensions[-1].name == "practicality"
+    assert tailored.dimensions[-1].after == original.dimensions[-1].after == 2
+    assert tailored.score > original.score
+
+
+def test_a_verdict_for_another_cv_is_never_the_original_score(
+    ws: Workspace, master_cv: MasterCV, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    version = _version(ws, master_cv, TailoringSettings(), role_skills=["PyTorch"])
+    ratings = FitRatings(function=3, domain=4, seniority=3, leadership=3, sector=4, practicality=2)
+    judged = finalize(JobAssessment(job_id=JOB.id, fit_summary="x", ratings=ratings), 70)
+    other = judged.model_copy(update={"cv_id": "someone-else.docx"})
+    assert cv_service.search_fit_baseline(MatchResult(job=JOB, verdict=other), "master") is None
+    monkeypatch.setattr(ws, "result", lambda _id: MatchResult(job=JOB, verdict=other))
+    comparison = asyncio.run(cv_versions.compare(ws, JOB.id, [version.id]))
+    assert comparison.search_fit_score is None and "another CV" in comparison.search_fit_note
+    same = judged.model_copy(update={"cv_id": version.cv_id})
+    monkeypatch.setattr(ws, "result", lambda _id: MatchResult(job=JOB, verdict=same))
+    comparison = asyncio.run(cv_versions.compare(ws, JOB.id, [version.id]))
+    assert comparison.search_fit_score == same.fit_score and not comparison.search_fit_note
+
+
+def test_a_confirmed_suggestion_is_scored_against_the_cv_the_search_judged(
+    ws: Workspace, master_cv: MasterCV
+) -> None:
+    standard = _version(ws, master_cv, TailoringSettings())
+    optimised = _version(ws, master_cv, TailoringSettings(mode="optimised"))
+    baseline = SearchFitBaseline(
+        score=70,
+        ratings={"function": 3, "domain": 3, "seniority": 3,
+                 "leadership": 3, "sector": 3, "practicality": 3},
+    )  # fmt: skip
+    proposal = ReviewAddition(
+        id="skill1",
+        kind="skill",
+        text="Azure",
+        requirement="Azure deployment",
+        background_quote="Led migration of model training pipelines to Kubernetes",
+        job_quote="Azure deployment",
+        reason="Ask about hands-on use",
+    )
+    tailored = optimised.tailored.model_copy(update={"review_additions": [proposal]})
+    tailored_documents._save(
+        ws, optimised.model_copy(update={"tailored": tailored, "search_fit": baseline})
+    )
+    tailored_documents.review_addition(ws, optimised.id, "skill1", "confirm")
+    documents = [tailored_documents.load(ws, d.id) for d in (optimised, standard)]
+    _items, texts = cv_versions._entries(ws, documents, {}, None)
+    assert "Azure" not in texts[0] and "Azure" in texts[1]  # original: the CV as searched
+    comparison = asyncio.run(cv_versions.compare(ws, JOB.id, [standard.id, optimised.id]))
+    assert comparison.search_fit_score == 70  # the confirmation keeps the search anchor
+
+
+def test_review_additions_confirm_to_master_or_delete_without_counting_pending(
+    ws: Workspace, master_cv: MasterCV
+) -> None:
+    version = _version(ws, master_cv, TailoringSettings(mode="optimised"))
+    proposals = [
+        ReviewAddition(
+            id="skill1",
+            kind="skill",
+            text="Azure",
+            requirement="Azure deployment",
+            background_quote="Led migration of model training pipelines to Kubernetes",
+            job_quote="Azure deployment",
+            reason="Ask about hands-on use",
+        ),
+        ReviewAddition(
+            id="work1",
+            kind="experience",
+            role_id="nimbus",
+            text="Supported model handover",
+            requirement="model handover",
+            background_quote="Led migration of model training pipelines to Kubernetes",
+            job_quote="model handover",
+            reason="Ask about handover",
+        ),
+    ]
+    version = version.model_copy(
+        update={
+            "tailored": version.tailored.model_copy(update={"review_additions": proposals}),
+            "reviewed": False,
+        }
+    )
+    tailored_documents._save(ws, version)
+    from src.services import cv_service
+
+    with pytest.raises(ValueError, match="Resolve the CV's red suggestions"):
+        asyncio.run(cv_service.write_cover_letter(ws, JOB, tailored_cv_id=version.id))
+    confirmed = tailored_documents.review_addition(ws, version.id, "skill1", "confirm", "Azure")
+    assert not confirmed.reviewed
+    assert confirmed.search_fit == version.search_fit  # still the search score of the original
+    assert "Azure" in confirmed.source_cv.all_skills()
+    assert "Azure" not in tailored_documents.as_tailored(confirmed).all_skills()
+    assert "Azure" in ws.master_cv.all_skills()  # type: ignore[union-attr]
+    assert confirmed.tailored.fit_check is None
+    from src.cv.ats import check_docx
+
+    path = ws.output_dir / "cvs" / confirmed.filename
+    assert check_docx(path, confirmed.tailored.cv, ["Azure"]).keyword_coverage == 1
+    from src.web import app as webapp
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(webapp, "get_workspace", lambda: ws)
+        response = TestClient(webapp.app).put(
+            f"/api/tailored-cvs/{version.id}/additions/work1", json={"decision": "delete"}
+        )
+    assert response.status_code == 200
+    finished = tailored_documents.load(ws, version.id)
+    assert finished.reviewed
+    from docx import Document
+
+    lines = Document(ws.output_dir / "cvs" / finished.filename).paragraphs
+    assert not any("[CONFIRM " in p.text for p in lines)
+
+
+def test_confirmed_experience_is_added_to_source_and_tailored_cv(
+    ws: Workspace, master_cv: MasterCV
+) -> None:
+    version = _version(ws, master_cv, TailoringSettings(mode="optimised"))
+    proposal = ReviewAddition(
+        id="work2",
+        kind="experience",
+        role_id="nimbus",
+        text="Coordinated model handover",
+        requirement="model handover",
+        background_quote="Led migration of model training pipelines to Kubernetes",
+        job_quote="model handover",
+        reason="Confirm the scope",
+    )
+    version = version.model_copy(
+        update={
+            "tailored": version.tailored.model_copy(update={"review_additions": [proposal]}),
+            "reviewed": False,
+        }
+    )
+    tailored_documents._save(ws, version)
+    updated = tailored_documents.review_addition(
+        ws, version.id, proposal.id, "confirm", "Coordinated model handover with platform teams"
+    )
+    assert updated.reviewed
+    assert any("Coordinated model handover" in b.text for b in ws.master_cv.bullet_index().values())  # type: ignore[union-attr]
+    assert any(
+        "Coordinated model handover" in b.text for b in updated.tailored.cv.bullet_index().values()
+    )
+
+
+def test_confirmed_skill_is_written_into_selected_word_cv(
+    settings: Settings, master_cv: MasterCV, tmp_path: Path
+) -> None:
+    from docx import Document
+
+    from src.cv.docx_exporter import export_docx
+    from src.services import cv_document, cv_service
+
+    ws = Workspace(settings)
+    original = export_docx(master_cv, tmp_path / "source.docx")
+    asset = cv_service.store_cv(ws, "source.docx", original.read_bytes())
+    cv_service.select_cv(ws, asset.id)
+    result = cv_document.sync_confirmed_skill(ws, "Azure")
+    assert result.written == ["Additional confirmed skill: Azure"]
+    path = cv_service.source_file(ws, asset.id)
+    assert any("Additional confirmed skill: Azure" in p.text for p in Document(path).paragraphs)
 
 
 def test_key_requirements_are_read_before_long_desirable_lists(master_cv: MasterCV) -> None:

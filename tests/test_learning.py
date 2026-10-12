@@ -176,19 +176,19 @@ def test_comparison_can_apply_your_learned_preferences() -> None:
     assert prompts and rule in prompts[0]
 
 
-def test_a_no_label_sets_the_job_aside_in_later_searches(
-    ws: Workspace, master_cv: MasterCV
-) -> None:
+def test_any_label_sets_the_job_aside_in_later_searches(ws: Workspace, master_cv: MasterCV) -> None:
     from src.services import search_service
 
     _labelled(ws, master_cv)
     again = [
         JobPosting(id="n1-again", title="Postdoctoral Researcher", company="Acme Bio"),
+        JobPosting(id="y1-again", title="Head of Partnerships", company="Acme Bio Ltd"),
         JobPosting(id="fresh", title="Head of Partnerships", company="Beta"),
     ]
     keep, applied, dismissed = asyncio.run(search_service._set_aside(ws, again, _quiet))
     assert [j.id for j in keep] == ["fresh"] and applied == []
     assert dismissed[0].exclusion_reasons == ["you labelled it no: too junior"]
+    assert dismissed[1].exclusion_reasons[0].startswith("you labelled it yes: business")
 
 
 async def _quiet(kind: str, payload: dict[str, object]) -> None:
