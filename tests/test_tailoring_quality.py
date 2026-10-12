@@ -267,11 +267,11 @@ def test_optimised_review_additions_are_anchored_red_and_excluded_from_fit(
         assert check_docx(target, tailored.cv, ["Azure"]).keyword_coverage == 0
 
 
-def test_optimised_mode_uses_focused_proposal_pass(master_cv: MasterCV) -> None:
+def test_optimised_mode_writes_one_guarded_plan_with_review_questions(master_cv: MasterCV) -> None:
     job_text = "Lead Azure deployment pipelines and model handover."
-    raw = AdditionCandidates.model_validate(
+    plan = TailoringPlan.model_validate(
         {
-            "items": [
+            "review_candidates": [
                 {
                     "kind": "skill",
                     "text": "Azure",
@@ -283,18 +283,46 @@ def test_optimised_mode_uses_focused_proposal_pass(master_cv: MasterCV) -> None:
             ]
         }
     )
-    llm = FakeLLM({TailoringPlan: TailoringPlan(), AdditionCandidates: raw})
+    llm = FakeLLM({TailoringPlan: plan})
     out = tailor(
         master_cv,
         job_text,
         llm,
         jd=JDAnalysis(job_title="ML lead", hard_skills=["Azure"]),
+        guidance="Gap: no hands-on Azure delivery",
         review=False,
         mode="optimised",
     )
     assert [item.text for item in out.review_additions] == ["Azure"]
     assert "<optimised_draft>" in llm.calls[0][0]
-    assert [model for _, model in llm.calls] == [TailoringPlan, AdditionCandidates]
+    assert "<match_assessment>\nGap: no hands-on Azure delivery" in llm.calls[0][0]
+    assert [model for _, model in llm.calls] == [TailoringPlan]
+
+
+def test_optimised_mode_revises_once_only_when_factual_check_rejects(
+    master_cv: MasterCV,
+) -> None:
+    drafts = iter(
+        [
+            TailoringPlan(
+                rewritten_bullets=[
+                    RewrittenBullet(
+                        source_id="nimbus-3",
+                        text=(
+                            "Managed 5 engineers and introduced code review standards "
+                            "for ML code."
+                        ),
+                    )
+                ]
+            ),
+            TailoringPlan(),
+        ]
+    )
+    llm = FakeLLM({TailoringPlan: lambda _prompt: next(drafts)})
+    out = tailor(master_cv, "ML engineering leadership", llm, jd=JD, mode="optimised")
+    assert out.cv.bullet_index()["nimbus-3"].text == master_cv.bullet_index()["nimbus-3"].text
+    assert [model for _, model in llm.calls] == [TailoringPlan, TailoringPlan]
+    assert "<guard_feedback>" in llm.calls[1][0]
 
 
 def test_focused_suggestion_can_link_an_implied_technique_to_the_job(
@@ -652,3 +680,23 @@ def test_rewritten_bullet_model_still_matches(master_cv: MasterCV) -> None:
     out = apply_plan(master_cv, plan, JD)
     assert out.changes[0].accepted and out.positioning is None and out.requirements == []
     assert Positioning(thesis="x").differentiators == []
+
+
+def test_proposal_pass_is_given_essential_gaps_first(master_cv: MasterCV) -> None:
+    def row(requirement: str, priority: str, importance: str, match: str) -> RequirementEvidence:
+        return RequirementEvidence.model_validate(
+            {"requirement": requirement, "priority": priority, "importance": importance,
+             "match": match}
+        )  # fmt: skip
+
+    tailored = apply_plan(master_cv, TailoringPlan(), JD)
+    tailored.requirements = [
+        row("Pivotal desirable", "desirable", "key", "adjacent"),
+        row("Routine desirable", "desirable", "supporting", "not_evidenced"),
+        row("Essential knock-out", "essential", "supporting", "not_evidenced"),
+        row("Shown essential", "essential", "key", "direct"),
+    ]
+    llm = FakeLLM({AdditionCandidates: AdditionCandidates()})
+    propose_review_additions(master_cv, tailored, JD, "job text", llm)
+    gaps = llm.calls[0][0].split("<gaps>\n")[1].split("\n</gaps>")[0].splitlines()
+    assert [g.split(" (")[0] for g in gaps] == ["- Essential knock-out", "- Pivotal desirable"]

@@ -204,9 +204,12 @@ def record_claude_reading(kind: str, percent_used: float, resets_at: float | Non
         return
     with _lock:
         win = dict(_claude.get(kind) or {})
+        previous_reset = win.get("resetsAt")
         win["utilization"] = max(0.0, min(float(percent_used), 100.0)) / 100  # a fraction
         if resets_at:
             win["resetsAt"] = resets_at
+            if previous_reset and resets_at > float(previous_reset) + 60:
+                win["status"] = "allowed"  # the rejected window has reset
         win.setdefault("status", "allowed")
         _claude[kind] = win
         _claude["observed_at"] = time.time()
@@ -229,10 +232,10 @@ def claude_windows(now: float | None = None) -> UsageWindows:
         if resets and float(resets) < now:
             util, status = 0.0, "allowed"  # reset since it was observed
         used = None
-        if util is not None:
+        if status == "rejected":
+            used = 100.0  # a refused call is decisive even if /usage still reports a lower share
+        elif util is not None:
             used = round(float(util) * (100 if float(util) <= 1 else 1), 1)
-        elif status == "rejected":
-            used = 100.0
         windows.append(
             UsageWindow(
                 name=name,

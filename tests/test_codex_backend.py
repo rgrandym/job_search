@@ -106,6 +106,14 @@ def test_strict_schema_preserves_field_names_and_makes_defaults_nullable() -> No
     }
 
 
+def test_strict_schema_removes_ref_siblings() -> None:
+    from src.cv.models import EvidencedReadings
+
+    schema = backend.strict_schema(EvidencedReadings.model_json_schema())
+    reading = schema["$defs"]["EvidencedReading"]
+    assert reading["properties"]["function"] == {"$ref": "#/$defs/RatedLine"}
+
+
 def test_codex_structured_validates_cli_output(monkeypatch: pytest.MonkeyPatch) -> None:
     class Answer(BaseModel):
         value: str

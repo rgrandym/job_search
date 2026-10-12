@@ -147,8 +147,14 @@ A CV is a factual document. Tailoring may rephrase and reorder. It may never inv
   comparison readings, keyword coverage and cover-letter evidence. The user edits or removes
   them before applying; confirmed facts should be added to the Master CV.
 - The optional `optimised` tailoring mode also proposes red, role-placed experience or skills.
+  Its writer plans the factual CV and the red questions in one model call. Code checks the
+  proposed wording; only rejected wording can trigger one revision. There is no separate
+  model critique or suggestion pass, and the request saves one Word version.
   Each proposal quotes source-CV and posting text, is labelled CONFIRM BEFORE USE, and stays
-  outside the factual CV, fit score, ATS keyword coverage and letters. Confirming corrected
+  outside the factual CV, fit score, ATS keyword coverage and letters. The fit check reads
+  the draft a second time with them in place, in the same pass, and reports that separately
+  as hypothetical (`ProjectedFit`: score, requirements each proposal shows, job terms it adds)
+  so the user sees which proposals are worth confirming (user's decision 2026-10-12). Confirming corrected
   wording explicitly adds it to the selected source CV and a new Word version; deleting it
   removes it. A draft with pending proposals is not reviewed for cover-letter use.
 - Cover letters (user's decision 2026-10-11): the same checks run on every paragraph, but a

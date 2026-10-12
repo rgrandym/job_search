@@ -14,6 +14,7 @@ from src.cv.fit_check import (
     NOISE_MARGIN,
     anchored_score,
     best_version,
+    compare_fit,
     consensus,
     read_versions,
     requirements_for,
@@ -24,6 +25,7 @@ from src.cv.models import (
     EvidencedReading,
     EvidencedReadings,
     FitReading,
+    FitReadout,
     JDAnalysis,
     MasterCV,
     MetRequirement,
@@ -36,7 +38,7 @@ from src.cv.models import (
     TailoringSettings,
     VersionReading,
 )
-from src.cv.tailor import apply_plan
+from src.cv.tailor import apply_plan, printed_text
 from src.jobs.models import FitRatings, JobAssessment, JobPosting, MatchResult
 from src.jobs.screener import finalize
 from src.services import cv_service, cv_versions, tailored_documents
@@ -594,3 +596,103 @@ def test_key_requirements_are_read_before_long_desirable_lists(master_cv: Master
     )
     tailored = apply_plan(master_cv, TailoringPlan(requirements=rows), JD)
     assert requirements_for(tailored, JD)[0] == "Core process development"
+
+
+HANDOVER = ReviewAddition(
+    id="work1",
+    kind="experience",
+    role_id="nimbus",
+    text="Supported Azure deployment and model handover",
+    requirement="Python",
+    background_quote="Led migration of model training pipelines to Kubernetes",
+    job_quote="model handover",
+    reason="Ask about the actual contribution",
+)
+
+
+def _proposal_reader(prompt: str) -> EvidencedReadings:
+    """Reads strong only with the proposal in place, and quotes it for requirement 2."""
+    out = []
+    for _, text in CV_BLOCK.findall(prompt):
+        line = next(ln for ln in text.splitlines() if len(ln.split()) >= 2)
+        if HANDOVER.text in text:
+            out.append(
+                EvidencedReading(
+                    **{n: RatedLine(rating=r, quote=line) for n, r in STRONG_RATINGS.items()},
+                    requirements_met=[
+                        MetRequirement(number=1, quote=line),
+                        MetRequirement(number=2, quote=HANDOVER.text),
+                    ],
+                    impression="hands-on deployment",
+                )
+            )
+        else:
+            out.append(_evidenced(text, WEAK_RATINGS, [1], "generic"))
+    return EvidencedReadings(readings=out)
+
+
+def test_pending_proposals_are_scored_separately_as_if_confirmed(master_cv: MasterCV) -> None:
+    tailored = apply_plan(master_cv, TailoringPlan(), JD)
+    tailored.review_additions = [HANDOVER]
+    llm = FakeLLM({EvidencedReadings: _proposal_reader})
+    check = compare_fit(master_cv, tailored, JD, "MLOps and Python", llm)
+    assert len(llm.calls) == 1
+    assert HANDOVER.text not in printed_text(tailored)  # the factual draft is unchanged
+    assert check.after == check.before and check.requirements_after == 1
+    projection = check.if_confirmed
+    assert projection is not None and projection.proposals == 1
+    assert projection.confirmed == check.after < projection.projected
+    assert (projection.requirements_confirmed, projection.requirements_projected) == (1, 2)
+    assert [(g.requirement, g.addition_id) for g in projection.gained] == [("Python", "work1")]
+    assert projection.no_effect == [] and projection.lost == []
+    assert projection.keywords_added == ["Azure"]  # searchable only with the proposal
+    assert projection.keywords_confirmed < projection.keywords_projected
+    function = next(d for d in projection.dimensions if d.name == "function")
+    assert (function.before, function.after) == (2, 4)
+
+
+def test_without_pending_proposals_there_is_no_projection(master_cv: MasterCV) -> None:
+    tailored = apply_plan(master_cv, TailoringPlan(), JD)
+    tailored.review_additions = [HANDOVER.model_copy(update={"status": "deleted"})]
+    plain = FitReading(**WEAK_RATINGS)
+    llm = FakeLLM({FitReadout: FitReadout(first=plain, second=plain)})
+    assert compare_fit(master_cv, tailored, JD, "MLOps and Python", llm).if_confirmed is None
+
+
+def test_comparison_reads_an_optimised_version_with_its_proposals_in_place(
+    ws: Workspace, master_cv: MasterCV, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    llm = FakeLLM({EvidencedReadings: _proposal_reader})
+    monkeypatch.setattr(ws, "structured", lambda *_args, **_kw: llm)
+    standard = _version(ws, master_cv, TailoringSettings())
+    optimised = _version(ws, master_cv, TailoringSettings(mode="optimised"))
+    tailored = optimised.tailored.model_copy(update={"review_additions": [HANDOVER]})
+    tailored_documents._save(ws, optimised.model_copy(update={"tailored": tailored}))
+    comparison = asyncio.run(cv_versions.compare(ws, JOB.id, []))
+    by_id = {r.id: r for r in comparison.readings}
+    assert len(comparison.readings) == 3  # the projection is not a version of its own
+    assert by_id[standard.id].if_confirmed is None
+    mine = by_id[optimised.id]
+    assert mine.score == by_id[standard.id].score  # its own score stays factual
+    assert mine.if_confirmed is not None
+    assert mine.if_confirmed.confirmed == mine.score < mine.if_confirmed.projected
+    assert [g.addition_id for g in mine.if_confirmed.gained] == ["work1"]
+
+
+def test_comparison_projects_changes_when_all_cv_slots_are_used(
+    ws: Workspace, master_cv: MasterCV, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    llm = FakeLLM({EvidencedReadings: _proposal_reader})
+    monkeypatch.setattr(ws, "structured", lambda *_args, **_kw: llm)
+    for _ in range(4):
+        _version(ws, master_cv, TailoringSettings())
+    optimised = _version(ws, master_cv, TailoringSettings(mode="optimised"))
+    tailored = optimised.tailored.model_copy(update={"review_additions": [HANDOVER]})
+    tailored_documents._save(ws, optimised.model_copy(update={"tailored": tailored}))
+
+    comparison = asyncio.run(cv_versions.compare(ws, JOB.id, []))
+
+    assert len(comparison.readings) == cv_versions.MAX_VERSIONS
+    mine = next(r for r in comparison.readings if r.id == optimised.id)
+    assert mine.if_confirmed is not None
+    assert mine.if_confirmed.confirmed == mine.score < mine.if_confirmed.projected

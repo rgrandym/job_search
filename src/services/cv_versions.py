@@ -5,7 +5,9 @@ versions and one original from the CV library (the Master CV, else the selected 
 the user picks another), read by one blind reader in one call (`fit_check.score_versions`),
 then saved per job so the report opens again without a model call. A CV deleted from the
 library is never read as the original. Each CV's reading is remembered (`readings.json`, keyed
-by `fit_check.reading_key`), so comparing the same CVs again gives the same scores.
+by `fit_check.reading_key`), so comparing the same CVs again gives the same scores. An
+optimised version with pending proposals is also read with them in place
+(`VersionReading.if_confirmed`, hypothetical), in further batches when needed.
 labels(documents): "V1 · Automatic", "V2 · Level: senior" ...
 """
 
@@ -26,10 +28,13 @@ from src.cv.fit_check import (
     NOISE_MARGIN,
     READS,
     best_version,
+    project,
     read_versions,
     reading_key,
     requirements_for,
     score_versions,
+    with_keywords,
+    with_proposals,
 )
 from src.cv.models import (
     DimensionChange,
@@ -52,7 +57,7 @@ SETTING_LABELS = {
     "audience": {"industry": "Industry", "academic": "Academic"},
     "template": {"classic": "Classic design", "modern": "Modern design", "compact": "Compact"},
 }
-METHOD_VERSION = 5
+METHOD_VERSION = 7
 
 
 def _describe(document: TailoredDocument) -> str:
@@ -272,6 +277,21 @@ def _entries(
     return items, texts
 
 
+def _projections(
+    documents: list[TailoredDocument],
+) -> tuple[list[tuple[int, TailoredDocument]], list[str]]:
+    """(item index, document) for each version read again with its pending proposals in
+    place, and their texts."""
+    chosen: list[tuple[int, TailoredDocument]] = []
+    texts: list[str] = []
+    for index, document in enumerate(documents, start=1):
+        proposed = with_proposals(document.tailored)
+        if proposed is not None:
+            chosen.append((index, document))
+            texts.append(printed_text(proposed))
+    return chosen, texts
+
+
 def _oldest(documents: list[TailoredDocument]) -> TailoredDocument | None:
     return min(documents, key=lambda d: d.created_at, default=None)
 
@@ -329,11 +349,28 @@ async def compare(
     progress.step(f"Reading {len(items)} CVs side by side for this job")
     llm = ws.structured("cv", usage_sink, "CV version comparison")
     jd_text = _job_text(lead)
-    keys = [reading_key(t, requirements, jd_text, _reader(ws)) for t in texts]
+    projected, extra = _projections(documents)
+    first_extra = extra[: MAX_VERSIONS - len(texts)]
+    every = texts + first_extra
+    keys = [reading_key(t, requirements, jd_text, _reader(ws)) for t in every]
     known = _known(ws, keys)  # CVs read before for this job: same scores, no re-roll
-    fit = await asyncio.to_thread(read_versions, texts, requirements, jd_text, llm, known)
+    fit = await asyncio.to_thread(read_versions, every, requirements, jd_text, llm, known)
     _remember(ws, keys, fit)
-    readings = score_versions(items, texts, fit, requirements, keywords, search_fit)
+    readings = score_versions(items, texts, fit[: len(texts)], requirements, keywords, search_fit)
+    projected_readings = fit[len(texts) :]
+    for start in range(len(first_extra), len(extra), MAX_VERSIONS - 1):
+        batch = [texts[0], *extra[start : start + MAX_VERSIONS - 1]]
+        batch_keys = [reading_key(t, requirements, jd_text, _reader(ws)) for t in batch]
+        batch_fit = await asyncio.to_thread(
+            read_versions, batch, requirements, jd_text, llm, _known(ws, batch_keys)
+        )
+        _remember(ws, batch_keys, batch_fit)
+        projected_readings.extend(batch_fit[1:])
+    for (index, document), reading, text in zip(projected, projected_readings, extra, strict=True):
+        pending = [a for a in document.tailored.review_additions if a.status == "pending"]
+        outlook = project(fit[0], fit[index], reading, pending, requirements, search_fit)
+        outlook = with_keywords(outlook, keywords, texts[index], text)
+        readings[index] = readings[index].model_copy(update={"if_confirmed": outlook})
     progress.step("Ranking the versions")
     best_id, summary = best_version(readings, len(requirements))
     comparison = VersionComparison(

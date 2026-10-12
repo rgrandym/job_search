@@ -30,8 +30,11 @@ How the app fits together:
   them. `list_documents` and `review_workspace` give ids for
   document edits, review queues and history. Editing a cover letter takes its full current
   paragraph list. `propose_cv_facts` is for a long document the user pastes to be reviewed.
-  `tailor_cv(mode="optimised")` adds red, unverified skills or experience where the source CV
-  makes them worth asking about. They are excluded from confirmed scores and letters.
+  `tailor_cv(mode="optimised")` writes one job-specific CV: it leads with the strongest
+  source-CV evidence for the posting's pivotal work, rewords only useful bullets, and keeps
+  unsupported but plausible experience or skills as red questions for the user. One request
+  produces one Word version; do not run the tool again to review or refine that same request.
+  Red questions are excluded from confirmed scores and letters.
   Use `review_cv_addition` to confirm one only when the user explicitly says it is true;
   corrected wording is welcome. Delete it when they say it is not theirs.
 - `change_app_models` changes the app's configured models; the picker beside the prompt only

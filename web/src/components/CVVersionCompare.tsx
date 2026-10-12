@@ -2,9 +2,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowDown, ArrowUp, Check, Download, Loader2, Minus, Scale, Trophy } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { api } from "../lib/api";
-import type { AreaChange, SettingEffect, TailoredCVView, VersionComparison, VersionReading } from "../lib/types";
+import type { AreaChange, FitComparison, SettingEffect, TailoredCVView, VersionComparison, VersionReading } from "../lib/types";
 import { cn, scoreColor } from "../lib/utils";
 import { TaskError, TaskProgress, useTaskId } from "./TaskProgress";
+import { IfConfirmed } from "./TailorInsights";
 import { Modal } from "./ui";
 
 const MAX_CVS = 6; // backend fit_check.MAX_VERSIONS, originals included
@@ -76,15 +77,20 @@ function rows(c: VersionComparison): Row[] {
   ];
 }
 
-function ScoreTable({ comparison, downloads, onPick }: {
+function ScoreTable({ comparison, downloads, draftChecks, sourceMismatch, onPick }: {
   comparison: VersionComparison;
   downloads: Record<string, string>;
+  draftChecks: Record<string, FitComparison>;
+  sourceMismatch: boolean;
   onPick?: (id: string) => void;
 }) {
   const { readings } = comparison;
   const byId = Object.fromEntries(readings.map((r) => [r.id, r]));
   const ranked = [...readings].sort((a, b) => b.score - a.score);
   const rank = (r: VersionReading) => ranked.findIndex((x) => x.score === r.score) + 1;
+  const hasProposals = readings.some((r) => r.if_confirmed);
+  const hasDraftChecks = readings.some((r) => draftChecks[r.id]);
+  const potentialTop = Math.max(...readings.map((r) => r.if_confirmed?.projected ?? r.score));
   return (
     <div className="overflow-x-auto scroll-thin">
       <table className="w-full min-w-[560px] border-collapse text-[12px]">
@@ -95,7 +101,7 @@ function ScoreTable({ comparison, downloads, onPick }: {
               <th key={r.id} className={cn("p-2 text-left font-normal", r.id === comparison.best_id && "bg-accent-bg")}>
                 <div className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-faint">
                   {r.kind === "original" ? "Original" : "Tailored"}
-                  {r.id === comparison.best_id && <span className="flex items-center gap-0.5 text-accent"><Trophy size={10} /> best</span>}
+                  {!sourceMismatch && r.id === comparison.best_id && <span className="flex items-center gap-0.5 text-accent"><Trophy size={10} /> best</span>}
                 </div>
                 <div className="font-semibold text-fg">{r.label}</div>
                 {r.created_at && <div className="text-[11px] text-faint">{when(r.created_at)}</div>}
@@ -108,8 +114,8 @@ function ScoreTable({ comparison, downloads, onPick }: {
           </tr>
         </thead>
         <tbody>
-          <tr className="border-t border-border">
-            <td className="p-2 font-medium" title="Original search score plus weighted changes in the five CV evidence dimensions; practicality stays fixed">Job fit shown /100</td>
+          {!sourceMismatch && <tr className="border-t border-border">
+            <td className="p-2 font-medium" title="Three blind readings of the selected CVs for this job; the median counts">Side-by-side score /100</td>
             {readings.map((r) => {
               const base = r.baseline_id ? byId[r.baseline_id] : undefined;
               return (
@@ -120,15 +126,51 @@ function ScoreTable({ comparison, downloads, onPick }: {
                 </td>
               );
             })}
-          </tr>
+          </tr>}
+          {!sourceMismatch && hasProposals && (
+            <tr className="border-t border-border bg-surface/50">
+              <td className="p-2 font-medium" title="Three-read estimate if every pending red proposal in that draft is confirmed as written">Side-by-side if confirmed /100</td>
+              {readings.map((r) => {
+                const base = r.baseline_id ? byId[r.baseline_id] : undefined;
+                const score = r.if_confirmed?.projected ?? r.score;
+                return (
+                  <td key={r.id} className={cn("p-2", score === potentialTop && "bg-accent-bg")}>
+                    <span className="text-[18px] font-semibold tabular-nums" style={{ color: scoreColor(score) }}>{score}</span>
+                    {base && <Delta value={score} base={base.score} text="" />}
+                    {r.if_confirmed && <span className="ml-1 text-[11px] text-warn">hypothetical</span>}
+                  </td>
+                );
+              })}
+            </tr>
+          )}
+          {hasDraftChecks && (
+            <tr className="border-t border-border align-top">
+              <td className="p-2 font-medium" title="Each draft's fit check against the source CV it was made from">{sourceMismatch ? "Own original → draft → if confirmed" : "Job card's saved check"}</td>
+              {readings.map((r) => {
+                const check = draftChecks[r.id];
+                return (
+                  <td key={r.id} className="p-2 tabular-nums">
+                    {check ? (
+                      <>
+                        <div>{sourceMismatch && `Original ${check.before} → `}Draft {check.after}/100 <Delta value={check.after} base={check.before} text="" /></div>
+                        {check.if_confirmed && (
+                          <div className="text-warn">If confirmed {check.if_confirmed.projected}/100 <Delta value={check.if_confirmed.projected} base={check.before} text="" /></div>
+                        )}
+                      </>
+                    ) : <span className="text-faint">—</span>}
+                  </td>
+                );
+              })}
+            </tr>
+          )}
           {rows(comparison).map((row) => {
             const top = row.best ? Math.max(...readings.map(row.best)) : null;
             return (
               <tr key={row.label} className="border-t border-border">
                 <td className="p-2 text-muted" title={row.hint}>{row.label}</td>
                 {readings.map((r) => (
-                  <td key={r.id} className={cn("p-2 tabular-nums", r.id === comparison.best_id && "bg-accent-bg", row.best && readings.length > 1 && row.best(r) === top && "font-semibold")}>
-                    {row.cell(r, r.baseline_id ? byId[r.baseline_id] : undefined)}
+                  <td key={r.id} className={cn("p-2 tabular-nums", !sourceMismatch && r.id === comparison.best_id && "bg-accent-bg", row.best && readings.length > 1 && row.best(r) === top && "font-semibold")}>
+                    {row.cell(r, !sourceMismatch && r.baseline_id ? byId[r.baseline_id] : undefined)}
                   </td>
                 ))}
               </tr>
@@ -170,6 +212,7 @@ function Changes({ reading, original }: { reading: VersionReading; original?: Ve
         {verdict && <span className={cn("ml-2 font-medium", verdict.tone)}>{verdict.title}</span>}
       </p>
       {reading.verdict_reason && <p className="mb-1 text-[11px] text-muted">{reading.verdict_reason}</p>}
+      {reading.if_confirmed && <div className="mb-2"><IfConfirmed projection={reading.if_confirmed} /></div>}
       <p className="mb-2 text-[11px] text-faint">
         {reading.rewritten} line{reading.rewritten === 1 ? "" : "s"} reworded · {reading.rejected_changes} rewrite
         {reading.rejected_changes === 1 ? "" : "s"} rejected by the guards · {reading.left_out} left out
@@ -266,35 +309,66 @@ function Grid({ title, items, has, readings, open, quote }: {
   );
 }
 
-function Report({ comparison, downloads, onPick }: {
+function Report({ comparison, downloads, draftChecks, sourceMismatch, onPick }: {
   comparison: VersionComparison;
   downloads: Record<string, string>;
+  draftChecks: Record<string, FitComparison>;
+  sourceMismatch: boolean;
   onPick?: (id: string) => void;
 }) {
   const byId = Object.fromEntries(comparison.readings.map((r) => [r.id, r]));
   const tailored = comparison.readings.filter((r) => r.kind === "tailored");
+  const original = comparison.readings.find((r) => r.kind === "original");
+  const projected = tailored.filter((r) => r.if_confirmed);
+  const differing = tailored.filter((r) => {
+    const check = draftChecks[r.id];
+    return check && (check.after !== r.score || check.if_confirmed?.projected !== r.if_confirmed?.projected);
+  });
+  const potentialTop = Math.max(...comparison.readings.map((r) => r.if_confirmed?.projected ?? r.score));
+  const potentialLeaders = comparison.readings.filter((r) => (r.if_confirmed?.projected ?? r.score) === potentialTop);
   return (
     <div className="space-y-3">
-      <div className="flex items-start gap-2 rounded-md bg-accent-bg p-3 text-[13px]">
+      {!sourceMismatch && <div className="flex items-start gap-2 rounded-md bg-accent-bg p-3 text-[13px]">
         <Trophy size={16} className="mt-0.5 shrink-0 text-accent" />
         <div>
           <p className="text-fg">{comparison.summary}</p>
           <p className="mt-0.5 text-[11px] text-faint">Read {when(comparison.created_at)}</p>
         </div>
-      </div>
-      <p className="text-[11px] text-muted">
+      </div>}
+      {sourceMismatch ? (
+        <p className="rounded-md border border-warn/40 p-3 text-[12px] text-muted">
+          <span className="font-medium text-warn">A selected version came from a different CV than the chosen original.</span>{" "}
+          The scores below use each job card's own original CV: original → saved draft → hypothetical result if its red proposals are confirmed.
+          The side-by-side reader still compares the CV text and requirements, but its score and ranking are omitted because one shared original and search score do not apply.
+        </p>
+      ) : <p className="text-[11px] text-muted">
         {comparison.search_fit_score == null
           ? `${comparison.search_fit_note || "No saved search verdict was available for this job."} Scores use the search weights with neutral practicality, the same for every version.`
           : `Original ${comparison.search_fit_score}/100 is the saved search score. Tailored scores apply changes in CV evidence to that score using the same dimension weights. Location and working pattern stay fixed.`}
-      </p>
-      <ScoreTable comparison={comparison} downloads={downloads} onPick={onPick} />
-      {tailored.length > 0 && (
+      </p>}
+      {!sourceMismatch && differing.length > 0 && (
+        <p className="rounded-md border border-border p-2 text-[12px] text-muted">
+          The saved job card check and this comparison gave different estimates for {differing.map((r) => r.label).join(", ")}.
+          The card used one reading when each draft was made; this comparison uses the median of three readings and one shared requirement list.
+          Both results appear below so you can see the difference.
+        </p>
+      )}
+      {!sourceMismatch && projected.length > 0 && original && (
+        <p className="rounded-md border border-warn/40 p-2 text-[12px] text-muted">
+          <span className="font-medium text-warn">In the side-by-side reading, with proposed changes applied:</span>{" "}
+          {potentialLeaders.map((r) => r.label).join(" and ")} {potentialLeaders.length === 1 ? "scores" : "score"} highest at {potentialTop}/100
+          {" "}(original {original.score}/100, {potentialTop - original.score >= 0 ? "+" : ""}{potentialTop - original.score}).
+          <span className="text-faint"> Scores that include red proposals are hypothetical until they are confirmed and saved.</span>
+        </p>
+      )}
+      <ScoreTable comparison={comparison} downloads={downloads} draftChecks={draftChecks} sourceMismatch={sourceMismatch} onPick={onPick} />
+      {!sourceMismatch && tailored.length > 0 && (
         <div className="space-y-2">
           <p className="text-[12px] font-medium">What each version changed</p>
           {tailored.map((r) => <Changes key={r.id} reading={r} original={r.baseline_id ? byId[r.baseline_id] : undefined} />)}
         </div>
       )}
-      <SettingEffects effects={comparison.setting_effects ?? []} />
+      {!sourceMismatch && <SettingEffects effects={comparison.setting_effects ?? []} />}
       <Grid title="Job requirements shown" items={comparison.requirements} readings={comparison.readings}
         has={(r, i) => r.requirements_shown.includes(i + 1)} open
         quote={(r, i) => r.requirement_quotes?.[String(i + 1)]} />
@@ -304,9 +378,8 @@ function Report({ comparison, downloads, onPick }: {
         Every CV was read {comparison.reads > 1 ? `${comparison.reads} times` : "once"} by the same recruiter model, in a
         different order each time and without being told which is the original; the median rating counts. A requirement
         or a rating above 1 counts only when the reader quoted a line that is really in that CV (hover a tick to see it).
-        Differences under {comparison.margin || 5} points are treated as the same. Readings are kept, so comparing the
-        same CVs again gives the same result. Your facts are the same in every version; the scores measure how clearly
-        each CV shows them for this job, not your actual fit.
+        Readings are kept, so comparing the same CVs again gives the same result.
+        {!sourceMismatch && ` Differences under ${comparison.margin || 5} points are treated as the same. The scores measure how clearly each CV shows your fit for this job, not your actual fit.`}
       </p>
     </div>
   );
@@ -342,8 +415,17 @@ export function CVVersionCompare({ open, onClose, jobId, versions, onPick }: {
     onSuccess: (data) => qc.setQueryData(["cv-comparison", jobId], { comparison: data, stale: false }),
   });
   const total = chosen.length + 1; // the one original
-  const comparison = run.data ?? (saved.data?.stale ? null : saved.data?.comparison) ?? null;
+  const comparison = (saved.data?.stale ? null : saved.data?.comparison) ?? null;
+  const needsUpdate = !!saved.data?.stale;
+  const canCompare = chosen.length > 0 && !!baseline && total <= MAX_CVS && !run.isPending;
   const downloads = Object.fromEntries(versions.map((v) => [v.id, v.download_url]));
+  const draftChecks = Object.fromEntries(versions.flatMap((v) => v.report?.fit_check ? [[v.id, v.report.fit_check] as const] : []));
+  const sourceById = Object.fromEntries(versions.map((v) => [v.id, v.cv_id]));
+  const originalId = comparison?.readings.find((r) => r.kind === "original")?.id.replace(/^original:/, "");
+  const sourceMismatch = !!comparison && comparison.readings.some((r) =>
+    r.kind === "tailored" && !!sourceById[r.id] && sourceById[r.id] !== originalId,
+  );
+  const chosenMismatch = chosen.some((id) => !!sourceById[id] && sourceById[id] !== baseline);
   const toggle = (id: string) => setChosen((c) => (c.includes(id) ? c.filter((x) => x !== id) : [...c, id]));
   return (
     <Modal open={open} onClose={onClose} title="Compare CV versions" id="cv-version-compare" resizable>
@@ -379,10 +461,17 @@ export function CVVersionCompare({ open, onClose, jobId, versions, onPick }: {
               </label>
             ))}
           </div>
+          {chosenMismatch && (
+            <p className="mt-2 text-[11px] text-warn">
+              At least one selected version was made from a different CV than the chosen original.
+              Select versions from the same source CV and choose that CV as the original for a shared search score.
+              Otherwise the report shows each job card's own before, draft and projected scores.
+            </p>
+          )}
           <div className="mt-2 flex flex-wrap items-center gap-2">
-            <button className="btn-primary py-1 text-[12px]" disabled={!chosen.length || !baseline || total > MAX_CVS || run.isPending} onClick={() => run.mutate()}>
+            <button className="btn-primary py-1 text-[12px]" disabled={!canCompare} onClick={() => run.mutate()}>
               {run.isPending ? <Loader2 size={12} className="animate-spin" /> : <Scale size={12} />}
-              {comparison ? "Compare again" : "Compare"} {chosen.length} version{chosen.length === 1 ? "" : "s"} with the original
+              {needsUpdate ? "Recalculate comparison" : comparison ? "Compare again" : "Compare"} {chosen.length} version{chosen.length === 1 ? "" : "s"} with the original
             </button>
             <span className={cn("text-[11px]", total > MAX_CVS ? "text-bad" : "text-faint")}>
               {total > MAX_CVS ? `At most ${MAX_CVS} CVs in one reading, the original included` : "Three reads with the CV model; CVs read before keep their scores (no call)"}
@@ -393,13 +482,19 @@ export function CVVersionCompare({ open, onClose, jobId, versions, onPick }: {
         </div>
         {saved.isPending && <p className="text-[12px] text-muted">Loading the last comparison…</p>}
         {saved.error && <p className="text-[12px] text-bad">{(saved.error as Error).message}</p>}
-        {!run.data && saved.data?.stale && (
-          <p className="text-[12px] text-warn">The saved report uses an older comparison method. Select Compare to recalculate it.</p>
+        {needsUpdate && (
+          <div className="flex flex-wrap items-center gap-2 rounded-md border border-warn/40 p-3 text-[12px]">
+            <p className="text-warn">This saved comparison needs updating to show current CV versions and projected scores.</p>
+            <button className="btn-primary py-1 text-[12px]" disabled={!canCompare} onClick={() => run.mutate()}>
+              {run.isPending ? <Loader2 size={12} className="animate-spin" /> : <Scale size={12} />}
+              Recalculate comparison
+            </button>
+          </div>
         )}
         {comparison ? (
-          <Report comparison={comparison} downloads={downloads} onPick={onPick && ((id) => { onPick(id); onClose(); })} />
+          <Report comparison={comparison} downloads={downloads} draftChecks={draftChecks} sourceMismatch={sourceMismatch} onPick={onPick && ((id) => { onPick(id); onClose(); })} />
         ) : (
-          !saved.isPending && !saved.error && <p className="text-[12px] text-faint">No comparison yet for this job.</p>
+          !saved.isPending && !saved.error && !needsUpdate && <p className="text-[12px] text-faint">No comparison yet for this job.</p>
         )}
       </div>
     </Modal>

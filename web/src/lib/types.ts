@@ -588,6 +588,36 @@ export interface Positioning {
 
 export type FitDimension = "function" | "domain" | "seniority" | "leadership" | "sector" | "practicality";
 
+/** A requirement the draft shows only with its proposals in place (backend `ProposalGain`). */
+export interface ProposalGain {
+  requirement: string;
+  /** The proposal whose wording the reader quoted; null: another line of the CV. */
+  addition_id: string | null;
+  quote: string;
+}
+
+/** An optimised draft read again with its pending proposals in place, in the same pass.
+ * Hypothetical: what confirming them would show (backend `ProjectedFit`). */
+export interface ProjectedFit {
+  confirmed: number;
+  projected: number;
+  proposals: number;
+  /** before = the draft as it is, after = with the proposals. */
+  dimensions: { name: FitDimension; before: number; after: number }[];
+  requirements_total: number;
+  requirements_confirmed: number;
+  requirements_projected: number;
+  gained: ProposalGain[];
+  lost: string[];
+  /** Proposal ids behind no newly shown requirement. */
+  no_effect: string[];
+  keywords_confirmed: number;
+  keywords_projected: number;
+  /** Job terms only the proposals name: what an ATS or recruiter search would now find. */
+  keywords_added: string[];
+  impression: string;
+}
+
 /** The original and the tailored CV read for the same job (backend `FitComparison`). */
 export interface FitComparison {
   before: number;
@@ -604,6 +634,7 @@ export interface FitComparison {
   impression_before: string;
   impression_after: string;
   worse: string[];
+  if_confirmed?: ProjectedFit | null;
 }
 
 export type Audience = "auto" | "industry" | "academic";
@@ -657,6 +688,7 @@ export interface VersionReading {
   /** Against its original, by fixed margins ("" for an original). */
   verdict: "better" | "worse" | "mixed" | "same" | "";
   verdict_reason: string;
+  if_confirmed?: ProjectedFit | null;
 }
 
 /** Two versions that differ in one setting only: what that setting changed (backend `SettingEffect`). */

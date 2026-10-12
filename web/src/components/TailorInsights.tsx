@@ -1,4 +1,4 @@
-import type { FitComparison, MatchClass, Positioning, RequirementEvidence } from "../lib/types";
+import type { FitComparison, MatchClass, Positioning, ProjectedFit, RequirementEvidence } from "../lib/types";
 import { cn } from "../lib/utils";
 
 const DIMENSION_LABEL: Record<string, string> = {
@@ -37,6 +37,50 @@ export function FitCheckSummary({ check }: { check: FitComparison | null | undef
         </>
       )}
     </span>
+  );
+}
+
+/** An optimised draft's pending proposals: what confirming them would show, and which
+ * proposal shows each newly met requirement. Hypothetical, never the draft's own score. */
+export function IfConfirmed({ projection, labels }: { projection: ProjectedFit; labels?: Record<string, string> }) {
+  const p = projection;
+  const moved = p.dimensions.filter((d) => d.before !== d.after);
+  const silent = p.no_effect.map((id) => labels?.[id] ?? id);
+  return (
+    <div className="basis-full space-y-0.5 rounded border border-warn/40 p-2 text-[11px]" title="The same blind reader read this draft as it is and with every pending proposal in place, in one pass. The proposals are not confirmed facts.">
+      <p className="text-muted">
+        <span className="font-medium text-warn">If you confirm the {p.proposals} red proposal{p.proposals === 1 ? "" : "s"} (hypothetical): </span>
+        <Change before={p.confirmed} after={p.projected} text={`${p.confirmed} → ${p.projected}`} />/100
+        {p.requirements_total > 0 && (
+          <>
+            {" · requirements shown "}
+            <Change before={p.requirements_confirmed} after={p.requirements_projected} text={`${p.requirements_confirmed} → ${p.requirements_projected} of ${p.requirements_total}`} />
+          </>
+        )}
+        {moved.map((d) => (
+          <span key={d.name} className="text-faint">
+            {" · "}{DIMENSION_LABEL[d.name] ?? d.name} <Change before={d.before} after={d.after} />
+          </span>
+        ))}
+      </p>
+      {p.gained.map((g) => (
+        <p key={g.requirement} className="text-good">
+          + {g.requirement}
+          <span className="text-faint">{g.addition_id ? ` ← ${labels?.[g.addition_id] ?? "proposal"}: “${g.quote}”` : " (shown by another line)"}</span>
+        </p>
+      ))}
+      {p.lost.map((r) => (
+        <p key={r} className="text-warn">− {r} <span className="text-faint">(no longer read as shown)</span></p>
+      ))}
+      {p.gained.length === 0 && p.lost.length === 0 && <p className="text-faint">No requirement is newly shown with the proposals in place.</p>}
+      {p.keywords_added.length > 0 && (
+        <p className="text-muted">
+          Job keywords <Change before={p.keywords_confirmed} after={p.keywords_projected} text={`${pct(p.keywords_confirmed)} → ${pct(p.keywords_projected)}`} />
+          <span className="text-faint">, found by ATS search only with the proposals: {p.keywords_added.join(", ")}</span>
+        </p>
+      )}
+      {silent.length > 0 && p.gained.length > 0 && <p className="text-faint">No requirement credited to: {silent.join("; ")}</p>}
+    </div>
   );
 }
 

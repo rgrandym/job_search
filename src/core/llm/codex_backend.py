@@ -248,6 +248,10 @@ def strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
 
     def node(n: dict[str, Any]) -> dict[str, Any]:
         out = {k: v for k, v in n.items() if k not in _STRIP}
+        # OpenAI's strict schema rejects siblings of $ref (Pydantic adds
+        # descriptions to references used by fields such as RatedLine).
+        if "$ref" in out:
+            return {"$ref": out["$ref"]}
         if "$defs" in out:
             out["$defs"] = {name: node(d) for name, d in out["$defs"].items()}
         if isinstance(out.get("items"), dict):

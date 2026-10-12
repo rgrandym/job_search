@@ -299,6 +299,11 @@ class TailoringPlan(_Strict):
         description="At most five job techniques plausibly used but absent from the CV; "
         "shown in red for review, never treated as confirmed experience",
     )
+    review_candidates: list[AdditionCandidate] = Field(
+        default_factory=list,
+        description="Optimised mode only: plausible missing experience or skills to ask the user "
+        "to confirm, never included in the factual CV",
+    )
 
     @field_validator("bullet_order", mode="before")
     @classmethod
@@ -453,6 +458,45 @@ class DimensionChange(_Strict):
     after: int = Field(ge=0, le=4)
 
 
+class ProposalGain(_Strict):
+    """A requirement the draft shows only with the proposals in place."""
+
+    requirement: str
+    addition_id: str | None = Field(
+        None, description="The proposal whose wording the reader quoted; None: another line"
+    )
+    quote: str = Field("", description="The line the reader quoted for it (checked)")
+
+
+class ProjectedFit(_Strict):
+    """The draft read again with every pending proposal in place, beside the draft as it is,
+    in the same blind pass. Hypothetical: the proposals are not confirmed facts, so this
+    shows what confirming them would change and never replaces the draft's own score."""
+
+    confirmed: int = Field(ge=0, le=100, description="The draft as it is, read in this pass")
+    projected: int = Field(ge=0, le=100, description="With every pending proposal in place")
+    proposals: int = Field(0, description="Pending proposals placed in the reading")
+    dimensions: list[DimensionChange] = Field(
+        default_factory=list, description="before = the draft as it is, after = with proposals"
+    )
+    requirements_total: int = 0
+    requirements_confirmed: int = 0
+    requirements_projected: int = 0
+    gained: list[ProposalGain] = Field(default_factory=list)
+    lost: list[str] = Field(
+        default_factory=list, description="Requirements shown only without them (reader noise)"
+    )
+    no_effect: list[str] = Field(
+        default_factory=list, description="Proposal ids behind no newly shown requirement"
+    )
+    keywords_confirmed: float = Field(0, ge=0, le=1, description="Job terms the draft names")
+    keywords_projected: float = Field(0, ge=0, le=1, description="With the proposals in place")
+    keywords_added: list[str] = Field(
+        default_factory=list, description="Job terms only the proposals name (ATS search)"
+    )
+    impression: str = ""
+
+
 class FitComparison(_Strict):
     """How clearly the tailored CV shows the fit, against the CV it was made from. The
     candidate's actual fit is the same (same facts); this measures what a reader sees."""
@@ -471,6 +515,9 @@ class FitComparison(_Strict):
     impression_before: str = ""
     impression_after: str = ""
     worse: list[str] = Field(default_factory=list, description="Where the tailored CV reads worse")
+    if_confirmed: ProjectedFit | None = Field(
+        None, description="Optimised draft: the same reading with its pending proposals in place"
+    )
 
 
 class TailoredCV(_Strict):
@@ -576,6 +623,9 @@ class VersionReading(_Strict):
         "", description="Against its original, by fixed margins ('' for an original)"
     )
     verdict_reason: str = ""
+    if_confirmed: ProjectedFit | None = Field(
+        None, description="Optimised draft: read again with its pending proposals in place"
+    )
 
 
 class SettingEffect(_Strict):

@@ -12,7 +12,7 @@ Turns a factual **Master CV** into job-specific, ATS-optimised CVs and exports t
 | `master_cv_schema.json` | JSON Schema of the Master CV. **Generated** from `src/cv/models.py::MasterCV`. Never hand-edit. |
 | `docx_templates.py` | CLI to render a CV JSON to `.docx` with a named template. |
 | `src/cv/master_cv_manager.py` | load / save / validate / import / merge-patch the Master CV |
-| `src/cv/tailor.py` | JD analysis → tailoring plan (LLM: requirement map, positioning, wording) → guarded application (deterministic) → review → one revision |
+| `src/cv/tailor.py` | JD analysis → tailoring plan (LLM: requirement map, positioning, wording) → guarded application (deterministic); standard mode has a review and at most one revision, optimised mode revises only rejected wording |
 | `src/cv/fit_check.py` | Before/after: the original and the tailored CV read for the job (`compare_fit`); several versions side by side (`score_versions`) |
 | `src/cv/claims.py` | Shared wording checks: stock superlatives, added ownership or scope (`escalation`) |
 | `src/cv/cover_letter.py` | Cover-letter draft (LLM) → guarded paragraphs (deterministic) → hiring-manager review → one guarded redraft |
@@ -159,14 +159,27 @@ These hold for every tailored CV (user's decision; mandatory):
 ## 3a. Rewrite bullets as STAR accomplishments, without hallucinating
 
 **Optimised draft mode (`mode="optimised"`).** The same guarded plan leads with the few
-pivotal job capabilities and strongest evidenced outcomes. A focused model call then proposes
-up to eight plausible omissions: a routine skill, or an experience sentence attached to an
-existing role where its background quote appears in a bullet. Every proposal also quotes the
+pivotal job capabilities and strongest evidenced outcomes, and answers with confirmed facts the
+doubts a hiring manager would have (setting, level, ownership, recency). In that same model
+call, `review_candidates` proposes up to five plausible omissions, ordered by how much they
+would change the interview decision, inferred from what each role's documented work routinely
+involves: an experience
+bullet attached to an existing role where its background quote appears (setting and partners,
+the contribution the role makes plausible), or a skill the job depends on. Wording uses the
+posting's terms where accurate, but never trades accuracy for a keyword; each `reason` names
+the doubt it settles. Every proposal also quotes the
 posting, carries the relevant requirement and a reason, and is checked against both texts.
+The factual guards can trigger one focused model revision of rejected wording. Optimised mode
+does not call a separate critic or suggestion model, and each request saves one Word version.
 It remains separate from `TailoredCV.cv` and prints in red with `[CONFIRM ... BEFORE USE]`.
 The user reviews each in the app: delete, or edit and explicitly confirm. Confirmation adds
 the corrected fact to the selected source CV and produces a new Word version; pending text
-never contributes to scores, keyword coverage, or cover letters. The standard mode retains
+never contributes to the draft's own score, keyword coverage, or cover letters. The fit
+check (and the version comparison) reads the draft again with every pending proposal in place,
+in the same blind pass, and reports it apart as hypothetical (`FitComparison.if_confirmed`,
+`VersionReading.if_confirmed`: `fit_check.with_proposals`, `project`, `with_keywords`): the
+score and requirements with the proposals, each newly shown requirement credited to the
+proposal the reader quoted, and the job terms only the proposals name. The standard mode retains
 the existing small red skills line.
 
 `tailor.propose_plan(..., steer) -> TailoringPlan`, then `tailor.apply_plan(...)` enforces
@@ -259,6 +272,8 @@ order notes and up to 3 recruiter notes (does the top say why this candidate fit
 differentiators show; is the case for another function or level credible). If it finds any,
 `revise_plan` produces one revised plan, which passes `apply_plan` again; the points are kept
 in `TailoredCV.critique`. No issues: no revision call.
+This separate review applies to standard mode. In optimised mode, code checks the first plan
+and asks for one correction only if wording was rejected; no extra model critique runs.
 
 Each tailored Word export also saves its structured draft under `data/tailored_cvs/`. The job
 card's **Cover letter / review CV** panel loads these drafts after a restart. Users can edit

@@ -10,7 +10,7 @@ import { CVVersionCompare } from "./CVVersionCompare";
 import { TaskError, TaskProgress, useTaskId } from "./TaskProgress";
 import { CVViewButton, LetterViewButton } from "./LetterDocument";
 import { TailoredCVPanel } from "./TailoredCVPanel";
-import { FitCheckDetails, FitCheckSummary, PositioningDetails } from "./TailorInsights";
+import { FitCheckDetails, FitCheckSummary, IfConfirmed, PositioningDetails } from "./TailorInsights";
 
 const METRICS = [
   ["title", "Title & level"],
@@ -765,6 +765,12 @@ export function JobCard({
             </span>
           )}
           <FitCheckSummary check={report.fit_check} />
+          {report.fit_check?.if_confirmed && (
+            <IfConfirmed
+              projection={report.fit_check.if_confirmed}
+              labels={Object.fromEntries((report.review_additions ?? []).map((a) => [a.id, a.text.length > 70 ? `${a.text.slice(0, 70)}…` : a.text]))}
+            />
+          )}
           <span className="text-muted">Word keyword coverage {report.source_ats_keyword_coverage == null ? "" : `${Math.round(report.source_ats_keyword_coverage * 100)}% original → `}{Math.round((report.ats?.keyword_coverage ?? report.keyword_coverage) * 100)}% tailored · review the wording and claims</span>
           <button
             className="ml-auto flex items-center gap-1 text-muted hover:text-fg"

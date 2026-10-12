@@ -111,6 +111,25 @@ def test_a_session_reading_gives_claude_windows_their_share(tmp_path: Path) -> N
     )
 
 
+def test_rejected_claude_session_fills_window_until_its_reset(tmp_path: Path) -> None:
+    usage.configure(tmp_path)
+    usage.record_claude_limit(
+        {
+            "rateLimitType": "five_hour",
+            "status": "rejected",
+            "utilization": 0.68,
+            "resetsAt": 1999999999,
+        }
+    )
+    usage.record_claude_reading("five_hour", 68, 1999999999)
+    blocked = usage.claude_windows(now=1999990000).windows[0]
+    assert (blocked.used_percent, blocked.status) == (100.0, "rejected")
+
+    usage.record_claude_reading("five_hour", 12, 2000003000)
+    reset = usage.claude_windows(now=2000000000).windows[0]
+    assert (reset.used_percent, reset.status) == (12.0, "allowed")
+
+
 USAGE_TEXT = """You are currently using your subscription to power your Claude Code usage
 
 Current session: 76% used · resets Oct 11 at 2:10pm (Europe/London)

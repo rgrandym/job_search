@@ -16,16 +16,17 @@ export const tokens = (value: number) =>
 
 function WindowBar({ win, threshold }: { win: PlanWindow; threshold: number }) {
   const used = win.used_percent;
-  const tone = used == null ? "bg-border" : used >= 100 ? "bg-bad" : used >= threshold ? "bg-warn" : "bg-good";
+  const empty = (used != null && used >= 100) || win.status === "rejected";
+  const tone = empty ? "bg-bad" : used == null ? "bg-border" : used >= threshold ? "bg-warn" : "bg-good";
   return (
     <div className="flex items-center gap-2 text-[11px]">
       <span className="w-14 shrink-0 text-faint">{win.name}</span>
       <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface">
         {/* Unknown share: a neutral full track, so it never reads as an empty allowance. */}
-        <div className={cn("h-full rounded-full", tone)} style={{ width: `${used == null ? 100 : Math.min(100, used)}%` }} />
+        <div className={cn("h-full rounded-full", tone)} style={{ width: `${empty ? 100 : used == null ? 100 : Math.min(100, used)}%` }} />
       </div>
-      <span className="w-28 shrink-0 text-right text-faint" title={win.status ?? undefined}>
-        {used == null ? (win.status === "allowed_warning" ? "nearing limit" : "within limit") : `${Math.round(used)}%`}
+      <span className="w-40 shrink-0 text-right text-faint" title={win.status ?? undefined}>
+        {empty ? "No tokens left" : used == null ? (win.status === "allowed_warning" ? "nearing limit" : "within limit") : `${Math.round(used)}% used`}
         {win.resets_at ? ` · ${clockLabel(win.resets_at)}` : ""}
       </span>
     </div>
@@ -41,13 +42,15 @@ export function spendLine(rows: SpendRow[]) {
 }
 
 function ConnectionCard({ c, threshold }: { c: Connection; threshold: number }) {
+  const session = c.windows?.windows.find((w) => w.name === "5h");
+  const sessionExhausted = !!session && ((session.used_percent != null && session.used_percent >= 100) || session.status === "rejected");
   return (
     <div className="space-y-1.5 rounded-md border border-border p-2">
       <div className="flex items-center gap-1.5 text-[12px]">
         <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", !c.ready ? "bg-bad" : c.exhausted_until ? "bg-warn" : "bg-good")} />
         <span className="font-medium text-fg">{c.label}</span>
         <span className="chip">{c.billing === "plan" ? "plan" : "API key"}</span>
-        {c.exhausted_until && <span className="chip text-warn">spent · back {clockLabel(c.exhausted_until)}</span>}
+        {c.exhausted_until && <span className="chip text-warn">{sessionExhausted ? "No tokens left this session" : "Plan limit reached"} · back {clockLabel(c.exhausted_until)}</span>}
         <span className="ml-auto truncate text-[11px] text-faint" title={c.roles.join(", ")}>
           {c.roles.length ? c.roles.join(", ") : c.ready ? "standby" : "not connected"}
         </span>
@@ -115,7 +118,7 @@ export function ConnectionsPanel() {
         {view.isError && <span className="text-bad">unavailable</span>}
         {data && (
           <span className={cn("truncate", spent ? "text-warn" : warn ? "text-warn" : "text-faint")}>
-            {spent ? "a plan is spent" : warn ? "a plan is nearly spent" : `${data.connections.filter((c) => c.ready).length} connected`}
+            {spent ? "a plan has no tokens left" : warn ? "a plan is nearly spent" : `${data.connections.filter((c) => c.ready).length} connected`}
           </span>
         )}
         <button

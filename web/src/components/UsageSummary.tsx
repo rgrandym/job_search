@@ -22,6 +22,7 @@ function until(seconds: number) {
 }
 
 const left = (win: PlanWindow) => (win.used_percent == null ? null : Math.max(0, 100 - win.used_percent));
+const exhausted = (win: PlanWindow) => left(win) === 0 || win.status === "rejected";
 
 export function useConnections(busy: boolean) {
   return useQuery({ queryKey: ["connections"], queryFn: api.connections, refetchInterval: busy ? 10_000 : 60_000 });
@@ -36,8 +37,9 @@ function inUse(view: ConnectionsView): Connection[] {
 export function sessionHint(view: ConnectionsView | undefined): string | null {
   if (!view) return null;
   for (const c of inUse(view)) {
-    if (c.exhausted_until) return `${c.label} spent`;
     const session = c.windows?.windows.find((w) => w.name === "5h");
+    if (session && exhausted(session)) return `${c.label} session: no tokens left`;
+    if (c.exhausted_until) return `${c.label} plan limit reached`;
     const share = session ? left(session) : null;
     if (share != null) return `${c.label} session ${Math.round(share)}% left`;
   }
@@ -46,10 +48,11 @@ export function sessionHint(view: ConnectionsView | undefined): string | null {
 
 function WindowLine({ win, now, threshold }: { win: PlanWindow; now: number; threshold: number }) {
   const share = left(win);
-  const spent = share === 0 || win.status === "rejected";
+  const spent = exhausted(win);
+  const used = spent ? 100 : win.used_percent;
   const low = share != null && share <= 100 - threshold;
   const text = spent
-    ? "spent"
+    ? "No tokens left"
     : share != null
       ? `${Math.round(share)}% left`
       : win.status === "allowed_warning"
@@ -60,17 +63,17 @@ function WindowLine({ win, now, threshold }: { win: PlanWindow; now: number; thr
       <span className="w-14 shrink-0 text-faint">{WINDOW_LABEL[win.name] ?? win.name}</span>
       <div
         className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface"
-        title={`${win.used_percent != null ? `${Math.round(win.used_percent)}% used` : "The plan reports its share only near the limit"}${win.tokens ? ` · this app used ${win.tokens.toLocaleString()} tokens in this window` : ""}`}
+        title={`${used != null ? `${Math.round(used)}% used` : "The plan reports its share only near the limit"}${win.tokens ? ` · this app used ${win.tokens.toLocaleString()} tokens in this window` : ""}`}
       >
-        {/* Unknown share: a neutral full track, so it never reads as an empty allowance. */}
+        {/* The filled width is usage; a rejected limit fills the bar even if its last share was stale. */}
         <div
-          className={cn("h-full rounded-full", share == null ? "bg-border" : spent ? "bg-bad" : low ? "bg-warn" : "bg-good")}
-          style={{ width: `${share == null ? 100 : share}%` }}
+          className={cn("h-full rounded-full", used == null ? "bg-border" : spent ? "bg-bad" : low ? "bg-warn" : "bg-good")}
+          style={{ width: `${used == null ? 100 : used}%` }}
         />
       </div>
       <span className={cn("w-52 shrink-0 text-right tabular-nums", spent ? "text-bad" : low ? "text-warn" : "text-faint")}>
         {text}
-        {!!win.tokens && <span title="This app's tokens inside this window"> · {tokenCount(win.tokens)} tok</span>}
+        {!!win.tokens && <span title="Tokens this app used inside this window"> · {tokenCount(win.tokens)} tokens used by this app</span>}
         {win.resets_at != null && win.resets_at > now && <span title={`Resets ${clockLabel(win.resets_at)}`}> · resets in {until(win.resets_at - now)}</span>}
       </span>
     </div>
@@ -79,11 +82,12 @@ function WindowLine({ win, now, threshold }: { win: PlanWindow; now: number; thr
 
 function ConnectionUsage({ c, now, threshold }: { c: Connection; now: number; threshold: number }) {
   const windows = c.windows?.windows ?? [];
+  const sessionExhausted = windows.some((w) => w.name === "5h" && exhausted(w));
   return (
     <div className="space-y-1">
       <div className="flex items-baseline gap-1.5 text-[11px]">
         <span className="font-medium text-fg">{c.label}</span>
-        {c.exhausted_until && <span className="text-warn">spent · back in {until(c.exhausted_until - now)}</span>}
+        {c.exhausted_until && <span className="text-warn">{sessionExhausted ? "No tokens left this session" : "Plan limit reached"} · back in {until(c.exhausted_until - now)}</span>}
         <span className="ml-auto truncate text-faint" title="Model calls and tokens today">
           {c.spend_today.length ? spendLine(c.spend_today) : "no calls today"}
           {c.cost_today != null && ` · $${c.cost_today.toFixed(3)}`}

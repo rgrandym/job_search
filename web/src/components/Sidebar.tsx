@@ -105,7 +105,7 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
     onSuccess: ({ asset, cv }) => {
       cacheSelection(asset);
       setEditableCV(cv);
-      s.set({ useCv: true, summary: null, outcome: null, profileKey: null });
+      s.set({ useCv: true, summary: null, profileKey: null });
       void qc.invalidateQueries({ queryKey: ["profiles"] });
     },
     onError: () => { void qc.invalidateQueries({ queryKey: ["state"] }); },
@@ -115,7 +115,7 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
     mutationFn: (item: CVAsset) => item.id === state?.cv_files.selected ? Promise.resolve(item) : api.selectCV(item.id),
     onSuccess: (asset) => {
       cacheSelection(asset);
-      s.set({ useCv: true, summary: null, outcome: null, profileKey: null });
+      s.set({ useCv: true, summary: null, profileKey: null });
       void qc.invalidateQueries({ queryKey: ["profiles"] });
     },
   });

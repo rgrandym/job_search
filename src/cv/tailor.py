@@ -76,23 +76,47 @@ credential, regulated manufacturing, managerial authority, years or specialist p
 experience. Return an empty list if no specific technique is plausible. Do not repeat skills \
 the CV already names."""
 
-OPTIMISED_ADDITIONS_SYSTEM = f"""You are a specialist CV writer checking what an ideal \
-application for this particular job would show. Think first as a hiring manager: which few \
-capabilities are central to doing the work at this level? Then as a recruiter: which evidence \
-must be visible on the first page? {UNTRUSTED}
+OPTIMISED_ADDITIONS_SYSTEM = f"""You are the hiring manager for this role, advised by a \
+senior recruiter. The candidate's confirmed CV has already been tailored to this job. Read it as \
+you would before deciding whom to interview, then propose, for the candidate to confirm or \
+delete, the experience and skills they very probably have but have not written down that would \
+change that decision. {UNTRUSTED}
 
-The confirmed CV has already been written. Return up to eight useful *questions for the \
-candidate*, expressed as proposed CV wording. Include a missing routine skill or a missing \
-experience only when the source CV gives a concrete reason to ask and the posting makes it \
-relevant. Prioritise pivotal requirements over long desirable lists. `background_quote` must \
-copy exact source CV words; `job_quote` must copy exact posting words. For experience, set \
-`role_id` to the existing role where it might belong, and quote work from that role, not \
-merely its title or a degree. Do not invent another employer, role, dates, numbers, outcomes, \
-authority, or specialist credentials. Do not assert GMP, regulatory, or managerial experience \
-from academic background alone. The sentence will appear in red with a conspicuous confirm \
-label and will not count as a fact until the candidate edits and confirms it. Avoid anything \
-already stated clearly in the confirmed CV. Return an empty list when there is no credible \
-addition to ask about."""
+Think as the hiring manager does:
+1. The job's real problems: what this person must deliver in the first year and what makes it \
+hard (the stage of the product or process, the quality and regulatory setting, the partners, \
+the scale). These matter more than the posting's long lists.
+2. Your doubts about this candidate from the CV as written: can they do that work, in this \
+setting, at this level, now? Typical doubts: research rather than regulated delivery; a \
+neighbouring field or modality rather than the same one; contributor rather than owner; the \
+relevant work is old; what they did themselves rather than what their team did. A doubt that \
+would make you reject comes first. `<match_assessment>` and `<gaps>` give the gaps already found.
+3. What would settle each doubt: an accurate, specific line showing this kind of work in a \
+comparable setting (what they did, with whom, under which constraints, to which standard). A \
+keyword alone settles nothing.
+
+Then infer, from each role's documented work, what someone doing that work would routinely have \
+done: the methods, documents, quality or regulatory tasks, hand-offs and partners that normally \
+accompany it in that industry. Propose an item only when such a link exists and it would settle \
+one of your doubts, ordered by how much it would change your decision to interview, up to \
+eight. A skill counts only when the job depends on it as a capability; an essential the CV does \
+not show (a recruiter's knock-out) is such a doubt.
+
+Write each proposal as CV wording ready to confirm. An experience: one bullet for the existing \
+role where the work happened (`role_id`, the most recent plausible role first), action-first, \
+with its setting and partners, describing the kind of contribution that role makes plausible \
+(supported, contributed to, prepared) unless its own bullets show the candidate led such work. \
+A skill: as the posting names it. Use the posting's terms where they describe the work \
+accurately, so the line is also found by ATS search and a recruiter's scan \
+(`<missing_job_terms>`); never trade accuracy for a keyword. `background_quote` copies exact \
+words from that role's bullets (for a skill, from anywhere in the source CV) that make it \
+plausible; `job_quote` copies exact posting words; `reason` names the doubt it settles, why it \
+is likely for this profile and what the candidate must check. Never add numbers, outcomes, \
+employers, dates, credentials, authority or team sizes, and do not infer GMP, regulatory or \
+managerial experience from academic work alone. Skip anything the confirmed CV already shows, \
+and anything a person with this background would be unlikely to have done: the candidate \
+decides, and implausible questions waste their time. Return an empty list when nothing \
+credible remains."""
 
 ANALYZE_SYSTEM = f"""You analyse job descriptions the way an experienced recruiter does. Extract:
 - hard_skills: concrete technologies, tools, methods, domains (canonical names, e.g. "Python", \
@@ -175,6 +199,11 @@ regulatory authority, years, ownership, leadership, or specialist platform exper
 general background. Never put unverified skills in the summary, role_skills, bullets or headline.
 - `bullet_order` for every role, and `skills_priority`: the CV's skills ordered by relevance \
 to the job (skills you leave out stay, after the listed ones).
+- In optimised mode only, `review_candidates`: at most five pivotal missing experience or \
+skills to ask the candidate about. Each must quote exact words from the source CV and the \
+posting, identify the job need it would address, and name what the candidate must verify. \
+These are separate red questions, never factual CV text. Return an empty list when no \
+credible question remains. Do not duplicate what the CV already says.
 
 If a <trimming> block allows it, you may leave out of `bullet_order` bullets that would \
 overstate the candidate for this more junior role, keeping at least two per role. Without it, \
@@ -360,11 +389,19 @@ class Steering:
             out += f"\n\n<academic>\n{ACADEMIC}\n</academic>"
         if self.optimised:
             out += (
-                "\n\n<optimised_draft>\nBuild the strongest truthful CV for the job. "
-                "Lead with the few pivotal capabilities and the best concrete outcomes; "
-                "make transferable work legible to a hiring manager. Spend less space on "
-                "incidental desirable tools. The separate review pass will ask about plausible "
-                "missing experience and skills; never put them in confirmed wording."
+                "\n\n<optimised_draft>\nThis is one job-specific CV, not a new career history. "
+                "Read the posting for the work the hire must deliver and the few requirements "
+                "that decide an interview. Choose the source CV evidence that answers those "
+                "needs, including transferable work, and make it visible in the summary and "
+                "the first bullets of the relevant roles. Preserve the candidate's level, "
+                "scope, details and distinctive breadth. Map at most eight decision-relevant "
+                "requirements, essentials first; do not restate the whole posting. Reword at "
+                "most five bullets that materially improve this case; reorder the rest. "
+                "Do not force job terms where "
+                "the source does not support them. Put plausible but unproven pivotal "
+                "experience or skills only in review_candidates, with exact source and job "
+                "quotes, for the candidate to confirm or delete. Do not add them to the "
+                "factual summary, bullets, skills, or headline."
                 "\n</optimised_draft>"
             )
         return out + (_trimming(self.trim) if self.trim else "")
@@ -391,19 +428,35 @@ def suggest_skills_to_confirm(
 
 
 def propose_review_additions(
-    master: MasterCV, tailored: TailoredCV, jd: JDAnalysis, jd_text: str, llm: LLMProvider
+    master: MasterCV,
+    tailored: TailoredCV,
+    jd: JDAnalysis,
+    jd_text: str,
+    llm: LLMProvider,
+    guidance: str = "",
 ) -> list[ReviewAddition]:
-    """Ask targeted questions about missing capabilities; code checks both quoted anchors."""
-    opportunities = [
-        r
-        for r in tailored.requirements
-        if r.importance == "key" and r.match in {"adjacent", "needs_confirmation", "not_evidenced"}
-    ]
+    """Ask targeted questions about what would settle a hiring manager's doubts (the job
+    matcher's gaps, essential or pivotal requirements not shown), worded so ATS search finds
+    them too; code checks both quoted anchors."""
+    gaps = sorted(
+        (
+            r
+            for r in tailored.requirements
+            if (r.importance == "key" or r.priority == "essential")
+            and r.match in {"adjacent", "needs_confirmation", "not_evidenced"}
+        ),
+        key=lambda r: (r.priority != "essential", r.importance != "key"),
+    )
+    assessment = f"\n\n<match_assessment>\n{guidance}\n</match_assessment>" if guidance else ""
     prompt = (
         _context(master, jd, jd_text)
-        + "\n\n<key_opportunities>\n"
-        + "\n".join(f"- {r.requirement}: {r.match}; {r.note}" for r in opportunities)
-        + "\n</key_opportunities>"
+        + assessment
+        + "\n\n<gaps>\n"
+        + "\n".join(
+            f"- {r.requirement} ({r.priority}, {r.importance}): {r.match}; {r.note}" for r in gaps
+        )
+        + "\n</gaps>"
+        + f"\n\n<missing_job_terms>\n{', '.join(tailored.missing_keywords)}\n</missing_job_terms>"
         + f"\n\n<confirmed_draft>\n{printed_text(tailored)}\n</confirmed_draft>"
     )
     raw = llm.generate(
@@ -511,6 +564,31 @@ def revise_plan(
         + "\n\n<review>\n"
         + "\n".join(f"- {n}" for n in critique.notes())
         + "\n</review>"
+    )
+    return llm.generate(system=PLAN_SYSTEM, prompt=prompt, output_model=TailoringPlan)
+
+
+def revise_optimised_plan(
+    master: MasterCV,
+    jd: JDAnalysis,
+    jd_text: str,
+    plan: TailoringPlan,
+    rejected: list[ChangeRecord],
+    llm: LLMProvider,
+    steer: Steering,
+) -> TailoringPlan:
+    """One focused revision when factual guards rejected the first optimised draft."""
+    feedback = "\n".join(
+        f"- {change.source_id}: {change.reason}" for change in rejected if change.reason
+    )
+    prompt = (
+        _context(master, jd, jd_text)
+        + steer.prompt()
+        + f"\n\n<previous_plan>\n{plan.model_dump_json()}\n</previous_plan>"
+        + f"\n\n<guard_feedback>\n{feedback}\n</guard_feedback>"
+        + "\n\nReturn one corrected plan. Change only rejected wording or its evidence mapping; "
+        "keep the accepted evidence and ordering. Omit a rewrite if the source cannot "
+        "support it. Keep review_candidates separate from confirmed facts."
     )
     return llm.generate(system=PLAN_SYSTEM, prompt=prompt, output_model=TailoringPlan)
 
@@ -637,6 +715,23 @@ def tailor(
     plan = propose_plan(master, jd, jd_text, llm, steer)
     progress.step("Checking every change against your CV")
     out = apply_plan(master, plan, jd, trim)
+    if mode == "optimised":
+        rejected = [change for change in out.changes if not change.accepted]
+        if review and rejected:
+            progress.step("Correcting wording the factual checks rejected")
+            revised = revise_optimised_plan(master, jd, jd_text, plan, rejected, llm, steer)
+            corrected = apply_plan(master, revised, jd, trim)
+            accepted = {c.source_id: c.tailored for c in out.changes if c.accepted and c.tailored}
+            kept = all(
+                corrected.cv.bullet_index().get(source_id) is not None
+                and corrected.cv.bullet_index()[source_id].text == text
+                for source_id, text in accepted.items()
+            )
+            if kept and sum(not c.accepted for c in corrected.changes) < len(rejected):
+                plan, out = revised, corrected
+        progress.step("Checking suggestions against the CV and posting")
+        additions = _review_additions(plan.review_candidates, master, out, jd_text)
+        return out.model_copy(update={"skills_to_confirm": [], "review_additions": additions})
     if review:
         progress.step("Reviewing the draft as a hiring manager and a recruiter")
         critique = critique_cv(master, out, jd, jd_text, llm)
@@ -659,21 +754,6 @@ def tailor(
                     "document_notes": [
                         *out.document_notes,
                         f"Skill suggestions could not run: {exc}",
-                    ]
-                }
-            )
-    if mode == "optimised":
-        out = out.model_copy(update={"skills_to_confirm": []})
-        progress.step("Finding pivotal skills and experience to ask you about")
-        try:
-            additions = propose_review_additions(master, out, jd, jd_text, llm)
-            out = out.model_copy(update={"review_additions": additions})
-        except Exception as exc:  # noqa: BLE001 - the confirmed CV remains useful
-            out = out.model_copy(
-                update={
-                    "document_notes": [
-                        *out.document_notes,
-                        f"Review additions could not run: {exc}",
                     ]
                 }
             )
