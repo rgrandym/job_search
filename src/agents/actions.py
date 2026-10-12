@@ -12,7 +12,7 @@ from src.agents.runtime import AgentContext
 from src.cv import master_cv_manager as mgr
 from src.jobs.models import SearchQuery
 from src.services import cv_service, labels, saved, search_service, tailored_documents, tracker
-from src.services.search_service import SearchRequest
+from src.services.search_service import AreaThresholds, SearchRequest, widen_note
 
 
 class SearchArgs(BaseModel):
@@ -22,7 +22,12 @@ class SearchArgs(BaseModel):
     )
     smart: bool | None = None
     threshold: float | None = None
-    widen: bool | None = None
+    widen: bool | None = Field(
+        None, description="Also search adjacent role families; applies only with titles empty"
+    )
+    area_thresholds: AreaThresholds | None = Field(
+        None, description="Listing threshold per role area: progression, adjacent"
+    )
     profile_key: str | None = None
 
 
@@ -56,6 +61,9 @@ async def search_jobs(args: SearchArgs, ctx: AgentContext) -> dict[str, Any]:
         smart=args.smart if args.smart is not None else ctx.smart,
         threshold=args.threshold if args.threshold is not None else ctx.threshold,
         widen=args.widen if args.widen is not None else ctx.widen,
+        area_thresholds=(
+            args.area_thresholds if args.area_thresholds is not None else ctx.area_thresholds
+        ),
         profile_key=args.profile_key if args.profile_key is not None else ctx.profile_key,
         run_id=uuid.uuid4().hex,
     )
@@ -81,6 +89,7 @@ async def search_jobs(args: SearchArgs, ctx: AgentContext) -> dict[str, Any]:
         "to_check": len(outcome.report.to_check),
         "history_id": outcome.history_id,
         "errors": outcome.errors,
+        **({"note": note} if (note := widen_note(ctx.ws, request)) else {}),
     }
 
 
@@ -228,7 +237,10 @@ async def write_cover_letter(args: DocumentArgs, ctx: AgentContext) -> dict[str,
         "filename": path.name,
         "download_url": f"/api/files/cover_letters/{path.name}",
         "paragraphs": len(letter.paragraphs),
-        "rejections": [change.reason for change in letter.changes if not change.accepted],
+        "to_review": [
+            f"paragraph {flag.paragraph + 1}: {flag.reason} (shown in red)" for flag in letter.flags
+        ],
+        "notes": letter.notes,
     }
 
 

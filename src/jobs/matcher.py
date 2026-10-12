@@ -36,6 +36,10 @@ from src.tools.search_tools import (
 )
 
 _LEVEL_NAMES = {v: k for k, v in LANGUAGE_LEVELS.items()}
+# A self-given title says nothing of scope (a pre-seed "CEO" is not a corporate executive).
+FOUNDER_WORDS = ("founder", "owner", "self-employed", "freelance")
+ESTABLISHED_MONTHS = 12  # a level held this long counts as established
+RECENT_YEARS = 10  # only levels held within this many years count
 
 
 def years_of_experience(experience: list[Experience], today: date | None = None) -> float:
@@ -43,8 +47,7 @@ def years_of_experience(experience: list[Experience], today: date | None = None)
     today = today or date.today()
 
     def to_month(ym: str | None) -> int:
-        y, m = (today.year, today.month) if ym is None else map(int, ym.split("-"))
-        return y * 12 + m
+        return _month(ym, today)
 
     spans = sorted((to_month(e.start), to_month(e.end)) for e in experience)
     months, cur_start, cur_end = 0, None, None
@@ -60,6 +63,30 @@ def years_of_experience(experience: list[Experience], today: date | None = None)
     return round(months / 12, 1)
 
 
+def _month(ym: str | None, today: date) -> int:
+    y, m = (today.year, today.month) if ym is None else map(int, ym.split("-"))
+    return y * 12 + m
+
+
+def established_level(roles: list[Experience], today: date | None = None) -> int:
+    """The candidate's level for matching: the highest held for at least a year within the last
+    ten years. Founder and owner titles are left out, as is a short or old role; with no
+    other role, the most recent title decides."""
+    today = today or date.today()
+    now = _month(None, today)
+    levels = [
+        seniority_level(r.title)
+        for r in roles
+        if _month(r.end, today) - _month(r.start, today) + 1 >= ESTABLISHED_MONTHS
+        and now - _month(r.end, today) <= 12 * RECENT_YEARS
+        and not any(w in r.title.lower() for w in FOUNDER_WORDS)
+    ]
+    if levels:
+        return max(levels)
+    latest = max(roles, key=lambda r: r.start, default=None)
+    return seniority_level(latest.title) if latest else 0
+
+
 def build_profile(
     cv: MasterCV | TailoredCV, today: date | None = None, query: SearchQuery | None = None
 ) -> CandidateProfile:
@@ -72,14 +99,13 @@ def build_profile(
     roles = sorted(master.experience, key=lambda e: e.start, reverse=True)
     titles = [e.title for e in roles]
     prefs = master.preferences
-    level = seniority_level(titles[0]) if titles else 0
     profile = CandidateProfile(
         name=master.basics.name,
         titles=titles,
         target_titles=prefs.target_titles,
         skills=sorted(normalize_skills(master.all_skills())),
         years_experience=years_of_experience(master.experience, today),
-        seniority_level=level,
+        seniority_level=established_level(master.experience, today),
         locations=prefs.locations or ([master.basics.location] if master.basics.location else []),
         work_arrangements=prefs.work_arrangements,
         willing_to_relocate=prefs.willing_to_relocate,

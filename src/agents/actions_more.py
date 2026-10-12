@@ -272,18 +272,21 @@ class CompareArgs(BaseModel):
     document_ids: list[str] = Field(
         default_factory=list, description="Tailored CV ids for this job; empty: all of them"
     )
+    baseline_id: str | None = Field(
+        None, description="Library CV id to compare against; omit for the Master or selected CV"
+    )
 
 
 @tool(
     "compare_cv_versions",
-    "Read a job's tailored CV versions and their originals side by side; rank them.",
+    "Read a job's tailored CV versions and one original CV side by side; rank them.",
     CompareArgs,
 )
 async def compare_cv_versions(args: CompareArgs, ctx: AgentContext) -> dict[str, Any]:
     from src.services import cv_versions
 
     comparison = await cv_versions.compare(
-        ctx.ws, args.job_id, args.document_ids, ctx.usage_sink("assistant")
+        ctx.ws, args.job_id, args.document_ids, ctx.usage_sink("assistant"), args.baseline_id
     )
     await ctx.emit("documents_updated", {"job_id": args.job_id})
     return {
@@ -299,9 +302,11 @@ async def compare_cv_versions(args: CompareArgs, ctx: AgentContext) -> dict[str,
                 "keyword_coverage": round(r.keyword_coverage, 2),
                 "better": [a.area for a in r.areas if a.change == "better"],
                 "worse": [a.area for a in r.areas if a.change == "worse"],
+                "verdict": r.verdict_reason,
             }
             for r in comparison.readings
         ],
+        "setting_effects": [e.text for e in comparison.setting_effects],
     }
 
 

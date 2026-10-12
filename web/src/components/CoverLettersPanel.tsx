@@ -3,6 +3,7 @@ import { Download, Loader2, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "../lib/api";
 import type { CoverLetterView } from "../lib/types";
+import { LetterViewButton } from "./LetterDocument";
 import { Empty } from "./ui";
 
 function LetterEditor({ letter, onDelete, deleting }: {
@@ -15,16 +16,20 @@ function LetterEditor({ letter, onDelete, deleting }: {
   const [paragraphs, setParagraphs] = useState(letter.paragraphs);
   const [closing, setClosing] = useState(letter.closing);
   const [saved, setSaved] = useState<CoverLetterView | null>(null);
+  const [keep, setKeep] = useState<number[]>([]);
   const current = saved ?? letter;
-  const changed = greeting !== current.greeting || closing !== current.closing ||
+  const flagFor = (index: number) => (current.flags ?? []).find((f) => f.paragraph === index);
+  const changed = greeting !== current.greeting || closing !== current.closing || keep.length > 0 ||
     paragraphs.some((text, index) => text !== current.paragraphs[index]);
   const save = useMutation({
-    mutationFn: () => api.editCoverLetter(current.id, { greeting, paragraphs, closing }),
+    mutationFn: () => api.editCoverLetter(current.id, { greeting, paragraphs, closing, keep }),
     onSuccess: (updated) => {
       setSaved(updated);
+      setKeep([]);
       void qc.invalidateQueries({ queryKey: ["cover-letters"] });
     },
   });
+  const flagged = (current.flags ?? []).filter((f) => !keep.includes(f.paragraph)).length;
   const setParagraph = (index: number, text: string) => {
     setParagraphs((old) => old.map((value, position) => position === index ? text : value));
   };
@@ -34,15 +39,39 @@ function LetterEditor({ letter, onDelete, deleting }: {
         <h3 className="font-semibold text-fg">{current.title && current.company ? `${current.title} · ${current.company}` : current.filename}</h3>
         <p className="text-muted">{current.candidate_name} · saved {new Date(current.updated_at).toLocaleString()}</p>
       </div>
+      {flagged > 0 && (
+        <p className="rounded-md border border-[var(--bad)] p-2 text-bad">
+          {flagged} paragraph{flagged === 1 ? "" : "s"} in red: a check could not trace {flagged === 1 ? "it" : "them"} to
+          your CV. Edit the wording, or tick Keep as written if it is accurate, then Save edits. Red text is red in the
+          Word file too.
+        </p>
+      )}
+      {(current.notes ?? []).map((note) => <p key={note} className="text-warn">To check: {note}</p>)}
       <label className="block font-medium">Greeting
         <input className="input mt-1 w-full" value={greeting} onChange={(event) => setGreeting(event.target.value)} />
       </label>
-      {paragraphs.map((text, index) => (
-        <label className="block font-medium" key={index}>Paragraph {index + 1}
-          <textarea className="input mt-1 w-full font-normal" rows={4} value={text}
-            onChange={(event) => setParagraph(index, event.target.value)} />
-        </label>
-      ))}
+      {paragraphs.map((text, index) => {
+        const flag = flagFor(index);
+        const red = flag && !keep.includes(index);
+        return (
+          <div key={index}>
+            <label className="block font-medium">Paragraph {index + 1}
+              <textarea className={`input mt-1 w-full font-normal ${red ? "border-[var(--bad)] text-bad" : ""}`} rows={4} value={text}
+                onChange={(event) => setParagraph(index, event.target.value)} />
+            </label>
+            {flag && (
+              <div className="mt-1 flex flex-wrap items-center gap-3 text-[11px]">
+                <span className={red ? "text-bad" : "text-faint"}>Check: {flag.reason}</span>
+                <label className="flex items-center gap-1 text-muted">
+                  <input type="checkbox" className="accent-[var(--accent)]" checked={keep.includes(index)}
+                    onChange={() => setKeep((k) => (k.includes(index) ? k.filter((i) => i !== index) : [...k, index]))} />
+                  Keep as written
+                </label>
+              </div>
+            )}
+          </div>
+        );
+      })}
       <label className="block font-medium">Closing
         <input className="input mt-1 w-full" value={closing} onChange={(event) => setClosing(event.target.value)} />
       </label>
@@ -52,6 +81,7 @@ function LetterEditor({ letter, onDelete, deleting }: {
           onClick={() => save.mutate()}>
           {save.isPending && <Loader2 size={12} className="animate-spin" />} Save edits
         </button>
+        <LetterViewButton id={current.id} title={current.title ? `Cover letter · ${current.title}` : current.filename} downloadUrl={current.docx_url} />
         <a className="btn-ghost py-1 text-[12px]" href={current.docx_url}><Download size={12} /> Export Word</a>
         <a className="btn-ghost py-1 text-[12px]" href={current.txt_url}><Download size={12} /> Export text</a>
         <button className="btn-ghost py-1 text-[12px] text-bad" type="button" disabled={deleting || save.isPending}

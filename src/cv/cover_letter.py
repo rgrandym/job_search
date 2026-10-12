@@ -1,14 +1,17 @@
 """Cover letters written from the CV the user approved, in one fixed template.
 
-    draft_letter (LLM, following the tailored CV's positioning) -> apply_letter (fabrication
-    guards) -> review_letter (LLM, the hiring manager) -> one guarded redraft -> CoverLetter
+    draft_letter (LLM, the master template: introduction, evidence, gap when needed,
+    conclusion; following the tailored CV's positioning) -> apply_letter (fabrication checks)
+    -> review_letter (LLM, the hiring manager) -> one checked redraft -> CoverLetter
 
 The model reads the approved CV in the job's terms, but named skills must appear in the cited
-CV evidence. Every paragraph cites the CV ids it describes, and a paragraph is rejected if it
+CV evidence. Every paragraph cites the CV ids it describes, and a paragraph is flagged if it
 cites an unknown id, makes a personal claim without a source, or uses a number that is neither
 in its cited sources nor in the job description (facts about the employer may be quoted).
-Motivation comes only from the user's career intent. Every decision is recorded in
-`CoverLetter.changes`.
+A flagged paragraph is kept and shown in red with its reason; the user decides (user's
+decision 2026-10-11: the letter is always written, never blocked by a check). The checks
+still ask for one redraft first. Motivation comes only from the user's career intent. Every
+decision is recorded in `CoverLetter.changes`.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from src.cv.models import (
     CoverLetter,
     CoverLetterDraft,
     JDAnalysis,
+    LetterFlag,
     LetterParagraph,
     LetterReview,
     LetterSections,
@@ -53,24 +57,35 @@ motivation in <motivation>; if none is given, ground interest in the work descri
 posting. Never invent personal history or feelings.
 4. No hyperbole, clichés or generic praise ("I am writing to apply", "passionate", "perfect \
 fit", "team player"), and no promise of outcomes that have not happened.
+5. <gaps>, when given, lists essential requirements the CV does not show: never claim them; \
+name the most important one in the gap paragraph.
 
-Template. Fill every field; the whole body stays under 300 words, so the letter fits on one \
-page:
-1. `opening.interest`: one sentence naming the exact job title and a specific reason the work \
-or organisation interests the candidate.
-   `opening.fit`: one sentence stating the candidate's strongest overall fit for the role, \
-with `source_ids`. Do not begin with past employers or repeat the CV headline.
-2. `evidence`: exactly two short paragraphs, each on one of the job's most important \
+The master template (user's decision 2026-10-11). Keep this structure and order for every \
+letter and adapt the wording to the job; the whole body stays under 350 words, so the letter \
+fits on one page:
+1. Introduction. `opening.interest`: one sentence in the pattern "I am applying for the \
+<exact job title> role at <organisation> because <a specific reason>", the reason taken from \
+<motivation>, else from the work the posting describes. `opening.fit`: one sentence in the \
+pattern "My experience in <two to four areas from the CV> fits the requirements and \
+responsibilities of this role", naming the areas that answer the job's most important \
+requirements, with `source_ids`. Do not open with past employers or repeat the CV headline.
+2. Evidence. `evidence`: one or two short paragraphs, each on one of the job's most important \
 requirements: one strong CV example (what the candidate did and its result) and why it \
 matters for this role. Use different examples; do not recite career history or list \
 techniques.
-3. `bridge`: only when the role is outside the candidate's current function or at a \
-different level (see <positioning>): two or three sentences on which experience carries over \
-and, from <motivation> only, why they want the move. Honest about what is new. Otherwise null.
-4. `conclusion`: one or two sentences on the contribution the candidate could make, inviting \
-a conversation.
+3. Gap. `bridge`: required when <gaps> lists requirements, or when the role is outside the \
+candidate's current function or level (see <positioning>); otherwise null. Two or three \
+sentences in the pattern "I bring extensive experience in <strengths from the CV>. Although I \
+have not yet worked directly in <the most important gap, named plainly>, I learn quickly and \
+can build what is missing, as the range of <skills or areas from the CV> I have mastered over \
+the years shows." Cite in `source_ids` the CV entries behind the strengths and that range; \
+the claim to learn quickly must rest on them. Never present a gap as experience. When the \
+move is a change of function or level, say why the candidate wants it, from <motivation> only.
+4. Conclusion. `conclusion`: one or two sentences on the contribution the candidate could \
+make, inviting a conversation.
 
-Use a natural greeting and sign-off. Plain, warm, confident and specific. The Word document \
+The patterns show the structure, not fixed wording: write natural sentences for this job. Use \
+a natural greeting and sign-off. Plain, warm, confident and specific. The Word document \
 already carries the candidate's name at the end, so put no contact details, header, date or \
 signature inside any paragraph."""
 
@@ -82,7 +97,8 @@ most important requirements not addressed, a case for a change of function or le
 unconvincing or not honest about what is new, or text that would not fit on one page. Never \
 suggest adding a fact the CV does not show. Return an empty list when the letter is strong."""
 
-MAX_LETTER_WORDS = 300
+MAX_LETTER_WORDS = 350  # body words that fit on one page with the greeting and sign-off
+GAP_MATCHES = ("not_evidenced", "needs_confirmation")  # essential rows the CV does not show
 
 
 def draft_letter(
@@ -110,8 +126,20 @@ def draft_letter(
     return CoverLetterDraft(**sections.model_dump())
 
 
+def letter_gaps(tailored: TailoredCV | None) -> list[str]:
+    """Essential requirements the tailored CV's requirement map marks as not shown in the CV:
+    the letter's gap paragraph must address them (code decides, not the model)."""
+    if tailored is None:
+        return []
+    return [
+        r.requirement
+        for r in tailored.requirements
+        if r.priority == "essential" and r.match in GAP_MATCHES
+    ]
+
+
 def letter_context(tailored: TailoredCV | None) -> str:
-    """The tailored CV's positioning and requirement map, for the letter to follow."""
+    """The tailored CV's positioning, requirement map and gaps, for the letter to follow."""
     if tailored is None or (tailored.positioning is None and not tailored.requirements):
         return ""
     out = ""
@@ -124,7 +152,9 @@ def letter_context(tailored: TailoredCV | None) -> str:
         for r in tailored.requirements
     ]
     if rows:
-        out += "<requirements>\n" + "\n".join(rows) + "\n</requirements>"
+        out += "<requirements>\n" + "\n".join(rows) + "\n</requirements>\n\n"
+    if gaps := letter_gaps(tailored):
+        out += "<gaps>\n" + "\n".join(f"- {g}" for g in gaps) + "\n</gaps>"
     return out.strip()
 
 
@@ -169,10 +199,12 @@ def _paragraph_reason(
 def apply_letter(
     master: MasterCV, draft: CoverLetterDraft, jd: JDAnalysis, jd_text: str
 ) -> CoverLetter:
-    """Keep the paragraphs that trace to the CV without fabrication; record every decision."""
+    """Check every paragraph against the CV; keep them all, flag the ones a check questions
+    (`flags`), and record every decision."""
     sources = _sources(master)
     vocab = [*jd.hard_skills, *jd.must_have, *master.all_skills()]
     kept: list[str] = []
+    flags: list[LetterFlag] = []
     changes: list[ChangeRecord] = []
     paragraphs = list(draft.paragraphs)
     if draft.opening is not None:
@@ -198,8 +230,9 @@ def apply_letter(
                 reason=reason,
             )
         )
-        if reason is None:
-            kept.append(para.text)
+        if reason is not None:
+            flags.append(LetterFlag(paragraph=len(kept), reason=reason))
+        kept.append(para.text)
     safe = not (extract_numbers(draft.greeting) or extract_numbers(draft.closing))
     return CoverLetter(
         target_title=jd.job_title,
@@ -208,6 +241,7 @@ def apply_letter(
         paragraphs=kept,
         closing=draft.closing if safe else "Yours sincerely,",
         changes=changes,
+        flags=flags,
     )
 
 
@@ -219,31 +253,38 @@ def write_letter(
     motivation: str = "",
     context: str = "",
     review: bool = True,
+    gaps: list[str] | None = None,
 ) -> CoverLetter:
-    """Draft a guarded letter (retrying once for structure or unsupported claims), then, with
+    """Draft a checked letter (redrafting once for structure or unsupported claims), then, with
     `review`, let a hiring manager read it and redraft once from the review; the redraft is
-    used only if it passes the same checks."""
+    used only if the checks find no more problems in it. The letter is always returned: what
+    the checks still question is flagged for the user (`flags`, `notes`), never a failure.
+    `gaps` (`letter_gaps`) make the gap paragraph required."""
+    gaps = gaps or []
     feedback = ""
+    best: tuple[CoverLetter, list[str], list[str]] | None = None
     for attempt in range(2):
         progress.step("Drafting the letter" if attempt == 0 else "Redrafting to fix the checks")
-        letter, problems = _guarded_draft(master, jd, jd_text, llm, motivation, feedback, context)
+        letter, problems, notes = _guarded_draft(
+            master, jd, jd_text, llm, motivation, feedback, context, gaps
+        )
+        if best is None or len(problems) < len(best[1]):
+            best = (letter, problems, notes)
         if not problems:
             break
         feedback = "Revise the letter to fix these issues: " + "; ".join(problems)
-    else:
-        raise ValueError(
-            f"The cover letter could not pass its evidence and structure checks: {feedback}"
-        )
-    if not review:
-        return letter
-    progress.step("Reading the letter as the hiring manager")
-    issues = review_letter(letter, jd_text, llm)
-    if not issues:
-        return letter
-    progress.step("Improving the letter from the review")
-    feedback = "Improve the letter: " + "; ".join(issues)
-    revised, problems = _guarded_draft(master, jd, jd_text, llm, motivation, feedback, context)
-    return letter if problems else revised
+    assert best is not None
+    letter, problems, notes = best
+    if review and letter.paragraphs:
+        progress.step("Reading the letter as the hiring manager")
+        issues = review_letter(letter, jd_text, llm)
+        if issues:
+            progress.step("Improving the letter from the review")
+            feedback = "Improve the letter: " + "; ".join(issues)
+            revised = _guarded_draft(master, jd, jd_text, llm, motivation, feedback, context, gaps)
+            if revised[0].paragraphs and len(revised[1]) <= len(problems):
+                letter, problems, notes = revised
+    return letter.model_copy(update={"notes": notes})
 
 
 def _guarded_draft(
@@ -254,11 +295,16 @@ def _guarded_draft(
     motivation: str,
     feedback: str,
     context: str,
-) -> tuple[CoverLetter, list[str]]:
+    gaps: list[str],
+) -> tuple[CoverLetter, list[str], list[str]]:
+    """(letter, every problem for a redraft, the letter-level ones to show the user)."""
     draft = draft_letter(master, jd, jd_text, llm, motivation, feedback, context)
     progress.step("Checking every claim against your CV")
     letter = apply_letter(master, draft, jd, jd_text)
-    return letter, _letter_problems(draft, letter, jd)
+    structure = _letter_problems(draft, letter, jd, gaps)
+    sections = _sections(draft)
+    flagged = [f"{sections[f.paragraph]}: {f.reason}" for f in letter.flags]
+    return letter, [*structure, *flagged], structure
 
 
 def review_letter(letter: CoverLetter, jd_text: str, llm: LLMProvider) -> list[str]:
@@ -269,32 +315,42 @@ def review_letter(letter: CoverLetter, jd_text: str, llm: LLMProvider) -> list[s
     return [i for i in review.issues if i.strip()][:4]
 
 
-def _letter_problems(draft: CoverLetterDraft, letter: CoverLetter, jd: JDAnalysis) -> list[str]:
-    """Check each required section after the claim guards have run."""
+def _letter_problems(
+    draft: CoverLetterDraft, letter: CoverLetter, jd: JDAnalysis, gaps: list[str]
+) -> list[str]:
+    """Check the master template's sections after the claim guards have run."""
     problems: list[str] = []
     if draft.opening is None or draft.conclusion is None or not draft.evidence:
-        return ["include an opening, two evidence paragraphs, and a conclusion"]
+        return ["include an introduction, one or two evidence paragraphs, and a conclusion"]
     if not _names_role(draft.opening.interest, jd.job_title):
         problems.append(f"name the exact role, {jd.job_title}, in the opening")
     if not draft.opening.fit.text.strip() or not draft.opening.fit.source_ids:
         problems.append("state a concrete fit in the opening with CV source_ids")
-    if len(draft.evidence) != 2:
-        problems.append("write exactly two evidence paragraphs")
+    if len(draft.evidence) > 2:
+        problems.append("write one or two evidence paragraphs")
     for paragraph in draft.evidence:
         if not paragraph.source_ids:
             problems.append("cite CV source_ids for each evidence paragraph")
         if not paragraph.text.strip():
             problems.append("write text for each evidence paragraph")
+    if gaps and (draft.bridge is None or not draft.bridge.text.strip()):
+        problems.append(f"add the gap paragraph, naming plainly the missing {gaps[0]!r}")
+    elif draft.bridge is not None and not draft.bridge.source_ids:
+        problems.append("cite in the gap paragraph the CV entries behind the strengths it names")
     if not draft.conclusion.text.strip():
         problems.append("write a conclusion")
-    bridge = ["bridge"] if draft.bridge is not None else []
-    sections = ["opening", *("evidence" for _ in draft.evidence), *bridge, "conclusion"]
-    for section, change in zip(sections, letter.changes, strict=True):
-        if not change.accepted:
-            problems.append(f"{section}: {change.reason}")
     if sum(len(paragraph.split()) for paragraph in letter.paragraphs) > MAX_LETTER_WORDS:
         problems.append(f"keep the body under {MAX_LETTER_WORDS} words")
     return problems
+
+
+def _sections(draft: CoverLetterDraft) -> list[str]:
+    """The section name of each paragraph `apply_letter` keeps, in order."""
+    if draft.opening is None:
+        return [f"paragraph {i}" for i in range(1, len(draft.paragraphs) + 1)]
+    bridge = ["bridge"] if draft.bridge is not None else []
+    conclusion = ["conclusion"] if draft.conclusion is not None else []
+    return ["opening", *("evidence" for _ in draft.evidence), *bridge, *conclusion]
 
 
 def _names_role(text: str, job_title: str) -> bool:

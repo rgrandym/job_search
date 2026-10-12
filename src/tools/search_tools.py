@@ -224,15 +224,29 @@ def _padded(text: str) -> str:
     return f" {' '.join(tokenize(text))} "
 
 
-def _mentions_padded(padded: str, term: str) -> bool:
+# A one-letter skill (the R language, C) counts only as a standalone capital letter: not the
+# "R" of "R&D", an initial such as "R." before a name part, or a letter of "U.S.".
+_LONE_LETTER = r"(?<![\w&./'’-]){}(?![\w&/'’+#-]|\.\w|\.\s+[A-Z][a-z])"
+
+
+def _mentions_padded(padded: str, term: str, raw: str | None = None) -> bool:
     canon = normalize_skill(term)
     variants = {canon} | SKILL_SYNONYMS.get(canon, set())
-    return any(f" {' '.join(tokenize(v))} " in padded for v in variants if tokenize(v))
+    for variant in variants:
+        tokens = tokenize(variant)
+        if not tokens:
+            continue
+        if raw is not None and len(tokens) == 1 and len(tokens[0]) == 1 and tokens[0].isalpha():
+            if re.search(_LONE_LETTER.format(re.escape(tokens[0].upper())), raw):
+                return True
+        elif f" {' '.join(tokens)} " in padded:
+            return True
+    return False
 
 
 def mentions(text: str, term: str) -> bool:
     """True if `term` (or any synonym of it) appears in `text` as whole words."""
-    return _mentions_padded(_padded(text), term)
+    return _mentions_padded(_padded(text), term, text)
 
 
 def seniority_level(title: str) -> int:
@@ -325,7 +339,7 @@ def extract_skills(text: str, extra_vocab: Iterable[str] = ()) -> list[str]:
     """
     vocab = {normalize_skill(v) for v in (*TECH_SKILLS, *SKILL_SYNONYMS, *extra_vocab) if v}
     padded = _padded(text)
-    return sorted(v for v in vocab if _mentions_padded(padded, v))
+    return sorted(v for v in vocab if _mentions_padded(padded, v, text))
 
 
 def parse_salary(text: str | None) -> tuple[float | None, float | None]:

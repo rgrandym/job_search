@@ -19,7 +19,7 @@ from src.core.llm import Role, UsageSink
 from src.core.llm_provider import LLMProvider
 from src.cv import master_cv_manager as mgr
 from src.cv.ats import check_docx
-from src.cv.cover_letter import letter_context, write_letter
+from src.cv.cover_letter import letter_context, letter_gaps, write_letter
 from src.cv.docx_exporter import export_cover_letter, export_docx
 from src.cv.docx_original import align_to_document, write_like_original
 from src.cv.fit_check import compare_fit
@@ -807,6 +807,7 @@ def _write_tailored(
             tailored.headline_options,
             tailored.role_skills,
             tailored.academic,
+            tailored.skills_to_confirm,
         )
         notes.insert(0, f"Written in the design of {original.name}")
     elif template == tailored_documents.ORIGINAL:
@@ -919,9 +920,11 @@ async def write_cover_letter(
         llm,
         motivation(ws, document.cv_id if document else None),
         letter_context(document.tailored if document else None),
+        True,
+        letter_gaps(document.tailored if document else None),
     )
     if not letter.paragraphs:
-        raise ValueError("Every drafted paragraph was rejected by the guards; try again")
+        raise ValueError("The model wrote no paragraphs; try again")
     progress.step("Exporting to Word")
     path = _new_output_path(ws, f"{_file_stem(master_cv, job)}_cover_letter", "cover_letters")
     exported = export_cover_letter(letter, master_cv, path, template)

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from datetime import date
 from typing import Any
 
 import pytest
@@ -151,6 +152,9 @@ def test_summary_prompt_asks_for_capabilities_publications_and_adjacent_routes()
 
     for phrase in ("capabilities", "publications", "business development", "[src-N]", "gap"):
         assert phrase in SUMMARY_SYSTEM
+    # Leadership carries into senior roles in a neighbouring function, at the scope it shows.
+    assert "leadership-level adjacent families" in SUMMARY_SYSTEM
+    assert "founding or running a company" in MATCHER_SYSTEM
     record = ProfileSummary.model_fields["publications"]
     assert record.default is None  # profiles stored before the field still load
 
@@ -239,6 +243,12 @@ def test_family_titles_are_not_silently_filtered_by_candidate_level(master_cv: M
     assert fam.rejected is None
 
 
+def test_up_to_six_adjacent_families_are_searched(master_cv: MasterCV) -> None:
+    many = [SALES.model_copy(update={"name": f"Area {n}"}) for n in range(7)]
+    checked = check_families(_summary(CORE, *many), master_cv).role_families
+    assert [f.rejected is None for f in checked[1:]] == [True] * 6 + [False]
+
+
 # ---------------------------------------------------------------- search planning
 
 
@@ -253,6 +263,18 @@ def test_family_terms_budget_tiers_and_widen() -> None:
     assert len({f for _, f in tight}) == 4  # a limit never drops a whole family
     rejected = SALES.model_copy(update={"rejected": "unrealistic"})
     assert all(f != "Solutions consulting" for _, f in family_terms(_summary(rejected), True, 16))
+
+
+def test_family_terms_mix_tiers_so_a_capped_source_reaches_each_one() -> None:
+    core = CORE.model_copy(
+        update={"titles": ["Machine Learning Engineer", "Recommender Engineer", "Ranking Engineer",
+                           "Search Relevance Engineer", "Personalisation Engineer"]}
+    )  # fmt: skip
+    terms = family_terms(_summary(core, LEAD, BD, SALES), widen=True, limit=16)
+    assert terms[0][1] == "ML engineering"  # core first on ties
+    tiers = {"ML engineering": "core", "ML leadership": "progression"}
+    first = {tiers.get(f, "adjacent") for _, f in terms[:5]}
+    assert first == {"core", "progression", "adjacent"}  # LinkedIn stops after a few searches
 
 
 def test_generic_titles_match_and_attribute_to_their_family() -> None:
@@ -304,6 +326,91 @@ def test_search_plans_by_family_attributes_results_and_logs_yield(
     yields = {y.family: y for y in history.family_yield(ws, "master")}
     assert yields["ML engineering"].landing is True and yields["ML engineering"].matches == 3
     assert yields["Business development"].landing is False  # 3 searches, no match
+
+
+LONG = "Requirements: " + "solutions consulting with enterprise clients, " * 20
+
+
+def _screen_areas(prompt: str) -> ScreeningBatch:
+    """ML roles fit well; a solutions role is a sound adjacent stretch (57.5 points)."""
+    out = []
+    for job_id, title in re.findall(r'job_id="([^"]+)">\ntitle: ([^\n]+)', prompt):
+        levels = (4, 4, 3, 4, 3, 3) if "Machine Learning" in title else (2, 2, 2, 2, 3, 4)
+        out.append(_assessment(levels).model_copy(update={"job_id": job_id}))
+    return ScreeningBatch(verdicts=out)
+
+
+def test_widened_search_covers_adjacent_roles_with_their_own_threshold(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    searched: list[list[str]] = []
+    jobs = [
+        JobPosting(id="sc", title="Solutions Consultant", company="A", description=LONG,
+                   work_arrangement="remote"),
+        JobPosting(id="ml", title="Machine Learning Engineer", company="B", description=LONG,
+                   work_arrangement="remote"),
+    ]  # fmt: skip
+
+    class Board:
+        name = "reed"
+
+        def fetch(self, query: SearchQuery) -> list[JobPosting]:
+            searched.append(list(query.titles))
+            return jobs
+
+    monkeypatch.setattr(search_service, "build_sources", lambda *a, **k: ([Board()], {}))
+    llm = FakeLLM({ProfileSummary: _summary(CORE, BD, SALES), ScreeningBatch: _screen_areas})
+    monkeypatch.setattr(ws, "structured", lambda *a, **k: llm)
+
+    def listed(**kw: Any) -> set[str]:
+        req = SearchRequest(query=SearchQuery(), smart=True, widen=True, **kw)
+        out = asyncio.run(run_search(ws, req))
+        return {r.job.id for r in [*out.report.matches, *out.report.to_check]}
+
+    assert listed() == {"ml"}  # 57 is below the search's threshold of 60
+    assert "Solutions Consultant" in searched[-1]  # widen searched the adjacent family
+    assert listed(area_thresholds={"adjacent": 50}) == {"ml", "sc"}
+    assert listed(area_thresholds={"progression": 50}) == {"ml"}  # only its own area
+
+
+def test_titles_given_win_over_widen_and_say_so(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    searched: list[str] = []
+
+    class Board:
+        name = "reed"
+
+        def fetch(self, query: SearchQuery) -> list[JobPosting]:
+            searched.extend(query.titles)
+            return []
+
+    monkeypatch.setattr(search_service, "build_sources", lambda *a, **k: ([Board()], {}))
+    events: list[str] = []
+
+    async def emit(kind: str, payload: dict[str, Any]) -> None:
+        events.append(str(payload.get("message", "")))
+
+    req = SearchRequest(query=SearchQuery(titles=["Data Engineer"]), smart=True, widen=True)
+    asyncio.run(run_search(ws, req, emit))
+    assert searched == ["Data Engineer"]
+    assert any("Titles were given" in e for e in events)
+    assert search_service.widen_note(ws, req.model_copy(update={"widen": False})) is None
+
+
+def test_candidate_level_comes_from_established_roles_not_a_founder_title() -> None:
+    from src.cv.models import Experience
+    from src.jobs.matcher import established_level
+    from src.tools.search_tools import seniority_level
+
+    today = date(2026, 10, 1)
+    principal = Experience(id="p", company="A", title="Principal Scientist", start="2018-01",
+                           end="2023-06")  # fmt: skip
+    ceo = Experience(id="c", company="B", title="Co-Founder & CEO", start="2023-07")
+    brief = Experience(id="d", company="C", title="Director", start="2017-01", end="2017-05")
+    level = established_level([ceo, principal, brief], today)
+    assert level == seniority_level("Principal Scientist")
+    assert established_level([ceo], today) == seniority_level("CEO")  # nothing else to go on
 
 
 def test_requested_pivot_does_not_imply_a_seniority_filter(master_cv: MasterCV) -> None:

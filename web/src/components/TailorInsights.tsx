@@ -91,6 +91,7 @@ export function PositioningDetails({ positioning, requirements }: { positioning?
             return (
               <p key={r.requirement}>
                 <span className={cn("inline-block w-16", tone)}>{label}</span>
+                {r.importance === "key" && <span className="mr-1 font-semibold text-fg">Key:</span>}
                 {r.requirement}
                 {r.priority === "desirable" && " (desirable)"}
                 {r.note && <span className="text-faint"> · {r.note}</span>}

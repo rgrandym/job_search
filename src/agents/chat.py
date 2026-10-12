@@ -27,6 +27,7 @@ from src.core.config import LLMProviderName
 from src.core.llm import ChatMessage, LLMError, Role, fallback, usage
 from src.core.llm.calls import cancel_group
 from src.jobs.models import SearchQuery
+from src.services.search_service import AreaThresholds
 from src.services.workspace import Workspace
 
 
@@ -152,6 +153,7 @@ async def handle_user_message(
     widen: bool = False,
     profile_key: str | None = None,
     mcp_url: str | None = None,
+    area_thresholds: AreaThresholds | None = None,
     switch: bool = False,
 ) -> None:
     """Run one assistant turn. On failure the turn is rolled back so history stays valid.
@@ -168,6 +170,7 @@ async def handle_user_message(
         smart=smart,
         threshold=threshold,
         widen=widen,
+        area_thresholds=area_thresholds or {},
         profile_key=profile_key,
         mcp_url=mcp_url,
         native_session=_native_for(session, chat_provider or ws.llm.provider),
@@ -181,6 +184,7 @@ async def handle_user_message(
         "smart_match": smart,
         "threshold": threshold,
         "widen": widen,
+        "area_thresholds": area_thresholds or {},
         "chat_model": chat_model or ws.llm.model_for(chat_role),
         "chat_provider": chat_provider or ws.llm.provider,
     }

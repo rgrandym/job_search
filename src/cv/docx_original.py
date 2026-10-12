@@ -27,9 +27,10 @@ from typing import Any
 
 from docx import Document
 from docx.document import Document as DocxDocument
+from docx.shared import RGBColor
 from docx.text.paragraph import Paragraph
 
-from src.cv.models import Bullet, Experience, MasterCV, SkillGroup
+from src.cv.models import Bullet, Experience, MasterCV, SkillGroup, SkillToConfirm
 from src.tools.docx_tools import (
     all_paragraphs,
     find_paragraph,
@@ -54,6 +55,8 @@ PROFILE_WORDS = {"profile", "summary", "statement", "about"}
 DATE_LINE = re.compile(r"\d{1,2}\s+[A-Z][a-z]+\s+\d{4}")
 HEADLINE_MATCH = 0.6  # enough to take the file's own headline line as the CV's headline
 ROLE_SKILLS_LABEL = "Relevant skills for this role"
+SKILLS_TO_CONFIRM_LABEL = "Skills to confirm before use (not yet claimed)"
+REVIEW_RED = RGBColor(0xC0, 0x00, 0x00)
 # Section kinds by heading words, in the order an academic CV presents them.
 ACADEMIC_SECTIONS: list[tuple[str, set[str]]] = [
     ("profile", {"profile", "summary", "statement", "about", "objective"}),
@@ -249,6 +252,7 @@ def write_like_original(
     headline_options: Sequence[str] = (),
     role_skills: Sequence[str] = (),
     academic: bool = False,
+    skills_to_confirm: Sequence[SkillToConfirm] = (),
 ) -> list[str]:
     """Save `tailored` as a copy of `original` (the Word file `source` was read from) at
     `out`; returns notes on anything kept as in the original. `headline_options` are written
@@ -275,6 +279,7 @@ def write_like_original(
     # Last, so the added lines are never taken for a role, summary or skills line.
     notes += _headline_options(headline, tailored.basics.headline, headline_options)
     notes += _role_skills_line(doc, role_skills)
+    notes += _skills_to_confirm_line(doc, skills_to_confirm)
     if academic:
         notes += academic_order(doc)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -363,6 +368,18 @@ def _role_skills_line(doc: DocxDocument, skills: Sequence[str]) -> list[str]:
         return ["Relevant skills line not added (no profile or summary section in the Word file)"]
     insert_paragraph_after(lines[-1], f"{ROLE_SKILLS_LABEL}: {' · '.join(skills)}")
     return []
+
+
+def _skills_to_confirm_line(doc: DocxDocument, suggestions: Sequence[SkillToConfirm]) -> list[str]:
+    """Add unverified skills in red, visibly separate from confirmed CV claims."""
+    if not suggestions:
+        return []
+    text = f"{SKILLS_TO_CONFIRM_LABEL}: " + " · ".join(s.skill for s in suggestions)
+    lines = profile_paragraphs(doc)
+    paragraph = insert_paragraph_after(lines[-1], text) if lines else doc.add_paragraph(text)
+    for run in paragraph.runs:
+        run.font.color.rgb = REVIEW_RED
+    return [] if lines else ["Skills to confirm placed at the end (no profile section found)"]
 
 
 def _section_kind(paragraph: Paragraph) -> str | None:

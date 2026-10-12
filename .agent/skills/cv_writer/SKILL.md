@@ -17,7 +17,7 @@ Turns a factual **Master CV** into job-specific, ATS-optimised CVs and exports t
 | `src/cv/claims.py` | Shared wording checks: stock superlatives, added ownership or scope (`escalation`) |
 | `src/cv/cover_letter.py` | Cover-letter draft (LLM) → guarded paragraphs (deterministic) → hiring-manager review → one guarded redraft |
 | `src/services/tailored_documents.py` | Saved tailored drafts, guarded edits and Word versions |
-| `src/services/cv_versions.py` | A job's tailored versions compared with their originals, ranked and saved |
+| `src/services/cv_versions.py` | A job's tailored versions compared with one original from the CV library (the Master or selected CV, or one the user picks; never a deleted CV), ranked and saved |
 | `src/services/cover_letters.py` | Saved letter text, edits and Word/text exports |
 | `src/cv/ats.py` | Reads the exported .docx back the way an ATS does |
 | `src/cv/docx_original.py` | Tailored CV written as a copy of the original Word CV (its design kept) |
@@ -87,6 +87,8 @@ bullets with fresh ids and their numbers as `metrics`. Inferred items stay sugge
 3. **Soft keywords** (`soft_skills`): stakeholder management, mentoring, ownership, …
 4. **Priority split**: `must_have` (required / "you have") vs `nice_to_have`
    (preferred / bonus). Use the JD's own words. Do not infer requirements it doesn't state.
+   In the requirement map, mark the few capabilities central to the role as `key` and the
+   rest `supporting`; a pivotal desirable can be key. Comparison reads key rows first.
 5. **Responsibilities**: the verbs and outcomes the role is accountable for. These shape
    which bullets get promoted.
 6. **Level signals** (`level_signals`): autonomy, decision authority, people led, budget,
@@ -176,6 +178,12 @@ The plan works in order:
    differentiators, what carries over to a role outside their function, and their level
    against the job's. Dropped if it adds numbers the CV lacks or uses superlatives.
 3. **Wording**, starting from the CV's achievements, not the job's language.
+   Keep any job-relevant skill named only in the source summary; the summary guard rejects
+   a rewrite that drops its only mention.
+   The writer may suggest up to five posting-named techniques missing from the CV when its
+   documented background makes them plausible. Each suggestion quotes real CV words, appears
+   in a separate red "Skills to confirm before use (not yet claimed)" line in Word, and is
+   shown in the report. It is not added to the factual CV, fit score or letter evidence.
 
 **Level** (`tailor.level_note`, code): a job below the highest level held gets "lead with
 hands-on delivery and the skills used day to day; keep senior experience as supporting
@@ -287,10 +295,11 @@ in `document_notes`.
 Every tailoring is kept as its own version for the job, with the choices it was written with
 (`TailoredDocument.settings`: design, emphasis, level, length, audience) and a label numbered
 per job (`cv_versions.labels`: "V1 · Automatic", "V2 · Level: more senior"). The job card
-lists the versions and shows the chosen one's report. `cv_versions.compare(ws, job_id, ids)`
-(`POST /api/jobs/{job_id}/cv-comparison`, agent tool `compare_cv_versions`) reads the chosen
-versions and the original each came from (one per source CV; an imported Word CV has none)
-in **one** LLM call (`fit_check.score_versions`, at most `MAX_VERSIONS` = 6 CVs), in an order
+lists the versions and shows the chosen one's report.
+`cv_versions.compare(ws, job_id, ids, baseline_id)` (`POST /api/jobs/{job_id}/cv-comparison`,
+agent tool `compare_cv_versions`) reads the chosen versions and **one** original from the CV
+library as it is now (the Master CV, else the selected CV, unless the user picks another; a
+deleted CV is refused), every version set against it, side by side in one LLM call (`fit_check.score_versions`, at most `MAX_VERSIONS` = 6 CVs), in an order
 fixed by a hash of the job and each text, so no CV is identified and one reader applies the
 same standard to all. Same rubric, weights, requirement list (the newest version's) and ATS
 keywords as 3b. Code then sets each version against its original (`version_areas`: every
@@ -298,7 +307,26 @@ dimension, requirements shown and each requirement gained or lost, keyword cover
 on the first page, keywords added or lost: better / worse / same) and picks the best
 (`best_version`: score, then requirements, then keywords; a tailored version wins a tie). The
 comparison is saved per job (`data/cv_comparisons/`) and marked stale once a version it read
-is edited or removed. Like 3b it measures how clearly each CV shows the fit, never the
+is edited or removed, or its original leaves the library.
+
+**Deterministic and checkable (user's decision 2026-10-11).** Each comparison is read
+`READS` = 3 times in parallel, each in another CV order (`fit_check.read_versions`). Every
+rating and every requirement met must quote a line of that CV (`EvidencedReading`); code checks
+each quote (`fit_check.verify`: case, spacing and punctuation ignored, "..." pieces, at least two
+words): a requirement without a found quote does not count, and a rating without one is capped
+at `UNQUOTED_CAP` = 1. The median rating per dimension and the requirements most reads found
+count (`consensus`). Each CV's reading is remembered (`data/cv_comparisons/readings.json`, keyed
+by `fit_check.reading_key`: CV text, job, requirements, rubric, reads and the CV model), so
+comparing again gives the same scores; only CVs not read before are read, still beside the
+others. Code then answers the questions with fixed margins: each version's verdict against
+its original (`fit_check.verdict`: better / worse / mixed / same; the score by `NOISE_MARGIN`
+= 5 or any quoted requirement gained or lost; exact keyword changes are shown as diagnostic
+detail, not proof of overall fit), what
+a setting did (`cv_versions.setting_effects`: versions that differ in exactly one of level,
+length, emphasis, audience; "clear" or "no effect" by the same margins), and the best version
+(`best_version`: scores within the margin of the top count as the same; among those the checked
+requirements and score decide before the exact job keywords; the summary names
+what decided and what the runner-up does better). Each version also reports how many lines tailoring reworded (`rewritten`). Like 3b it measures how clearly each CV shows the fit, never the
 candidate's actual fit.
 
 ## 3c. Cover letters
@@ -310,27 +338,43 @@ tailored CV chosen for the job (the newest by default), otherwise the CV selecte
 library (not necessarily the Master CV). When written from a tailored CV, the letter follows
 its **positioning and requirement map** (`letter_context`) and never claims a requirement it
 marks as a gap. The letter travels with the CV, so it does not repeat it: no contact header,
-date or recap (user's decision 2026-10-10). The LLM fills a fixed `LetterSections` template:
-an opening (interest naming the job title + overall fit), exactly two short evidence
-paragraphs (each on one of the job's most important requirements: one CV example and why it
-matters for the role), an optional **bridge** (only for a role outside the current function
-or at another level: what carries over, honest about what is new, motivation only from the
-career intent) and a short conclusion, under 300 body words so it fits one page. The model
-may use the job's terms when the cited CV entries support them. `apply_letter` blocks fabrication: each paragraph cites existing CV ids in
+date or recap (user's decision 2026-10-10). The LLM fills the **master template** (user's
+decision 2026-10-11, `LetterSections`; the model adapts the wording, never the structure):
+1. **Introduction**: "I am applying for the <exact title> role at <organisation> because
+<reason from the career intent, else the posting's work>" + "My experience in <two to four CV
+areas> fits the requirements and responsibilities of this role" (cited).
+2. **Evidence**: one or two short paragraphs, each on one of the job's most important
+requirements: one CV example, its result, and why it matters for the role.
+3. **Gap** (`bridge`): required when code finds essential requirements the tailored CV's map
+marks `not_evidenced` or `needs_confirmation` (`letter_gaps`, sent as `<gaps>`), or the role
+is a change of function or level: "I bring extensive experience in <cited strengths>.
+Although I have not yet worked directly in <the gap, named plainly>, I learn quickly and can
+build what is missing, as the range of <cited skills> I have mastered over the years shows."
+The paragraph must cite the CV entries behind the strengths and that range; a gap is never
+presented as experience; motivation for a move only from the career intent.
+4. **Conclusion**: the contribution the candidate could make, inviting a conversation.
+The body stays under `MAX_LETTER_WORDS` = 350 words so it fits one page. The model
+may use the job's terms when the cited CV entries support them. `apply_letter` checks for fabrication: each paragraph cites existing CV ids in
 `source_ids`, personal claims need a source, named skills must appear in cited CV evidence,
 and every number is in its cited sources or in the job description (facts about the employer
 may be quoted). Hyperbole, clichés ("perfect fit", "hit the ground running") and added
-ownership or scope over the cited entries (`claims.escalation`) are rejected. A rejected
-section or broken template triggers one revised draft with specific feedback. A guarded
-letter is then read by the hiring manager (`review_letter`, `LetterReview`: at most 4 fixes:
-generic opening, recited CV, top requirements not addressed, an unconvincing or not honest
-case for the move, too long); with fixes, one redraft is made and used only if it passes the
-same checks.
+ownership or scope over the cited entries (`claims.escalation`) are caught. A failed check
+or broken template triggers one revised draft with specific feedback; the draft with fewer
+problems is kept. **The letter is always written (user's decision 2026-10-11):** a paragraph a
+check still questions is kept and flagged (`CoverLetter.flags`, red in the Word file and in
+the app, with the reason), and template issues (role not named, section missing, too long)
+are listed as `notes`; the user edits the paragraph or keeps it as written (`LetterEdits.keep`;
+an unchanged kept paragraph is not flagged again). The letter is then read by the hiring
+manager (`review_letter`, `LetterReview`: at most 4 fixes: generic opening, recited CV, top
+requirements not addressed, an unconvincing or not honest case for the move, too long); with
+fixes, one redraft is made and used only if the checks find no more problems in it. A
+one-letter skill (R, C) counts only as a standalone capital letter, never inside "R&D" or
+"U.S." (`search_tools.mentions`).
 The user reviews and can edit the resulting letter in the app; omitted examples do not block
 creation.
 Motivation comes **only** from the user's career intent (direction, energising work, target
 areas); without one, interest stays grounded in the work described in the posting.
-Every paragraph is recorded in `CoverLetter.changes`; rejected ones are reported. The Word
+Every paragraph is recorded in `CoverLetter.changes`; flagged ones are shown in red. The Word
 file starts with the greeting, without the CV contact header or date. New CV Word files live in
 `output/cvs/`; letters live in `output/cover_letters/`, with editable letter records in
 `data/cover_letters/`. The Cover letters tab lists current and earlier letters separately from

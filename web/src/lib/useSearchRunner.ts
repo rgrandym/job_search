@@ -79,6 +79,7 @@ export function useSearchRunner() {
           threshold: s.threshold,
           profile_key: s.useCv || alertOnly ? s.profileKey : null,
           widen: s.widen && s.useCv && !alertOnly,
+          area_thresholds: s.areaThresholds,
           run_id: runId,
         },
         onEvent,

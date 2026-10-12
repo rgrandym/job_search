@@ -203,6 +203,9 @@ class RequirementEvidence(_Strict):
 
     requirement: str = Field(description="The requirement in the job's own words")
     priority: Literal["essential", "desirable"] = "essential"
+    importance: Literal["key", "supporting"] = Field(
+        "supporting", description="Key = pivotal to doing this role; supporting = useful context"
+    )
     match: MatchClass = Field(
         description="direct: the CV shows this exact skill or work · transferable: equivalent "
         "work in another context · adjacent: related but not equivalent work · "
@@ -225,6 +228,14 @@ class Positioning(_Strict):
         "", description="For a role outside their current function: what carries over"
     )
     level: str = Field("", description="Their evidenced level against the job's level")
+
+
+class SkillToConfirm(_Strict):
+    """A job technique plausibly familiar from the background, not evidenced by the CV."""
+
+    skill: str = Field(description="Exact technique or tool named in the job posting")
+    background_quote: str = Field(description="Exact CV words making this worth asking about")
+    reason: str = Field(description="Why the background makes it worth asking the user")
 
 
 class TailoringPlan(_Strict):
@@ -252,6 +263,11 @@ class TailoringPlan(_Strict):
         default_factory=list,
         description="Up to 8 of the CV's own skills most relevant to this job, for one "
         "'Relevant skills for this role' line under the summary",
+    )
+    skills_to_confirm: list[SkillToConfirm] = Field(
+        default_factory=list,
+        description="At most five job techniques plausibly used but absent from the CV; "
+        "shown in red for review, never treated as confirmed experience",
     )
 
     @field_validator("bullet_order", mode="before")
@@ -351,6 +367,47 @@ class FitReading(_Strict):
         description="Numbers of the listed requirements this CV clearly shows the candidate meets",
     )
     impression: str = Field("", description="One sentence: what the top of the CV conveys")
+    evidence: dict[str, str] = Field(
+        default_factory=dict, description="Dimension -> the CV line behind its rating (checked)"
+    )
+    requirement_quotes: dict[str, str] = Field(
+        default_factory=dict, description="Requirement number -> the CV line that shows it"
+    )
+
+
+class RatedLine(_Strict):
+    """One rating and the CV line behind it (LLM output)."""
+
+    rating: int = Field(ge=0, le=4)
+    quote: str = Field(
+        "", description="One line copied word for word from this CV that supports it; '' for 0"
+    )
+
+
+class MetRequirement(_Strict):
+    """A listed requirement the CV shows the candidate meets (LLM output)."""
+
+    number: int = Field(description="The requirement's number in the list")
+    quote: str = Field(description="The CV line that shows it, copied word for word")
+
+
+class EvidencedReading(_Strict):
+    """One CV read for the job, each rating and requirement backed by a quoted line (LLM
+    output; code checks every quote against the CV before it counts)."""
+
+    function: RatedLine = Field(description="0 another discipline .. 4 does this work now")
+    domain: RatedLine = Field(description="0 unrelated field .. 4 same field")
+    seniority: RatedLine = Field(description="0 far off .. 4 same level and scope")
+    leadership: RatedLine = Field(description="0 not shown .. 4 the kind the job needs")
+    sector: RatedLine = Field(description="0 unrelated sector .. 4 same sector")
+    requirements_met: list[MetRequirement] = Field(default_factory=list)
+    impression: str = Field("", description="One sentence: what the top of the CV conveys")
+
+
+class EvidencedReadings(_Strict):
+    """Several CVs read independently for one job, in the order given (LLM output)."""
+
+    readings: list[EvidencedReading] = Field(description="One reading per CV, in the order given")
 
 
 class FitReadout(_Strict):
@@ -423,6 +480,10 @@ class TailoredCV(_Strict):
     role_skills: list[str] = Field(
         default_factory=list, description="The 'Relevant skills for this role' line (CV skills)"
     )
+    skills_to_confirm: list[SkillToConfirm] = Field(
+        default_factory=list,
+        description="Unverified job techniques shown in red, outside the confirmed CV facts",
+    )
     academic: bool = Field(False, description="Written for an academic post")
     fit_check: FitComparison | None = None
 
@@ -435,12 +496,6 @@ class TailoringSettings(_Strict):
     level: str = "auto"
     length: str = "auto"
     audience: str = "auto"
-
-
-class FitReadings(_Strict):
-    """Several CVs read independently for one job, in the order given (LLM output)."""
-
-    readings: list[FitReading] = Field(description="One reading per CV, in the order given")
 
 
 class AreaChange(_Strict):
@@ -474,9 +529,38 @@ class VersionReading(_Strict):
     words: int = 0
     rejected_changes: int = 0
     left_out: int = 0
+    rewritten: int = Field(0, description="Lines whose wording tailoring changed")
     areas: list[AreaChange] = Field(
         default_factory=list, description="Against its original (empty for an original)"
     )
+    evidence: dict[str, str] = Field(
+        default_factory=dict, description="Dimension -> the checked CV line behind its rating"
+    )
+    requirement_quotes: dict[str, str] = Field(
+        default_factory=dict, description="Requirement number -> the checked CV line showing it"
+    )
+    verdict: Literal["better", "worse", "mixed", "same", ""] = Field(
+        "", description="Against its original, by fixed margins ('' for an original)"
+    )
+    verdict_reason: str = ""
+
+
+class SettingEffect(_Strict):
+    """Two versions that differ in one tailoring setting only: what that setting changed."""
+
+    setting: str
+    from_id: str
+    to_id: str
+    from_value: str
+    to_value: str
+    score_change: int
+    requirements_change: int
+    keyword_change: float
+    dimensions: list[DimensionChange] = Field(
+        default_factory=list, description="before = the first version's, after = the second's"
+    )
+    effect: Literal["clear", "none"]
+    text: str
 
 
 class VersionComparison(_Strict):
@@ -491,6 +575,10 @@ class VersionComparison(_Strict):
     readings: list[VersionReading] = Field(default_factory=list)
     best_id: str | None = None
     summary: str = ""
+    setting_effects: list[SettingEffect] = Field(default_factory=list)
+    reads: int = Field(1, description="Independent readings per CV; the median counts")
+    margin: int = Field(0, description="Score points below which two CVs read the same")
+    method_version: int = Field(1, description="Comparison rubric and ranking version")
 
 
 class TailoredDocument(_Strict):
@@ -552,8 +640,9 @@ class LetterSections(_Strict):
     evidence: list[LetterParagraph] = Field(min_length=1, max_length=2)
     bridge: LetterParagraph | None = Field(
         None,
-        description="Only for a role outside the current function or at another level: how the "
-        "experience carries over, and the candidate's stated reason for the move",
+        description="The gap paragraph: required when <gaps> lists requirements or the role is "
+        "outside the current function or level; the strengths that carry over, the gap named "
+        "plainly, and the range of skills mastered that shows the candidate learns quickly",
     )
     conclusion: LetterParagraph
     closing: str = "Yours sincerely,"
@@ -582,8 +671,17 @@ class LetterReview(_Strict):
     )
 
 
+class LetterFlag(_Strict):
+    """A paragraph a check questions: written, shown in red, for the user to decide."""
+
+    paragraph: int = Field(ge=0, description="0-based index into CoverLetter.paragraphs")
+    reason: str
+
+
 class CoverLetter(_Strict):
-    """A guarded cover letter: only paragraphs whose claims trace to the Master CV."""
+    """A checked cover letter. Every paragraph is kept; one whose claims do not trace to the
+    CV is flagged (red in Word and the app) until the user edits it or keeps it as written
+    (user's decision 2026-10-11)."""
 
     target_title: str
     target_company: str | None = None
@@ -591,7 +689,13 @@ class CoverLetter(_Strict):
     paragraphs: list[str]
     closing: str
     changes: list[ChangeRecord] = Field(
-        default_factory=list, description="Every proposed paragraph, accepted or rejected"
+        default_factory=list, description="Every proposed paragraph, accepted or flagged"
+    )
+    flags: list[LetterFlag] = Field(
+        default_factory=list, description="Paragraphs to review, with the check's reason"
+    )
+    notes: list[str] = Field(
+        default_factory=list, description="Letter-level issues for the user (structure, length)"
     )
 
 

@@ -38,6 +38,7 @@ from src.cv.models import (
     Positioning,
     RequirementEvidence,
     SkillGroup,
+    SkillToConfirm,
     TailoredCV,
     TailoredCVEdits,
     TailoringPlan,
@@ -77,7 +78,11 @@ for a recruiter and a hiring manager. {UNTRUSTED}
 
 Work in this order.
 1. `requirements`: every meaningful requirement of the job (its own words, essential or \
-desirable), with the CV ids (bullet, role or project) that show it and one class:
+desirable), with the CV ids (bullet, role or project) that show it, `importance`, and one class. \
+Mark only the few capabilities or experiences central to delivering this particular role as \
+`key`; mark the rest `supporting`. Infer importance from the work and outcomes, not the length \
+of a skills list: a desirable may be key, and an essential may be routine. Do not turn every \
+requirement into a key one.
    - direct: the CV shows this exact skill or work;
    - transferable: the candidate did genuinely equivalent work in another context (say how \
 in `note`);
@@ -122,8 +127,17 @@ Compelling through specifics, never through adjectives. Do not reduce the candid
 job description or repeat a keyword list. If the CV's summary has several paragraphs \
 (separated by a blank line), return the same number, separated the same way, at about the \
 same length.
+Keep any job-relevant skill or experience named in the source summary when it is the only \
+place the CV names it. Give the key requirements priority over incidental desirable terms.
 - `role_skills`: up to 8 of the CV's own skills most relevant to this job, most relevant \
 first, for one line under the summary.
+- `skills_to_confirm`: up to 5 techniques or routine tools named in this job but absent \
+from the CV, which the documented education and hands-on work make plausible but do not \
+prove. Copy the relevant CV words into `background_quote` and explain the link in `reason`. \
+These are red review suggestions, never \
+confirmed claims. A PhD or job title alone does not prove mastery. Do not suggest credentials, \
+regulatory authority, years, ownership, leadership, or specialist platform expertise from a \
+general background. Never put unverified skills in the summary, role_skills, bullets or headline.
 - `bullet_order` for every role, and `skills_priority`: the CV's skills ordered by relevance \
 to the job (skills you leave out stay, after the listed ones).
 
@@ -395,6 +409,7 @@ def apply_plan(
         positioning=_checked_positioning(plan.positioning, master),
         requirements=requirements,
         role_skills=_role_skills(plan.role_skills, master),
+        skills_to_confirm=_skills_to_confirm(plan.skills_to_confirm, master, jd),
         academic=jd.academic,
     )
 
@@ -533,6 +548,44 @@ def _role_skills(proposed: list[str], master: MasterCV) -> list[str]:
     text = cv_to_text(master)
     kept = [s.strip() for s in proposed if s.strip() and mentions(text, s.strip())]
     return list(dict.fromkeys(kept))[:MAX_ROLE_SKILLS]
+
+
+def _skills_to_confirm(
+    proposed: list[SkillToConfirm], master: MasterCV, jd: JDAnalysis
+) -> list[SkillToConfirm]:
+    """Keep distinct posting-named skills absent from the factual CV, at most five."""
+    stated = {normalize_skill(s): s for s in jd.hard_skills}
+    known = cv_to_text(master)
+    plain = " ".join(re.findall(r"[\w]+", known.casefold()))
+    out: list[SkillToConfirm] = []
+    seen: set[str] = set()
+    for item in proposed:
+        key = normalize_skill(item.skill)
+        skill = stated.get(key)
+        quote = " ".join(re.findall(r"[\w]+", item.background_quote.casefold()))
+        supported = len(quote.split()) >= 2 and f" {quote} " in f" {plain} "
+        regulated = bool(
+            re.search(
+                r"\b(?:certification|licen[cs]e|clearance|right to work|regulatory|"
+                r"cgmp|gmp|gcp|glp|fda|mhra|ema|management|leadership)\b",
+                skill or "",
+                re.IGNORECASE,
+            )
+        )
+        if (
+            not skill
+            or key in seen
+            or mentions(known, skill)
+            or not item.reason.strip()
+            or not supported
+            or regulated
+        ):
+            continue
+        seen.add(key)
+        out.append(item.model_copy(update={"skill": skill}))
+        if len(out) == 5:
+            break
+    return out
 
 
 def printed_text(tailored: TailoredCV) -> str:
@@ -728,6 +781,23 @@ def _apply_summary(
         reason = f"introduces numbers not in the CV: {sorted(invented)}"
     elif skills:
         reason = f"names skills the CV does not evidence: {', '.join(skills)}"
+    else:
+        rest = cv_to_text(
+            master.model_copy(update={"basics": master.basics.model_copy(update={"summary": ""})}),
+            tags=False,
+        )
+        lost = [
+            term
+            for term in ats_keywords(jd)
+            if mentions(master.basics.summary or "", term)
+            and not mentions(rest, term)
+            and not mentions(summary, term)
+        ]
+        if lost:
+            reason = (
+                "removes job-relevant evidence found only in the original summary: "
+                + ", ".join(lost)
+            )
     if reason is None:
         cv.basics.summary = summary
     return [_record("summary", master.basics.summary or "", summary, reason)]

@@ -95,7 +95,13 @@ from src.services import (
     tracker,
 )
 from src.services import connections as connections_service
-from src.services.search_service import SearchOutcome, SearchRequest, get_summary, run_search
+from src.services.search_service import (
+    SearchOutcome,
+    SearchRequest,
+    get_summary,
+    parse_area_thresholds,
+    run_search,
+)
 from src.services.workspace import Workspace, get_workspace
 
 app = FastAPI(title="AI Job Search", version="0.1.0")
@@ -946,6 +952,7 @@ def _tailor_report(tailored: TailoredCV, document_id: str | None, url: str) -> d
         "positioning": tailored.positioning,
         "requirements": tailored.requirements,
         "role_skills": tailored.role_skills,
+        "skills_to_confirm": tailored.skills_to_confirm,
         "academic": tailored.academic,
         "fit_check": tailored.fit_check,
         "rejected": sum(not c.accepted for c in tailored.changes),
@@ -1014,25 +1021,31 @@ def all_tailored_cvs() -> list[dict[str, Any]]:
 
 class CompareVersionsRequest(BaseModel):
     document_ids: list[str] = Field(default_factory=list, description="Empty: every version")
+    baseline_id: str | None = Field(
+        None, description="The library CV read as the original; None: the Master or selected CV"
+    )
 
 
 @app.get("/api/jobs/{job_id}/cv-comparison")
 def cv_comparison(job_id: str) -> dict[str, Any]:
     """The last side-by-side reading of this job's CV versions (none yet: null)."""
-    comparison, stale = cv_versions.saved(get_workspace(), job_id)
-    return {"comparison": comparison, "stale": stale}
+    ws = get_workspace()
+    comparison, stale = cv_versions.saved(ws, job_id)
+    return {"comparison": comparison, "stale": stale, "baseline": cv_versions.default_baseline(ws)}
 
 
 @app.post("/api/jobs/{job_id}/cv-comparison")
 async def compare_cv_versions(
     job_id: str, body: CompareVersionsRequest, progress_id: str | None = None
 ) -> VersionComparison:
-    """Read the chosen tailored CVs and their originals side by side for this job."""
+    """Read the chosen tailored CVs and one original side by side for this job."""
     try:
         return await progress.run(
             progress_id,
             "Comparing CV versions",
-            cv_versions.compare(get_workspace(), job_id, body.document_ids),
+            cv_versions.compare(
+                get_workspace(), job_id, body.document_ids, baseline_id=body.baseline_id
+            ),
         )
     except (ValueError, LLMError) as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -1162,12 +1175,13 @@ async def cover_letter(
         )
     except (ValueError, LLMError) as exc:
         raise HTTPException(422, str(exc)) from exc
+    saved = cover_letters.find_by_file(ws, path.name)
     return {
+        "id": saved.id if saved else None,
         "download_url": _file_url(path),
         "paragraphs": len(letter.paragraphs),
-        "rejections": [
-            {"source_id": c.source_id, "reason": c.reason} for c in letter.changes if not c.accepted
-        ],
+        "flags": [flag.model_dump() for flag in letter.flags],
+        "notes": letter.notes,
     }
 
 
@@ -1175,6 +1189,7 @@ def _letter_view(document: cover_letters.SavedLetter) -> dict[str, Any]:
     """Return saved letter text and its export links."""
     return {
         "id": document.id,
+        "job_id": document.job_id,
         "title": document.title,
         "company": document.company,
         "candidate_name": document.candidate_name,
@@ -1184,6 +1199,8 @@ def _letter_view(document: cover_letters.SavedLetter) -> dict[str, Any]:
         "greeting": document.letter.greeting,
         "paragraphs": document.letter.paragraphs,
         "closing": document.letter.closing,
+        "flags": [flag.model_dump() for flag in document.letter.flags],
+        "notes": document.letter.notes,
         "docx_url": f"/api/cover-letters/{document.id}/export/docx",
         "txt_url": f"/api/cover-letters/{document.id}/export/txt",
     }
@@ -1216,6 +1233,30 @@ def edit_cover_letter(document_id: str, edits: cover_letters.LetterEdits) -> dic
         return _letter_view(cover_letters.edit(get_workspace(), document_id, edits))
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/cover-letters/{document_id}/preview")
+def preview_cover_letter(document_id: str) -> FileResponse:
+    """The letter as Word lays it out (PDF), shown in the app's viewer."""
+    try:
+        path = cover_letters.preview(get_workspace(), document_id)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return FileResponse(path, filename=path.name, content_disposition_type="inline")
+
+
+@app.post("/api/cover-letters/{document_id}/open")
+async def open_cover_letter(
+    document_id: str, app: Literal["default", "word"] = "word"
+) -> dict[str, bool]:
+    """Open the letter's Word file in Word (or the default app)."""
+    try:
+        opened = await asyncio.to_thread(
+            cover_letters.open_file, get_workspace(), document_id, app == "word"
+        )
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"opened": opened}
 
 
 @app.get("/api/cover-letters/{document_id}/export/{format}")
@@ -1557,6 +1598,7 @@ async def chat_ws(websocket: WebSocket) -> None:
                         bool(msg.get("widen", False)),
                         msg.get("profile_key"),
                         _mcp_base(websocket),
+                        area_thresholds=parse_area_thresholds(msg.get("area_thresholds")),
                         switch=bool(msg.get("switch")),
                     )
                 )

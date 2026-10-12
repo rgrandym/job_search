@@ -79,7 +79,13 @@ Role families: the profile's role_families are the searches run for this candida
 posting in an "adjacent" family (a different function with cited CV evidence and a stated \
 gap) is not "a different discipline": rate function on how much of its day-to-day work \
 the evidence covers (usually 1-2), put the family's gap under gaps, and never make it a \
-dealbreaker on discipline alone.
+dealbreaker on discipline alone. For a leadership-level posting (head, director, VP, chief \
+officer, general manager), rate leadership on all the leadership the profile evidences, not \
+only line management in its current function: founding or running a company, leading teams, \
+holding a budget, raising funding, building partnerships and managing external collaborators \
+all count. A founder or chief executive of a small company has done executive work at that \
+scale: leadership 2-3 for a comparable or one-step-larger scope, 1 only when the role centres \
+on leading far beyond anything evidenced. Rate seniority on the scope of the work, not titles.
 
 Career intent (when given) is what the candidate wants, not what they can do: it never \
 changes the levels. Set alignment: "aligned" when the role clearly serves their direction, \
@@ -146,7 +152,7 @@ MAX_POINTS = 3
 
 # Bump whenever the prompt or the scale changes: remembered verdicts from another version are
 # not reused.
-MATCHER_VERSION = "levels-4"  # tighter core requirements; a block needs two readings to agree
+MATCHER_VERSION = "levels-5"  # founder and partnership leadership counts at its scale
 CACHE_SIZE = 5000  # remembered assessments kept (newest)
 
 DESCRIPTION_CHARS = 3000  # long postings keep their requirements section (`posting_excerpt`)
@@ -424,13 +430,14 @@ async def _review(
     runner: _Runner,
     first: dict[str, JobAssessment],
     by_id: dict[str, JobPosting],
-    threshold: float,
+    limits: dict[str, float],
     note: Callable[[str], Awaitable[None]] | None,
     progress: Callable[[int, int], Awaitable[None]] | None = None,
 ) -> dict[str, tuple[JobAssessment, bool]]:
     """Second, independent single-posting assessment for every match and borderline first
-    verdict; returns (assessment to keep, whether it was reviewed) by job id."""
-    near = sorted(j for j, a in first.items() if _needs_review(a, threshold, checkable(by_id[j])))
+    verdict (against each posting's threshold, `limits`); returns (assessment to keep, whether
+    it was reviewed) by job id."""
+    near = sorted(j for j, a in first.items() if _needs_review(a, limits[j], checkable(by_id[j])))
     if near and note is not None:
         await note(f"Second opinion on {len(near)} matching or borderline posting(s)")
     if near and progress is not None:
@@ -529,7 +536,7 @@ def _recall(
     keys: dict[str, str],
     context: str,
     cache: VerdictCache | None,
-    threshold: float,
+    limits: dict[str, float],
 ) -> tuple[dict[str, JobVerdict], dict[str, JobAssessment], list[JobPosting]]:
     """Split jobs into (remembered verdicts, remembered but unreviewed borderline assessments
     to recheck, postings never judged)."""
@@ -546,11 +553,15 @@ def _recall(
         if cache is not None and cache.get(keys[job.id]) is None:
             cache.put(keys[job.id], hit.assessment, hit.reviewed)
         found = hit.assessment.model_copy(update={"job_id": job.id})
-        if not hit.reviewed and _needs_review(found, threshold, checkable(job)):
+        if not hit.reviewed and _needs_review(found, limits[job.id], checkable(job)):
             pending[job.id] = found
         else:
             verdicts[job.id] = finalize(
-                found, threshold, reviewed=hit.reviewed, remembered=True, checked=checkable(job)
+                found,
+                limits[job.id],
+                reviewed=hit.reviewed,
+                remembered=True,
+                checked=checkable(job),
             )
     return verdicts, pending, todo
 
@@ -574,6 +585,7 @@ async def screen_jobs(
     intent: str = "",
     review_llm: LLMProvider | None = None,
     review_progress: Callable[[int, int], Awaitable[None]] | None = None,
+    thresholds: dict[str, float] | None = None,
 ) -> tuple[dict[str, JobVerdict], list[str]]:
     """Screen `jobs`. Returns (final verdicts by job id, errors). Failed batches are reported.
 
@@ -585,7 +597,8 @@ async def screen_jobs(
     `batch_timeout` is killed and retried once; `stop` skips batches not yet started.
     `intent` is the career intent as prompt text (`profile_memory.intent_text`).
     `review_llm` (the quality model) gives the second opinions; without it, `llm` does.
-    `review_progress(done, total)` follows the second opinions.
+    `review_progress(done, total)` follows the second opinions. `thresholds` overrides
+    `threshold` per job id (a role area listed from a different score).
     """
     constraints = _constraints(query, base)
     profile = matcher_profile(summary)
@@ -597,25 +610,24 @@ async def screen_jobs(
     keys = {j.id: VerdictCache.key(j, context) for j in jobs}
     runner = _Runner(llm, header, concurrency, batch_timeout, stop)
 
-    verdicts, pending, todo = _recall(jobs, keys, context, cache, threshold)
+    limits = {j.id: (thresholds or {}).get(j.id, threshold) for j in jobs}
+    verdicts, pending, todo = _recall(jobs, keys, context, cache, limits)
     todo.sort(key=lambda j: keys[j.id])  # the same postings always meet in the same batches
     first = {**pending, **await runner.run(todo, batch_size, progress)}
     reviewer = runner
     if review_llm is not None:
         reviewer = _Runner(review_llm, header, concurrency, batch_timeout, stop)
-    final = await _review(
-        reviewer, first, {j.id: j for j in jobs}, threshold, note, review_progress
-    )
+    final = await _review(reviewer, first, {j.id: j for j in jobs}, limits, note, review_progress)
     if reviewer is not runner:
         runner.errors += reviewer.errors
     by_id = {j.id: j for j in jobs}
     served, switched = _served(runner, reviewer)
     for job_id, (assessment, reviewed) in final.items():
         checked = checkable(by_id[job_id])
-        remember = reviewed or not _needs_review(assessment, threshold, checked)
+        remember = reviewed or not _needs_review(assessment, limits[job_id], checked)
         if cache is not None and remember and job_id not in switched:
             cache.put(keys[job_id], assessment, reviewed)  # an unreviewed match is retried
-        verdict = finalize(assessment, threshold, reviewed=reviewed, checked=checked)
+        verdict = finalize(assessment, limits[job_id], reviewed=reviewed, checked=checked)
         verdicts[job_id] = verdict.model_copy(update={"model": served.get(job_id, "")})
     if cache is not None:
         cache.save()
@@ -636,8 +648,14 @@ def _served(*runners: _Runner) -> tuple[dict[str, str], set[str]]:
     return served, switched
 
 
-def apply_verdicts(report: MatchReport, verdicts: dict[str, JobVerdict], threshold: float) -> None:
-    """Re-bucket a deterministic report using AI verdicts (in place).
+def apply_verdicts(
+    report: MatchReport,
+    verdicts: dict[str, JobVerdict],
+    threshold: float,
+    thresholds: dict[str, float] | None = None,
+) -> None:
+    """Re-bucket a deterministic report using AI verdicts (in place). `thresholds` overrides
+    `threshold` per job id (a role area listed from a different score).
 
     matches          = verdict.match (fit_score >= threshold, no dealbreakers) on a posting
                        whose requirements were checked, best first
@@ -648,7 +666,8 @@ def apply_verdicts(report: MatchReport, verdicts: dict[str, JobVerdict], thresho
     pool = report.scored()
     for r in pool:
         r.verdict = verdicts.get(r.job.id)
-        r.passed = bool(r.verdict and r.verdict.match and r.verdict.fit_score >= threshold)
+        cut = (thresholds or {}).get(r.job.id, threshold)
+        r.passed = bool(r.verdict and r.verdict.match and r.verdict.fit_score >= cut)
     report.matches = sorted(
         (r for r in pool if r.passed and r.verdict and r.verdict.requirements_checked),
         key=lambda r: r.rank_key(),

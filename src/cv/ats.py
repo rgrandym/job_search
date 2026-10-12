@@ -16,6 +16,7 @@ from src.cv.models import ATSReport, MasterCV
 from src.tools.search_tools import mentions
 
 WORDS_PER_PAGE = 500  # a dense single-column CV page
+UNVERIFIED_PREFIX = "Skills to confirm before use (not yet claimed):"
 
 
 def docx_text(path: Path) -> tuple[str, int]:
@@ -40,11 +41,14 @@ def _header_text(path: Path) -> str:
 def check_docx(path: Path, cv: MasterCV, keywords: list[str] | None = None) -> ATSReport:
     """Read `path` back and report what an ATS would miss (`keywords`: the job's)."""
     text, tables = docx_text(path)
+    confirmed_text = "\n".join(
+        line for line in text.splitlines() if not line.startswith(UNVERIFIED_PREFIX)
+    )
     b = cv.basics
     wanted = {"name": b.name, "email": b.email, "phone": b.phone}
     missing = [k for k, v in wanted.items() if v and _plain(v) not in _plain(text)]
     keywords = list(dict.fromkeys(keywords or []))
-    absent = [k for k in keywords if not mentions(text, k)]
+    absent = [k for k in keywords if not mentions(confirmed_text, k)]
     words = len(text.split())
     pages = round(words / WORDS_PER_PAGE, 1)
     warnings: list[str] = []
@@ -54,6 +58,10 @@ def check_docx(path: Path, cv: MasterCV, keywords: list[str] | None = None) -> A
         warnings.append(f"{tables} table(s): some ATS parsers scramble their reading order")
     if any(v and _plain(v) in _plain(_header_text(path)) for v in wanted.values()):
         warnings.append("Contact details in the page header: many ATS parsers skip headers")
+    if confirmed_text != text:
+        warnings.append(
+            "Red skills to confirm are unverified; review or remove them before applying"
+        )
     return ATSReport(
         words=words,
         est_pages=pages,

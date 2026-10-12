@@ -161,7 +161,16 @@ def edit(ws: Workspace, document_id: str, edits: TailoredCVEdits) -> TailoredDoc
     # Suggested headlines stay in the file until the user picks one.
     options = [] if edits.headline is not None else revised.headline_options
     if document.template == ORIGINAL and original is not None and original.is_file():
-        write_like_original(original, document.source_cv, revised.cv, path, options)
+        write_like_original(
+            original,
+            document.source_cv,
+            revised.cv,
+            path,
+            options,
+            revised.role_skills,
+            revised.academic,
+            revised.skills_to_confirm,
+        )
     else:
         export_docx(
             revised.model_copy(update={"headline_options": options}),

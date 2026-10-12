@@ -12,7 +12,7 @@ from typing import Literal
 from docx import Document
 from docx.document import Document as DocxDocument
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Pt
+from docx.shared import Pt, RGBColor
 from pydantic import BaseModel, Field
 
 from src.cv.models import CoverLetter, MasterCV, TailoredCV
@@ -101,6 +101,13 @@ def export_docx(cv: MasterCV | TailoredCV, path: Path, template: str = "classic"
         renderers[section](doc, master, tpl)
         if section == "summary" and isinstance(cv, TailoredCV) and cv.role_skills:
             doc.add_paragraph(f"Relevant skills for this role: {' · '.join(cv.role_skills)}")
+        if section == "summary" and isinstance(cv, TailoredCV) and cv.skills_to_confirm:
+            paragraph = doc.add_paragraph()
+            run = paragraph.add_run(
+                "Skills to confirm before use (not yet claimed): "
+                + " · ".join(s.skill for s in cv.skills_to_confirm)
+            )
+            run.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(path))
@@ -219,11 +226,15 @@ def _languages(doc: DocxDocument, cv: MasterCV, tpl: DocxTemplate) -> None:
         doc.add_paragraph(", ".join(cv.languages))
 
 
+REVIEW_RED = RGBColor(0xC0, 0x00, 0x00)  # a letter paragraph a check questions
+
+
 def export_cover_letter(
     letter: CoverLetter, cv: MasterCV, path: Path, template: str = "classic"
 ) -> Path:
-    """Write a guarded cover letter to `path` (.docx), styled like the CV template ("original",
-    a CV in its own Word design, gives the letter the classic style)."""
+    """Write a checked cover letter to `path` (.docx), styled like the CV template ("original",
+    a CV in its own Word design, gives the letter the classic style). Flagged paragraphs are
+    red, for the user to review."""
     template = "classic" if template == "original" else template
     if template not in TEMPLATES:
         raise ValueError(f"Unknown template {template!r}. Choose from {sorted(TEMPLATES)}")
@@ -233,8 +244,12 @@ def export_cover_letter(
     dt.set_base_font(doc, tpl.font, tpl.body_pt + 0.5)
     greeting = doc.add_paragraph(letter.greeting)
     greeting.paragraph_format.space_after = Pt(12)
-    for para in letter.paragraphs:
-        paragraph = doc.add_paragraph(para)
+    flagged = {flag.paragraph for flag in letter.flags}
+    for index, para in enumerate(letter.paragraphs):
+        paragraph = doc.add_paragraph()
+        run = paragraph.add_run(para)
+        if index in flagged:
+            run.font.color.rgb = REVIEW_RED
         paragraph.paragraph_format.space_after = Pt(9)
     closing = doc.add_paragraph(letter.closing)
     closing.paragraph_format.space_before = Pt(3)

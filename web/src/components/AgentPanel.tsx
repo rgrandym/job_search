@@ -33,7 +33,7 @@ const EXAMPLES = [
 /** The assistant: plain-language updates to profiles, intent, preferences and CV facts. */
 export function AgentPanel({ ready, llm, hasCv }: { ready: boolean; llm?: LLMView; hasCv: boolean }) {
   const chat = useChat();
-  const { query, useCv, smart, threshold, widen, profileKey } = useSearch();
+  const { query, useCv, smart, threshold, widen, areaThresholds, profileKey } = useSearch();
   const qc = useQueryClient();
   const running = chat.running;
   // A finished turn may have changed the intent, the CV (and its Word copy), profiles or documents.
@@ -107,7 +107,7 @@ export function AgentPanel({ ready, llm, hasCv }: { ready: boolean; llm?: LLMVie
     const chatRole = chatChoice === "screening" ? "screening" : "quality";
     const chatModel = claudeSelected ? chatChoice.slice("claude-code:".length) : chatChoice.startsWith("model:") ? chatChoice.slice(6) : null;
     const chatProvider = claudeSelected ? "claude_code" : null;
-    chat.send(text.trim(), query, useCv, chatRole, chatModel, chatProvider, { smart, threshold, widen, profileKey });
+    chat.send(text.trim(), query, useCv, chatRole, chatModel, chatProvider, { smart, threshold, widen, areaThresholds, profileKey });
     setDraft("");
   };
 

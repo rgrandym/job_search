@@ -1,22 +1,44 @@
-"""Compare the CV versions tailored for one job, side by side, against the originals.
+"""Compare the CV versions tailored for one job, side by side, against one original CV.
 
-compare(ws, job_id, document_ids) -> VersionComparison: the chosen tailored versions and
-the original CV each came from, read by one blind reader in one call
-(`fit_check.score_versions`), then saved per job so the report opens again without a
-model call. labels(documents): "V1 · Automatic", "V2 · Level: senior" ...
+compare(ws, job_id, document_ids, baseline_id) -> VersionComparison: the chosen tailored
+versions and one original from the CV library (the Master CV, else the selected CV, unless
+the user picks another), read by one blind reader in one call (`fit_check.score_versions`),
+then saved per job so the report opens again without a model call. A CV deleted from the
+library is never read as the original. Each CV's reading is remembered (`readings.json`, keyed
+by `fit_check.reading_key`), so comparing the same CVs again gives the same scores.
+labels(documents): "V1 · Automatic", "V2 · Level: senior" ...
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from datetime import UTC, datetime
+from itertools import combinations
 from pathlib import Path
 
 from src.core import progress
 from src.core.llm import UsageSink
-from src.cv.fit_check import MAX_VERSIONS, best_version, requirements_for, score_versions
-from src.cv.models import TailoredDocument, VersionComparison, VersionReading
+from src.cv import master_cv_manager as mgr
+from src.cv.fit_check import (
+    MAX_VERSIONS,
+    NOISE_MARGIN,
+    READS,
+    best_version,
+    read_versions,
+    reading_key,
+    requirements_for,
+    score_versions,
+)
+from src.cv.models import (
+    DimensionChange,
+    FitReading,
+    SettingEffect,
+    TailoredDocument,
+    VersionComparison,
+    VersionReading,
+)
 from src.cv.tailor import ats_keywords, cv_to_text, printed_text
 from src.services import cv_service, tailored_documents
 from src.services.workspace import Workspace
@@ -28,6 +50,7 @@ SETTING_LABELS = {
     "audience": {"industry": "Industry", "academic": "Academic"},
     "template": {"classic": "Classic design", "modern": "Modern design", "compact": "Compact"},
 }
+METHOD_VERSION = 2
 
 
 def _describe(document: TailoredDocument) -> str:
@@ -53,6 +76,74 @@ def labels(documents: list[TailoredDocument]) -> dict[str, str]:
     return out
 
 
+EFFECT_FIELDS = ("level", "length", "emphasis", "audience")  # the design does not change text
+
+
+def _value(field: str, value: str) -> str:
+    return SETTING_LABELS[field].get(value, "Automatic" if value == "auto" else value)
+
+
+def _effect(field: str, first: VersionReading, second: VersionReading, total: int) -> SettingEffect:
+    """What changing one setting did, from the first version to the second."""
+    assert first.settings is not None and second.settings is not None
+    score = second.score - first.score
+    requirements = len(second.requirements_shown) - len(first.requirements_shown)
+    keywords = second.keyword_coverage - first.keyword_coverage
+    dims = [
+        DimensionChange(name=a.name, before=a.after, after=b.after)
+        for a, b in zip(first.dimensions, second.dimensions, strict=True)
+    ]
+    clear = (
+        abs(score) >= NOISE_MARGIN
+        or set(first.requirements_shown) != set(second.requirements_shown)
+        or set(first.keywords_found) != set(second.keywords_found)  # exact, no margin
+    )
+    moved = [f"{d.name} {d.before}/4 → {d.after}/4" for d in dims if d.before != d.after]
+    name = field.capitalize()
+    old, new = (
+        _value(field, getattr(first.settings, field)),
+        _value(field, getattr(second.settings, field)),
+    )
+    text = (
+        f"{name} {old} → {new} ({first.label} → {second.label}): fit score {first.score} → "
+        f"{second.score} ({score:+d}), requirements shown {len(first.requirements_shown)} → "
+        f"{len(second.requirements_shown)} of {total}, job keywords "
+        f"{len(first.keywords_found)} → {len(second.keywords_found)}"
+        + (f", {', '.join(moved)}" if moved else "")
+        + (". A clear effect." if clear else f". No effect beyond ±{NOISE_MARGIN - 1} points.")
+    )
+    return SettingEffect(
+        setting=name,
+        from_id=first.id,
+        to_id=second.id,
+        from_value=old,
+        to_value=new,
+        score_change=score,
+        requirements_change=requirements,
+        keyword_change=keywords,
+        dimensions=dims,
+        effect="clear" if clear else "none",
+        text=text,
+    )
+
+
+def setting_effects(readings: list[VersionReading], total: int) -> list[SettingEffect]:
+    """For each pair of versions that differ in exactly one setting (level, length, emphasis,
+    audience), what that setting changed; from the automatic choice when one pair member has
+    it. Pairs differing in more than one setting cannot say which one did it, so are skipped."""
+    tailored = [r for r in readings if r.kind == "tailored" and r.settings is not None]
+    out: list[SettingEffect] = []
+    for a, b in combinations(tailored, 2):
+        assert a.settings is not None and b.settings is not None
+        fields = [f for f in EFFECT_FIELDS if getattr(a.settings, f) != getattr(b.settings, f)]
+        if len(fields) != 1:
+            continue
+        field = fields[0]
+        first, second = (b, a) if getattr(b.settings, field) == "auto" else (a, b)
+        out.append(_effect(field, first, second, total))
+    return out
+
+
 def _path(ws: Workspace, job_id: str) -> Path:
     key = hashlib.sha256(job_id.encode()).hexdigest()[:24]
     return ws.settings.data_dir / "cv_comparisons" / f"{key}.json"
@@ -65,12 +156,40 @@ def saved(ws: Workspace, job_id: str) -> tuple[VersionComparison | None, bool]:
         return None, False
     comparison = VersionComparison.model_validate_json(path.read_text())
     current = {d.id: d for d in tailored_documents.list_for_job(ws, job_id)}
+    library = {f"original:{asset.id}" for asset in cv_service.list_cvs(ws)}
     stale = any(
-        r.kind == "tailored"
-        and (r.id not in current or current[r.id].updated_at > comparison.created_at)
+        (r.kind == "tailored" and r.id not in current)
+        or (r.kind == "tailored" and current[r.id].updated_at > comparison.created_at)
+        or (r.kind == "original" and r.id not in library)
         for r in comparison.readings
     )
+    stale = stale or comparison.method_version < METHOD_VERSION
     return comparison, stale
+
+
+def _readings_path(ws: Workspace) -> Path:
+    return ws.settings.data_dir / "cv_comparisons" / "readings.json"
+
+
+def _reader(ws: Workspace) -> str:
+    """The model that reads: another model may read differently, so it reads afresh."""
+    llm = ws.llm
+    return f"{llm.provider_for('cv')}:{llm.model_for('cv')}:{llm.effort_for('cv')}"
+
+
+def _known(ws: Workspace, keys: list[str]) -> list[FitReading | None]:
+    path = _readings_path(ws)
+    stored = json.loads(path.read_text()) if path.is_file() else {}
+    return [FitReading.model_validate(stored[k]) if k in stored else None for k in keys]
+
+
+def _remember(ws: Workspace, keys: list[str], readings: list[FitReading]) -> None:
+    path = _readings_path(ws)
+    stored = json.loads(path.read_text()) if path.is_file() else {}
+    for key, reading in zip(keys, readings, strict=True):
+        stored[key] = reading.model_dump()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(stored, indent=1))
 
 
 def _chosen(ws: Workspace, job_id: str, document_ids: list[str]) -> list[TailoredDocument]:
@@ -86,33 +205,45 @@ def _chosen(ws: Workspace, job_id: str, document_ids: list[str]) -> list[Tailore
     return [known[i] for i in dict.fromkeys(document_ids)]
 
 
-def _original_name(ws: Workspace, cv_id: str) -> str:
-    if cv_id == "master":
-        return "Master CV"
-    return cv_service.cv_name(ws, cv_id) or "your CV"
+def default_baseline(ws: Workspace) -> str | None:
+    """The original read by default: the Master CV, else the selected CV, else the only one."""
+    ids = [asset.id for asset in cv_service.list_cvs(ws)]
+    for choice in ("master", ws.active_cv_id):
+        if choice in ids:
+            return choice
+    return ids[0] if len(ids) == 1 else None
+
+
+def _baseline(
+    ws: Workspace, baseline_id: str | None, documents: list[TailoredDocument]
+) -> tuple[VersionReading, str]:
+    """The one original, from the CV library as it is now: a deleted CV is refused."""
+    cv_id = baseline_id or default_baseline(ws)
+    asset = next((a for a in cv_service.list_cvs(ws) if a.id == cv_id), None)
+    if cv_id is None or asset is None:
+        raise ValueError("Choose a CV from your library to compare against")
+    snapshot = next((d for d in documents if not d.imported and d.cv_id == cv_id), None)
+    if snapshot is not None:  # the CV as tailoring read it, newest first
+        text = cv_to_text(snapshot.source_cv, tags=False)
+    elif cv_id == "master":
+        text = cv_to_text(mgr.load(ws.settings.master_cv_path), tags=False)
+    else:
+        path = cv_service.source_file(ws, cv_id)
+        text = cv_service.extract_text(path.name, path.read_bytes())
+    name = "Master CV" if cv_id == "master" else asset.filename
+    reading = VersionReading(
+        id=f"original:{cv_id}", kind="original", label=f"Original · {name}", score=0
+    )
+    return reading, text
 
 
 def _entries(
-    ws: Workspace, documents: list[TailoredDocument], names: dict[str, str]
+    ws: Workspace, documents: list[TailoredDocument], names: dict[str, str], baseline_id: str | None
 ) -> tuple[list[VersionReading], list[str]]:
-    """The originals (one per source CV, its newest snapshot) then the tailored versions, with
-    the text a reader sees for each."""
-    items: list[VersionReading] = []
-    texts: list[str] = []
-    originals: dict[str, TailoredDocument] = {}
-    for document in documents:  # newest first, so the first seen is the newest snapshot
-        if not document.imported:
-            originals.setdefault(document.cv_id, document)
-    for cv_id, document in originals.items():
-        items.append(
-            VersionReading(
-                id=f"original:{cv_id}",
-                kind="original",
-                label=f"Original · {_original_name(ws, cv_id)}",
-                score=0,
-            )
-        )
-        texts.append(cv_to_text(document.source_cv, tags=False))
+    """The one original then the tailored versions, with the text a reader sees for each."""
+    original, text = _baseline(ws, baseline_id, documents)
+    items: list[VersionReading] = [original]
+    texts: list[str] = [text]
     for document in documents:
         tailored = document.tailored
         items.append(
@@ -120,13 +251,17 @@ def _entries(
                 id=document.id,
                 kind="tailored",
                 label=names.get(document.id, "Tailored"),
-                baseline_id=None if document.imported else f"original:{document.cv_id}",
+                baseline_id=original.id,
                 created_at=document.created_at,
                 filename=document.filename,
                 settings=document.settings,
                 score=0,
                 rejected_changes=sum(not c.accepted for c in tailored.changes),
                 left_out=sum(c.accepted and not c.tailored for c in tailored.changes),
+                rewritten=sum(
+                    c.accepted and bool(c.tailored) and c.tailored != c.original
+                    for c in tailored.changes
+                ),
             )
         )
         texts.append(printed_text(tailored))
@@ -141,26 +276,34 @@ def _job_text(document: TailoredDocument) -> str:
 
 
 async def compare(
-    ws: Workspace, job_id: str, document_ids: list[str], usage_sink: UsageSink | None = None
+    ws: Workspace,
+    job_id: str,
+    document_ids: list[str],
+    usage_sink: UsageSink | None = None,
+    baseline_id: str | None = None,
 ) -> VersionComparison:
-    """Read the chosen tailored CVs for this job and their originals side by side, and save
-    the comparison."""
+    """Read the chosen tailored CVs for this job and one original side by side, and save the
+    comparison."""
     progress.step("Gathering the CV versions", total=3)
     documents = _chosen(ws, job_id, document_ids)
     names = labels(tailored_documents.list_for_job(ws, job_id))
-    items, texts = _entries(ws, documents, names)
-    if len(items) > MAX_VERSIONS:
+    if len(documents) + 1 > MAX_VERSIONS:
         raise ValueError(
-            f"That is {len(items)} CVs with the originals; choose at most {MAX_VERSIONS} in all"
+            f"That is {len(documents) + 1} CVs with the original; "
+            f"choose at most {MAX_VERSIONS} in all"
         )
+    items, texts = _entries(ws, documents, names, baseline_id)
     lead = next((d for d in documents if not d.imported), documents[0])
     requirements = requirements_for(lead.tailored, lead.jd)
     keywords = ats_keywords(lead.jd)
     progress.step(f"Reading {len(items)} CVs side by side for this job")
     llm = ws.structured("cv", usage_sink, "CV version comparison")
-    readings = await asyncio.to_thread(
-        score_versions, items, texts, requirements, keywords, _job_text(lead), llm
-    )
+    jd_text = _job_text(lead)
+    keys = [reading_key(t, requirements, jd_text, _reader(ws)) for t in texts]
+    known = _known(ws, keys)  # CVs read before for this job: same scores, no re-roll
+    fit = await asyncio.to_thread(read_versions, texts, requirements, jd_text, llm, known)
+    _remember(ws, keys, fit)
+    readings = score_versions(items, texts, fit, requirements, keywords)
     progress.step("Ranking the versions")
     best_id, summary = best_version(readings, len(requirements))
     comparison = VersionComparison(
@@ -173,6 +316,10 @@ async def compare(
         readings=readings,
         best_id=best_id,
         summary=summary,
+        setting_effects=setting_effects(readings, len(requirements)),
+        reads=READS,
+        margin=NOISE_MARGIN,
+        method_version=METHOD_VERSION,
     )
     path = _path(ws, job_id)
     path.parent.mkdir(parents=True, exist_ok=True)

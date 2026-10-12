@@ -90,7 +90,7 @@ equivalent titles a recruiter would consider. Do not force the candidate into on
 - If the search intent names role titles, orient the summary towards that role family \
 without distorting the facts.
 - role_families: the roles to search, grouped. 2-4 "core" families (the work they do now), \
-0-2 "progression" families (the next level in the same function) and 0-4 "adjacent" \
+0-2 "progression" families (the next level in the same function) and 0-6 "adjacent" \
 families (a different function the capabilities credibly carry into). Look for every route \
 a recruiter would accept where the evidence exists, for example: a technical expert who \
 worked with industry clients, partners or customers, scoped projects or grew collaborations \
@@ -98,7 +98,15 @@ or business -> business development, alliance or partnership management, technic
 scientific sales, field application or solutions science; a scientific leader with a \
 publication record and networks -> scientific consulting, venture or investment due \
 diligence, technology transfer and licensing, medical or scientific affairs; programme and \
-portfolio delivery -> programme or portfolio management, operations, strategy. Direct \
+portfolio delivery -> programme or portfolio management, operations, strategy. \
+Leadership is a capability of its own: someone who founded or ran a company, led teams, held \
+a budget, raised funding or built partnerships can carry it into senior leadership of a \
+neighbouring function (e.g. head of operations, chief operating or scientific officer at an \
+early-stage company, head of partnerships or business development, chief of staff, \
+entrepreneur in residence). Where that evidence exists, propose up to two such \
+leadership-level adjacent families, citing the leadership evidence itself (founding, team, \
+budget, fundraising, partnership lines), at the scope it supports: running a small company \
+is executive work at that scale, not at a large company's. Direct \
 experience of the new function may be missing: that is the `gap`, not a reason to leave the \
 family out. Each family: 2-4 titles as employers advertise them, 1-3 short domain terms, \
 `evidence` = ids in square brackets showing the transferable work ([role-id], [bullet-id] \
@@ -124,7 +132,7 @@ and breadth, the publication record if any, and the directions they credibly fit
 
 # Evidence a family needs to be searched, by tier (ids that exist in the CV).
 MIN_EVIDENCE = {"core": 0, "progression": 1, "adjacent": 2}
-MAX_FAMILIES = {"core": 4, "progression": 2, "adjacent": 4}  # model-suggested, per tier
+MAX_FAMILIES = {"core": 4, "progression": 2, "adjacent": 6}  # model-suggested, per tier
 SOURCE_ID = re.compile(r"src-\d+")
 SOURCE_CHARS = 60_000  # the whole of any real CV; guards against pasted books
 
@@ -612,7 +620,8 @@ def family_terms(summary: ProfileSummary, widen: bool, limit: int) -> list[tuple
     Each tier gets its budget share (core 60%, progression 20%, adjacent 20%, rescaled over
     the tiers searched) but every family keeps at least its first title; within a tier the
     families take turns, so a limit never drops a whole family. Unused budget goes to the
-    remaining terms in tier order."""
+    remaining terms in tier order. The terms come back mixed across tiers in proportion, so a
+    source that stops after its first few searches (LinkedIn) still covers every tier."""
     families = searched_families(summary, widen)
     variants = {f.name: board_terms(f.titles, f.domain_terms, limit) for f in families}
     tiers = {t: [f for f in families if f.tier == t] for t in TIER_BUDGET}
@@ -635,7 +644,20 @@ def family_terms(summary: ProfileSummary, widen: bool, limit: int) -> list[tuple
         take(fams, max(len(fams), round(limit * TIER_BUDGET[tier] / total)))
     for fams in tiers.values():
         take(fams, limit)
-    return out[:limit]
+    return _interleave(out[:limit], {f.name: f.tier for f in families})
+
+
+def _interleave(terms: list[tuple[str, str]], tier_of: dict[str, str]) -> list[tuple[str, str]]:
+    """`terms` reordered so each tier's terms are spread evenly through the list (core first on
+    ties), keeping each tier's own order."""
+    sizes = Counter(tier_of[fam] for _, fam in terms)
+    rank: Counter[str] = Counter()
+    keyed = []
+    for i, (_, fam) in enumerate(terms):
+        tier = tier_of[fam]
+        keyed.append(((rank[tier] + 0.5) / sizes[tier], list(TIER_BUDGET).index(tier), i))
+        rank[tier] += 1
+    return [terms[i] for *_, i in sorted(keyed)]
 
 
 # The job noun says what kind of job, not which field: in life sciences every family is

@@ -170,7 +170,7 @@ export function ResultsPanel({ hasCv }: { hasCv: boolean }) {
   ];
   return (
     <div className="flex h-full min-w-0 flex-col">
-      <nav className="flex shrink-0 items-center gap-1 border-b border-border px-4 py-1.5" role="tablist">
+      <nav className="flex shrink-0 flex-wrap items-center gap-1 border-b border-border px-4 py-1.5" role="tablist">
         {views.map((v) => (
           <button
             key={v.value}
@@ -178,7 +178,7 @@ export function ResultsPanel({ hasCv }: { hasCv: boolean }) {
             aria-selected={view === v.value}
             onClick={() => setView(v.value)}
             className={cn(
-              "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px]",
+              "flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1 text-[12px]",
               view === v.value ? "bg-accent-bg text-fg" : "text-muted hover:text-fg",
             )}
           >

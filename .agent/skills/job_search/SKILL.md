@@ -210,6 +210,9 @@ ATS postings), are **extracted from the description** (`search_tools.extract_ski
 Location: same town or county ("Oxford" ~ "Oxfordshire") or radius-verified 1.0, same country
 only 0.4, unknown 0.7, unplaced town 0.3 (distance not verified).
 Searches **without a CV** drop skills and experience and renormalise the rest.
+The candidate's level (title and experience scores) is the highest held **for at least a
+year in the last ten years** (`matcher.established_level`); founder and owner titles are left
+out (a pre-seed "CEO" says nothing of scope) unless no other role qualifies.
 Every eligible posting is scored (no retrieval cap unless `JOBSEARCH_RETRIEVAL_TOP_K` is set);
 what goes to screening is described in §5.
 
@@ -359,7 +362,9 @@ updated.
   (a different function the capabilities credibly carry into: e.g. an industry-facing
   technical expert into business development, alliance management or technical sales; a
   published scientific leader into consulting, due diligence, licensing or scientific
-  affairs). Missing direct experience of the new function is the family's `gap`, not a
+  affairs; a founder or team, budget and partnership leader into up to two
+  **leadership-level** families in a neighbouring function: head of operations, an
+  early-stage COO/CSO, head of partnerships, chief of staff, at the scope the evidence shows). Missing direct experience of the new function is the family's `gap`, not a
   reason to drop it. Each has advertised titles, domain terms, `evidence` ids (CV ids or
   `[src-N]` document lines, e.g. publications), the main `gap`, a `rationale` and a
   `positioning` (how to present the candidate for these roles). Every career-intent target area becomes a
@@ -367,7 +372,7 @@ updated.
   must exist in the CV or, for `[src-N]`, in the document the summary was built from
   (re-checks without the document keep src ids verified then; adjacent ≥ 2, progression ≥ 1), non-core families must state a gap,
   titles are never removed solely for their distance from the CV's current title, at most
-  4 core / 2 progression / 4 adjacent model-suggested families, and without a CV only
+  4 core / 2 progression / 6 adjacent model-suggested families, and without a CV only
   core families. **Code never rejects a family on title words** (e.g. `not_a_fit` naming
   "Clinical Scientist" must not drop every "Scientist" family): whether a role fits is the
   job_matcher's verdict on each posting's requirements, where `not_a_fit` informs it. A
@@ -378,9 +383,19 @@ updated.
   so, rather than searching only the next level up.
 - **Planning** (`family_terms`, used when titles are empty): job-board terms per family,
   budgeted core 60% · progression 20% · adjacent 20% (rescaled over the tiers searched),
-  every family keeping its first title. Adjacent families run when requested, or for all
-  realistic ones with `SearchRequest.widen` (UI "Widen to adjacent roles"). Summaries
-  without families fall back to `target_roles` + `search_keywords`.
+  every family keeping its first title, then **mixed across tiers in proportion** (core
+  first on ties), so a source that stops after its first few searches (LinkedIn's
+  `linkedin_max_search_requests`) still covers every tier. Adjacent families run when requested, or for all
+  realistic ones with `SearchRequest.widen` (UI "Widen to adjacent roles"). **Titles given
+  win**: only they are searched (the profile still judges every posting) and, with `widen`
+  on, the progress log and the assistant's tool result say widening did not apply
+  (`search_service.widen_note`). Summaries without families fall back to `target_roles` +
+  `search_keywords`.
+- **Thresholds by role area** (`SearchRequest.area_thresholds`, UI "Thresholds by role
+  area"): progression and adjacent postings (by `family_of`) may be listed from their own
+  threshold, e.g. 50 for adjacent roles; an area left out uses the search's threshold.
+  `screen_jobs(..., thresholds=)` and `apply_verdicts(..., thresholds)` apply it per job id,
+  for matching, borderline and second opinions alike.
 - **Attribution and yield**: every result carries the `family` its title belongs to
   (`family_of`: the family sharing the most distinctive domain words with the title, from its
   titles and domain terms; job nouns such as "scientist" never decide it; a title whose
@@ -461,7 +476,12 @@ choosing a number out of 30.
 The prompt is **profile-driven, not tied to one industry**: sectors and domains come from the
 profile. A posting in a searched **adjacent** family is never "a different discipline": its
 `function` is rated on how much of the work the family's evidence covers (usually 1-2) and
-the family's gap is listed. Rejected families are removed from the profile it sees.
+the family's gap is listed. For a **leadership-level** posting (head, director, VP, chief
+officer, general manager), `leadership` is rated on all the leadership the profile evidences:
+founding or running a company, teams, budgets, fundraising, partnerships and external
+collaborators count, at their scale (2-3 for a comparable or one-step-larger scope; 1 only
+far beyond anything evidenced); `seniority` is rated on scope, not titles. Rejected families
+are removed from the profile it sees.
 
 **Alignment** (`JobAssessment.alignment`): with a career intent, "aligned" (serves the
 direction, energising work, a target area, a preferred sector or organisation type),
@@ -527,7 +547,8 @@ threshold (either side), for postings that can match, after the second opinion; 
 them. `band`: 90+ exceptional ·
 80-89 very_strong · 70-79 strong · 60-69 stretch · < 60 weak. `priority`: apply_now (80+) ·
 worth_applying (70+) · consider (60+) · low (below, or any dealbreaker). `match` =
-`fit_score` ≥ threshold, no dealbreakers, no unmet core requirement.
+`fit_score` ≥ threshold (the posting's role-area threshold when set), no dealbreakers, no
+unmet core requirement.
 
 **Speed and control.** Small batches keep each answer short, so the slowest call ends sooner;
 the prompt also caps every explanation list at 3 short points (`MAX_POINTS`, trimmed in code).

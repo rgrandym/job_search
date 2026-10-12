@@ -18,9 +18,9 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from typing import Any, Literal, NamedTuple, TypeVar
+from typing import Annotated, Any, Literal, NamedTuple, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter
 
 from src.core import progress
 from src.core.config import Settings
@@ -93,6 +93,18 @@ async def _noop(_: str, __: dict[str, Any]) -> None:
     return None
 
 
+# Role areas whose listing threshold the user may set apart from the search's (core roles use
+# the search's threshold).
+AreaTier = Literal["progression", "adjacent"]
+AreaThresholds = dict[AreaTier, Annotated[float, Field(ge=0, le=100)]]
+_AREA_THRESHOLDS: TypeAdapter[AreaThresholds] = TypeAdapter(AreaThresholds)
+
+
+def parse_area_thresholds(raw: object) -> AreaThresholds:
+    """Per-area thresholds from an untyped message (the chat socket); invalid input raises."""
+    return _AREA_THRESHOLDS.validate_python(raw or {})
+
+
 class SearchRequest(BaseModel):
     query: SearchQuery
     use_cv: bool = True
@@ -103,7 +115,13 @@ class SearchRequest(BaseModel):
         None, description="Use this stored profile summary instead of the remembered default"
     )
     widen: bool = Field(
-        False, description="Also search the adjacent role families the profile proposes"
+        False,
+        description="Also search the adjacent role families the profile proposes (titles empty)",
+    )
+    area_thresholds: AreaThresholds = Field(
+        default_factory=dict,
+        description="Listing threshold per role area (e.g. lower for adjacent roles); "
+        "areas left out use `threshold`",
     )
     run_id: str | None = Field(None, description="Client id, so the search can be stopped")
 
@@ -556,6 +574,7 @@ async def _rejudge(
     errors = await _screen(
         ws, summary, jobs, req.query, report, threshold, emit, usage_sink,
         screening_base(cv, req.query), previous, intent_text(intent),
+        area_thresholds(summary, req, [r.job for r in report.scored()]),
     )  # fmt: skip
     outcome.errors = {k: v for k, v in outcome.errors.items() if not k.startswith("screening")}
     outcome.errors |= {f"screening {i}": e for i, e in enumerate(errors)}
@@ -742,6 +761,8 @@ async def _plan_query(
     """Pinned profile, and the job-board search terms: the user's titles, or (when empty) the
     CV profile's role families (budgeted per tier), split into short advertised titles."""
     query = req.query
+    if note := widen_note(ws, req):
+        await _say(emit, "plan", note)
     if query.titles:
         query = query.model_copy(update={"titles": board_terms(query.titles, limit=BOARD_TERMS)})
     profile = pinned_profile(ws, cv, req.profile_key) if cv is not None else None
@@ -774,6 +795,39 @@ async def _plan_query(
         if query.titles:
             await _say(emit, "plan", _plan_message(summary, planned, terms, req.widen))
     return query, profile
+
+
+def widen_note(ws: Workspace, req: SearchRequest) -> str | None:
+    """Why "Widen to adjacent roles" does not change this search, or None. Titles given are a
+    deliberate choice and win: only they are searched, while the profile still judges them."""
+    if not req.widen:
+        return None
+    if req.query.titles:
+        return (
+            "Titles were given, so only those titles are searched: widening to adjacent roles "
+            "applies when titles are left empty (your profile still judges every job)"
+        )
+    if not (req.use_cv and req.smart and ws.llm_ready()):
+        return "Widening to adjacent roles needs a CV, smart matching and a connected model"
+    return None
+
+
+def area_thresholds(
+    summary: ProfileSummary, req: SearchRequest, jobs: list[JobPosting]
+) -> dict[str, float]:
+    """Each posting's listing threshold where its role area has its own (`area_thresholds`),
+    by job id. A posting belongs to the searched family its title matches (`family_of`)."""
+    if not req.area_thresholds:
+        return {}
+    families = searched_families(summary, req.widen)
+    tiers = {f.name: f.tier for f in families}
+    out: dict[str, float] = {}
+    for job in jobs:
+        family = family_of(job.title, families)
+        tier = tiers.get(family or "")
+        if (tier == "progression" or tier == "adjacent") and tier in req.area_thresholds:
+            out[job.id] = req.area_thresholds[tier]
+    return out
 
 
 def _plan_message(
@@ -917,6 +971,7 @@ async def _screen_shortlist(
     errors = await _screen(
         ws, summary, shortlist, ctx.query, report, threshold, emit, usage_sink,
         screening_base(ctx.cv, ctx.query), None, intent_text(ctx.intent),
+        area_thresholds(summary, ctx.req, [r.job for r in report.scored()]),
     )  # fmt: skip
     return from_memory, errors
 
@@ -976,6 +1031,7 @@ async def _screen(
     base: str = "",
     previous: dict[str, JobVerdict] | None = None,
     intent: str = "",
+    thresholds: dict[str, float] | None = None,
 ) -> list[str]:
     settings = ws.settings
     model = ws.llm.model_for("screening")
@@ -1019,12 +1075,13 @@ async def _screen(
         review_llm=ws.structured("quality", usage_sink, "Second opinion"),
         intent=intent,
         review_progress=review_progress,
+        thresholds=thresholds,
     )
     remembered = sum(v.from_memory for v in verdicts.values())
     if remembered:
         await _say(emit, "screen", f"{remembered} verdict(s) reused from earlier searches")
     report.summary = summary
-    apply_verdicts(report, {**(previous or {}), **verdicts}, threshold)
+    apply_verdicts(report, {**(previous or {}), **verdicts}, threshold, thresholds)
     return screening_errors
 
 

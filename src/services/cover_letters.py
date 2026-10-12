@@ -35,6 +35,10 @@ class LetterEdits(BaseModel):
     greeting: str = Field(min_length=1)
     paragraphs: list[str] = Field(min_length=1)
     closing: str = Field(min_length=1)
+    keep: list[int] = Field(
+        default_factory=list,
+        description="Flagged paragraphs (0-based) the user keeps as written: no longer red",
+    )
 
 
 class SavedLetter(BaseModel):
@@ -212,16 +216,21 @@ def _path(ws: Workspace, document: SavedLetter) -> Path:
 
 
 def edit(ws: Workspace, document_id: str, edits: LetterEdits) -> SavedLetter:
-    """Save edited text and a new Word version, checking claims when CV evidence is available."""
+    """Save edited text and a new Word version. Claims are checked again when CV evidence is
+    available; a paragraph the checks question is flagged (red), never refused, unless the
+    user keeps it as written or already kept it unchanged."""
     document = load(ws, document_id)
-    if len(edits.paragraphs) != len(document.letter.paragraphs):
+    old = document.letter
+    if len(edits.paragraphs) != len(old.paragraphs):
         raise ValueError("Keep the same number of body paragraphs")
     if document.source_cv is not None:
-        source_ids = [
-            change.original.split(", ") if change.original else []
-            for change in document.letter.changes
-            if change.accepted
-        ]
+        # Letters kept every paragraph since flags; older ones only the accepted ones.
+        cited = (
+            old.changes
+            if len(old.changes) == len(old.paragraphs)
+            else [change for change in old.changes if change.accepted]
+        )
+        source_ids = [change.original.split(", ") if change.original else [] for change in cited]
         draft = CoverLetterDraft(
             greeting=edits.greeting,
             paragraphs=[
@@ -236,20 +245,31 @@ def edit(ws: Workspace, document_id: str, edits: LetterEdits) -> SavedLetter:
             JDAnalysis(job_title=document.title, company=document.company),
             document.jd_text,
         )
-        if len(checked.paragraphs) != len(edits.paragraphs):
-            reasons = "; ".join(c.reason or "" for c in checked.changes if not c.accepted)
-            raise ValueError(reasons)
         if checked.greeting != edits.greeting or checked.closing != edits.closing:
             raise ValueError("Greeting and closing cannot contain unsupported numbers")
-        letter = checked
+        letter = checked.model_copy(update={"notes": old.notes})
     else:
-        letter = document.letter.model_copy(
+        letter = old.model_copy(
             update={
                 "greeting": edits.greeting,
                 "paragraphs": edits.paragraphs,
                 "closing": edits.closing,
             }
         )
+    was_flagged = {flag.paragraph for flag in old.flags}
+    letter = letter.model_copy(
+        update={
+            "flags": [
+                flag
+                for flag in letter.flags
+                if flag.paragraph not in edits.keep
+                and not (
+                    flag.paragraph not in was_flagged
+                    and edits.paragraphs[flag.paragraph] == old.paragraphs[flag.paragraph]
+                )
+            ]
+        }
+    )
     stem = Path(document.filename).stem + "_edited"
     path = _new_path(ws, stem, ".docx")
     cv = document.source_cv or MasterCV(basics=Basics(name=document.candidate_name))
@@ -291,3 +311,23 @@ def export(ws: Workspace, document_id: str, format: Literal["docx", "txt"]) -> P
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n\n".join([*parts, document.candidate_name]) + "\n")
     return path
+
+
+def preview(ws: Workspace, document_id: str) -> Path:
+    """The letter's Word file as Microsoft Word lays it out (a PDF), like the CV viewer."""
+    path = export(ws, document_id, "docx")
+    rendered = document_files.word_pdf_preview(path, _directory(ws) / ".preview")
+    if rendered is None:
+        raise ValueError("Microsoft Word is needed to show this letter; use Open in Word")
+    return rendered
+
+
+def open_file(ws: Workspace, document_id: str, word: bool) -> bool:
+    """Open the letter's Word file in Word (or the default app); False when none opened it."""
+    path = export(ws, document_id, "docx")
+    return document_files.open_in_default_app(path, "Microsoft Word" if word else None)
+
+
+def find_by_file(ws: Workspace, filename: str) -> SavedLetter | None:
+    """The saved letter whose current Word file is `filename`."""
+    return next((d for d in list_all(ws) if d.filename == filename), None)

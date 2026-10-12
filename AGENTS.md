@@ -135,8 +135,9 @@ UI filters ─▶ SearchQuery          career intent (services/intent, per CV)
               ids and gap; fit is the matcher's); numbers in achievements and pitch checked
               against the CV (check_claims); pitch, expansion and positioning are left out
               of what the matcher sees; readable copies in output/profiles/;
-              with empty titles the boards search the families (budget 60/20/20, adjacent
-              only when requested or `widen`); results are tagged with their family and
+              with empty titles the boards search the families (budget 60/20/20, mixed
+              across tiers; adjacent only when requested or `widen`; titles given win and
+              the log says so); results are tagged with their family and
               per-family yield logged (data/family_yield.json, "not landing" after 3 searches)
               key = CV id + role family → same summary for the same type of search;
               CV / intent edits flag it (cv_changed, intent_changed), only a refresh rebuilds it
@@ -144,7 +145,8 @@ UI filters ─▶ SearchQuery          career intent (services/intent, per CV)
               not tied to one industry) + alignment with the career intent → code computes
               JobVerdict {match, fit 0-100, reasons, gaps, alignment}; remembered per
               posting+profile+intent+model (data/verdict_cache.json); second opinion on every
-              match and within 5 points of the threshold; "against" the intent caps priority, never the score
+              match and within 5 points of the threshold; "against" the intent caps priority, never the score;
+              progression / adjacent postings may use their own threshold (area_thresholds)
         │
         ▼
 MatchReport {matches (verdict.match & fit ≥ threshold), below_threshold, excluded+reasons,
@@ -172,16 +174,19 @@ and reordered unless the length choice or assess_trim allows trimming)
 ─▶ critique_cv (LLM, hiring manager + recruiter) ─▶ revise_plan ─▶ apply_plan ─▶ TailoredCV
 ─▶ fit_check.compare_fit (LLM reads original and tailored CV blind; before → after)
    (each tailoring is a saved version with its settings; cv_versions.compare reads a job's
-   versions and their originals side by side in one blind LLM call, ranks them and saves it)
+   versions and one library CV (Master or selected, or the user's pick) side by side, three
+   blind reads whose quoted evidence code checks, median kept and remembered per CV; code gives
+   each version's verdict and each setting's effect by fixed margins, ranks them and saves it)
 ─▶ docx_original.write_like_original (a copy of the CV's Word design, also for a PDF CV's Word
 version, + "Relevant skills for this role" line; academic: sections moved whole into academic
 order; templates only when chosen)
 ─▶ output/cvs/<Name>_<Company>.docx ─▶ ats.check_docx (read-back)
                                                   └─▶ tracker: remember the CV; only the user marks Applied
-job ─▶ cover_letter.draft_letter (LLM; follows the tailored CV's positioning and requirement
-map; motivation only from the career intent; bridge paragraph for a change of function or
-level) ─▶ apply_letter (each paragraph cites CV ids; numbers/skills from them; no added
-ownership) ─▶ review_letter (LLM, hiring manager) ─▶ one guarded redraft
+job ─▶ cover_letter.draft_letter (LLM; master template: introduction "applying for X because
+Y; my experience in a, b, c fits", evidence, gap paragraph when letter_gaps finds unmet
+essentials or the role is a change of function or level, conclusion; one page) ─▶ apply_letter (each paragraph cites CV ids; numbers/skills from them; no added
+ownership; a questioned paragraph is kept, flagged red for the user, never blocking)
+─▶ review_letter (LLM, hiring manager) ─▶ one checked redraft
 ─▶ <Name>_<Company>_cover_letter.docx
 document ─▶ enrichment.propose (LLM; quotes checked against the document) ─▶ review queue
 ─▶ the user accepts ─▶ Master CV

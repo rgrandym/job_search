@@ -141,6 +141,14 @@ A CV is a factual document. Tailoring may rephrase and reorder. It may never inv
 - Every accept/reject is recorded in `TailoredCV.changes` with a reason. Surface rejections and
   `missing_keywords` to the user.
 - New facts go into the Master CV (after the user confirms them), never straight into a tailored CV.
+- The writer may put up to five unverified, posting-named techniques in a separate red Word
+  line labelled "Skills to confirm before use (not yet claimed)". Each quotes actual CV
+  background as the reason to ask. These suggestions stay outside confirmed CV facts,
+  comparison readings, keyword coverage and cover-letter evidence. The user edits or removes
+  them before applying; confirmed facts should be added to the Master CV.
+- Cover letters (user's decision 2026-10-11): the same checks run on every paragraph, but a
+  questioned paragraph is kept and flagged in red with its reason (`CoverLetter.flags`) for the
+  user to edit or keep; a letter is never refused by a check.
 
 ## Tailored CV Rules (MANDATORY, user's decision 2026-10-07)
 
@@ -154,7 +162,8 @@ Every tailored CV is written the same way (`tailor.apply_plan`, `cv/docx_origina
 - **Additions (user's decision 2026-10-10):** one "Relevant skills for this role" line under
   the summary, in its formatting (only skills the CV names). For an **academic** post
   (`audience`), the sections the CV already has move whole into the academic order
-  (`docx_original.academic_order`; name and contact lines stay first); nothing else is added.
+  (`docx_original.academic_order`; name and contact lines stay first). The separate red
+  unverified-skills line is a review prompt, not a factual addition.
 - **The CV keeps its own headline.** The model suggests up to 4 role-specific headlines
   (`headline_options`, each passing the headline guards). They are written into the Word file
   under the CV's own headline, in its formatting, for the user to delete the ones they do not

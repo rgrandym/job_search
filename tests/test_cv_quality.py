@@ -18,6 +18,7 @@ from src.cv.docx_exporter import export_cover_letter, export_docx
 from src.cv.models import (
     Bullet,
     BulletIssue,
+    CoverLetter,
     CoverLetterDraft,
     CVCritique,
     Experience,
@@ -221,7 +222,7 @@ def test_ats_reads_a_name_in_capitals_and_never_asks_to_shorten(
 # ---------------------------------------------------------------- cover letters
 
 
-def test_cover_letter_keeps_only_backed_paragraphs(master_cv: MasterCV, tmp_path: Path) -> None:
+def test_cover_letter_flags_unbacked_paragraphs_in_red(master_cv: MasterCV, tmp_path: Path) -> None:
     draft = CoverLetterDraft(
         paragraphs=[
             LetterParagraph(
@@ -236,63 +237,109 @@ def test_cover_letter_keeps_only_backed_paragraphs(master_cv: MasterCV, tmp_path
     )
     jd_text = "Join our team of 40 engineers."
     letter = apply_letter(master_cv, draft, JD, jd_text)
-    assert letter.paragraphs == [
-        "At Nimbus I built a PyTorch recommender serving 4M users.",
-        "Your team of 40 engineers ships weekly.",  # a fact about the employer, from the JD
-    ]
-    reasons = [c.reason or "" for c in letter.changes if not c.accepted]
+    assert len(letter.paragraphs) == 5  # nothing is dropped: the user decides
+    # the employer fact (from the JD) and the backed claim pass; the rest are flagged
+    assert [f.paragraph for f in letter.flags] == [2, 3, 4]
+    reasons = [f.reason for f in letter.flags]
     assert "50%" in reasons[0] and "spark" in reasons[1] and "ghost" in reasons[2]
+    assert [c.accepted for c in letter.changes] == [True, True, False, False, False]
     path = export_cover_letter(letter, master_cv, tmp_path / "letter.docx")
-    paragraphs = [p.text for p in Document(str(path)).paragraphs]
-    text = "\n".join(paragraphs)
-    assert paragraphs[0] == "Dear Hiring Manager,"
+    paragraphs = Document(str(path)).paragraphs
+    text = "\n".join(p.text for p in paragraphs)
+    assert paragraphs[0].text == "Dear Hiring Manager,"
     assert master_cv.basics.email not in text
     assert master_cv.basics.headline not in text
-    assert "4M users" in text and "Alex Example" in text and "50%" not in text
+    assert "4M users" in text and "Alex Example" in text and "50%" in text
+    red = {p.text for p in paragraphs if p.runs and p.runs[0].font.color.rgb is not None}
+    assert red == {"I cut costs by 50%.", "I ran Spark jobs daily.", "Proven leader."}
 
 
-def test_letter_requires_role_introduction_and_one_page_length(master_cv: MasterCV) -> None:
-    def generate(draft: LetterSections) -> None:
+def test_letter_structure_problems_are_noted_not_refused(master_cv: MasterCV) -> None:
+    def generate(draft: LetterSections) -> CoverLetter:
         llm = FakeLLM({LetterReview: LetterReview(), LetterSections: draft})
-        write_letter(master_cv, JD, "Senior ML Engineer role", llm)
+        return write_letter(master_cv, JD, "Senior ML Engineer role", llm)
 
     evidence = LetterParagraph(text="I built recommenders at Nimbus.", source_ids=["nimbus"])
     close = LetterParagraph(
         text="I would welcome a conversation about the role.", source_ids=["nimbus"]
     )
-    with pytest.raises(ValueError, match="name the exact role"):
-        generate(
-            LetterSections(
-                opening=LetterOpening(interest="I am interested in this work.", fit=evidence),
-                evidence=[evidence, evidence],
-                conclusion=close,
-            )
+    unnamed = generate(
+        LetterSections(
+            opening=LetterOpening(interest="I am interested in this work.", fit=evidence),
+            evidence=[evidence, evidence],
+            conclusion=close,
         )
+    )
+    assert unnamed.paragraphs and any("name the exact role" in n for n in unnamed.notes)
     opening = LetterOpening(
         interest="I am interested in the Senior ML Engineer role because of its ML work.",
         fit=LetterParagraph(text="My experience at Nimbus fits.", source_ids=["nimbus"]),
     )
-    with pytest.raises(ValueError, match="under 300 words"):
-        generate(
-            LetterSections(
-                opening=opening,
-                evidence=[
-                    evidence,
-                    LetterParagraph(text="I built ML. " * 170, source_ids=["nimbus"]),
-                ],
-                conclusion=close,
-            )
+    long = generate(
+        LetterSections(
+            opening=opening,
+            evidence=[evidence, LetterParagraph(text="I built ML. " * 170, source_ids=["nimbus"])],
+            conclusion=close,
         )
-    with pytest.raises(ValueError, match="cite CV source_ids"):
-        generate(
-            LetterSections(
-                opening=opening,
-                evidence=[evidence, LetterParagraph(text="I built recommenders.")],
-                conclusion=close,
-            )
+    )
+    assert any("under 350 words" in n for n in long.notes)
+    uncited = generate(
+        LetterSections(
+            opening=opening,
+            evidence=[evidence, LetterParagraph(text="I built recommenders.")],
+            conclusion=close,
         )
-    with pytest.raises(ValueError, match="exactly two evidence paragraphs"):
-        generate(LetterSections(opening=opening, evidence=[evidence], conclusion=close))
+    )
+    assert any("cite CV source_ids" in n for n in uncited.notes)
+    assert [f.paragraph for f in uncited.flags] == [2]  # the uncited claim, red
+    one = generate(LetterSections(opening=opening, evidence=[evidence], conclusion=close))
+    assert one.notes == []  # one evidence paragraph is enough in the master template
+    clean = generate(
+        LetterSections(opening=opening, evidence=[evidence, evidence], conclusion=close)
+    )
+    assert clean.notes == [] and clean.flags == []
+
+
+def test_the_gap_paragraph_is_required_when_the_cv_misses_an_essential(
+    master_cv: MasterCV,
+) -> None:
+    from src.cv.cover_letter import letter_context, letter_gaps
+    from src.cv.models import RequirementEvidence
+
+    tailored = apply_plan(master_cv, TailoringPlan(), JD).model_copy(
+        update={
+            "requirements": [
+                RequirementEvidence(requirement="MLOps", match="direct", evidence=["nimbus-2"]),
+                RequirementEvidence(requirement="Hoshin Kanri", match="not_evidenced"),
+                RequirementEvidence(requirement="CRM", match="not_evidenced", priority="desirable"),
+            ]
+        }
+    )
+    assert letter_gaps(tailored) == ["Hoshin Kanri"]  # essential and not shown; not desirables
+    assert "<gaps>\n- Hoshin Kanri\n</gaps>" in letter_context(tailored)
+    opening = LetterOpening(
+        interest="I am applying for the Senior ML Engineer role because of its ML work.",
+        fit=LetterParagraph(text="My experience in recommenders fits.", source_ids=["nimbus"]),
+    )
+    evidence = LetterParagraph(text="I built recommenders at Nimbus.", source_ids=["nimbus"])
+    close = LetterParagraph(text="I would welcome a conversation.", source_ids=["nimbus"])
+
+    def write(bridge: LetterParagraph | None) -> CoverLetter:
+        draft = LetterSections(
+            opening=opening, evidence=[evidence], bridge=bridge, conclusion=close
+        )
+        llm = FakeLLM({LetterReview: LetterReview(), LetterSections: draft})
+        return write_letter(master_cv, JD, "role", llm, gaps=letter_gaps(tailored))
+
+    assert any("add the gap paragraph" in n and "Hoshin Kanri" in n for n in write(None).notes)
+    gap = LetterParagraph(
+        text="I bring experience in recommenders and Kubernetes. Although I have not yet worked "
+        "directly with Hoshin Kanri, I learn quickly, as the range of systems I have built shows.",
+        source_ids=["nimbus-1", "nimbus-2"],
+    )
+    assert write(gap).notes == []
+    uncited = write(gap.model_copy(update={"source_ids": []}))
+    assert any("cite in the gap paragraph" in n for n in uncited.notes)
 
 
 def test_letter_rejects_skill_not_evidenced_by_approved_cv(master_cv: MasterCV) -> None:
@@ -316,13 +363,29 @@ def test_letter_rejects_skill_not_evidenced_by_approved_cv(master_cv: MasterCV) 
             text="I would welcome a conversation about your genomics work.", source_ids=["nimbus"]
         ),
     )
-    with pytest.raises(ValueError, match="names a skill its sources do not evidence"):
-        write_letter(
-            master_cv,
-            jd,
-            "Functional genomics role",
-            FakeLLM({LetterReview: LetterReview(), LetterSections: draft}),
-        )
+    letter = write_letter(
+        master_cv,
+        jd,
+        "Functional genomics role",
+        FakeLLM({LetterReview: LetterReview(), LetterSections: draft}),
+    )
+    assert len(letter.paragraphs) == 4  # written, with the unbacked skill flagged in red
+    flagged = {f.paragraph: f.reason for f in letter.flags}
+    assert "names a skill its sources do not evidence" in flagged[0]
+
+
+def test_a_lone_letter_skill_is_not_found_in_r_and_d(master_cv: MasterCV) -> None:
+    jd = JD.model_copy(update={"hard_skills": [*JD.hard_skills, "R"]})
+    draft = CoverLetterDraft(
+        paragraphs=[
+            LetterParagraph(
+                text="I built recommenders in an R&D team at Nimbus.", source_ids=["nimbus"]
+            )
+        ]
+    )
+    assert apply_letter(master_cv, draft, jd, "R&D role").flags == []
+    draft.paragraphs[0].text = "I built recommenders in R at Nimbus."
+    assert "'r'" in apply_letter(master_cv, draft, jd, "role").flags[0].reason
 
 
 def test_letter_retries_rejected_section_with_specific_feedback(master_cv: MasterCV) -> None:
@@ -460,7 +523,7 @@ def test_cover_letter_rejects_unsourced_personal_claims_and_job_numbers(
         ]
     )
     letter = apply_letter(master_cv, draft, JD, "Your team has 40 engineers.")
-    assert letter.paragraphs == ["Your team has 40 engineers."]
+    assert len(letter.paragraphs) == 4 and [f.paragraph for f in letter.flags] == [0, 1, 2]
     assert "source_id" in (letter.changes[0].reason or "")
     assert "40" in (letter.changes[1].reason or "")
     assert "superlative" in (letter.changes[2].reason or "")
@@ -647,6 +710,46 @@ def test_general_cv_exports_all_roles_and_keeps_prior_versions(
     assert all(role.title in body for role in master_cv.experience)
 
 
+def test_a_cover_letter_can_be_viewed_and_opened_in_word(
+    master_cv: MasterCV, settings: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.services import document_files
+    from src.web import app as webapp
+
+    ws = Workspace(settings)
+    job = JobPosting(id="letter-job", title="Senior ML Engineer", company="Orbit AI")
+    draft = CoverLetterDraft(
+        paragraphs=[
+            LetterParagraph(text="My work at Nimbus fits this role.", source_ids=["nimbus"])
+        ]
+    )
+    letter = apply_letter(master_cv, draft, JD, "Senior ML Engineer role")
+    path = export_cover_letter(
+        letter, master_cv, settings.output_dir / "cover_letters" / "orbit_cover_letter.docx"
+    )
+    saved = cover_letters.create(ws, job, letter, master_cv, "role", "classic", path)
+    assert cover_letters.find_by_file(ws, path.name) == saved
+    rendered = settings.data_dir / "letter.pdf"
+    rendered.write_bytes(b"%PDF-1.7 letter rendered by Word")
+    seen: list[tuple[Path, str | None]] = []
+    monkeypatch.setattr(document_files, "word_pdf_preview", lambda source, cache: rendered)
+    monkeypatch.setattr(
+        document_files, "open_in_default_app", lambda p, app=None: seen.append((p, app)) or True
+    )
+    monkeypatch.setattr(webapp, "get_workspace", lambda: ws)
+    client = TestClient(webapp.app)
+    assert client.get("/api/cover-letters").json()[0]["job_id"] == "letter-job"  # shown on its card
+    shown = client.get(f"/api/cover-letters/{saved.id}/preview")
+    assert shown.status_code == 200 and shown.content.startswith(b"%PDF")
+    assert shown.headers["content-disposition"].startswith("inline")
+    assert client.post(f"/api/cover-letters/{saved.id}/open?app=word").json() == {"opened": True}
+    assert seen == [(path, "Microsoft Word")]
+    assert client.post("/api/cover-letters/unknown/open").status_code == 404
+    monkeypatch.setattr(document_files, "word_pdf_preview", lambda source, cache: None)
+    missing = client.get(f"/api/cover-letters/{saved.id}/preview")
+    assert missing.status_code == 422 and "Open in Word" in missing.json()["detail"]
+
+
 def test_cover_letters_have_their_own_library_editor_and_exports(
     master_cv: MasterCV, settings: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -701,11 +804,18 @@ def test_cover_letters_have_their_own_library_editor_and_exports(
         "closing": letter.closing,
     }
     edits["paragraphs"][1] = "I built recommenders at Nimbus and led 40 engineers."
-    assert client.put(f"/api/cover-letters/{saved.id}", json=edits).status_code == 422
+    flagged = client.put(f"/api/cover-letters/{saved.id}", json=edits)
+    assert flagged.status_code == 200  # saved, the unbacked number flagged for the user
+    assert [f["paragraph"] for f in flagged.json()["flags"]] == [1]
+    kept = client.put(f"/api/cover-letters/{saved.id}", json={**edits, "keep": [1]})
+    assert kept.json()["flags"] == []  # the user keeps it as written: no longer red
+    again = client.put(f"/api/cover-letters/{saved.id}", json=edits)
+    assert again.json()["flags"] == []  # unchanged and already kept: not flagged again
     edits["paragraphs"][1] = "At Nimbus I built recommenders."
     updated = client.put(f"/api/cover-letters/{saved.id}", json=edits)
     assert updated.status_code == 200, updated.json()
     assert updated.json()["paragraphs"][1] == "At Nimbus I built recommenders."
+    assert updated.json()["flags"] == []
     assert client.get(updated.json()["docx_url"]).status_code == 200
     text_export = client.get(updated.json()["txt_url"])
     assert text_export.status_code == 200

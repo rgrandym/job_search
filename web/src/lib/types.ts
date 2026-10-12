@@ -558,6 +558,7 @@ export type MatchClass = "direct" | "transferable" | "adjacent" | "needs_confirm
 export interface RequirementEvidence {
   requirement: string;
   priority: "essential" | "desirable";
+  importance: "key" | "supporting";
   match: MatchClass;
   evidence: string[];
   note: string;
@@ -630,7 +631,31 @@ export interface VersionReading {
   words: number;
   rejected_changes: number;
   left_out: number;
+  /** Lines whose wording tailoring changed. */
+  rewritten: number;
   areas: AreaChange[];
+  /** Dimension -> the CV line behind its rating (checked to be in this CV). */
+  evidence: Record<string, string>;
+  /** Requirement number -> the CV line that shows it (checked). */
+  requirement_quotes: Record<string, string>;
+  /** Against its original, by fixed margins ("" for an original). */
+  verdict: "better" | "worse" | "mixed" | "same" | "";
+  verdict_reason: string;
+}
+
+/** Two versions that differ in one setting only: what that setting changed (backend `SettingEffect`). */
+export interface SettingEffect {
+  setting: string;
+  from_id: string;
+  to_id: string;
+  from_value: string;
+  to_value: string;
+  score_change: number;
+  requirements_change: number;
+  keyword_change: number;
+  dimensions: { name: FitDimension; before: number; after: number }[];
+  effect: "clear" | "none";
+  text: string;
 }
 
 /** A job's CV versions and originals read side by side (backend `VersionComparison`). */
@@ -644,6 +669,11 @@ export interface VersionComparison {
   readings: VersionReading[];
   best_id: string | null;
   summary: string;
+  setting_effects: SettingEffect[];
+  /** Independent readings per CV; the median counts. */
+  reads: number;
+  /** Score points below which two CVs read the same. */
+  margin: number;
 }
 
 /** What tailoring did, shown under the job: coverage, keywords, headlines, rejections. */
@@ -664,6 +694,7 @@ export interface TailorReport {
   positioning?: Positioning | null;
   requirements?: RequirementEvidence[];
   role_skills?: string[];
+  skills_to_confirm?: { skill: string; background_quote: string; reason: string }[];
   academic?: boolean;
   fit_check?: FitComparison | null;
   rejected: number;
@@ -931,8 +962,21 @@ export interface MasterCV {
   };
 }
 
+/** A cover-letter paragraph a check questions (backend `LetterFlag`). */
+export interface LetterFlag {
+  /** 0-based index into the paragraphs. */
+  paragraph: number;
+  reason: string;
+}
+
 export interface CoverLetterView {
   id: string;
+  /** The job it was written for ("" for older letters). */
+  job_id: string;
+  /** Paragraphs a check questions (red in Word and here) until edited or kept as written. */
+  flags: LetterFlag[];
+  /** Letter-level issues for the user to review (structure, length). */
+  notes: string[];
   title: string;
   company: string;
   candidate_name: string;

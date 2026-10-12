@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from docx import Document
 
+from src.cv.ats import check_docx
 from src.cv.claims import escalation
 from src.cv.cover_letter import apply_letter, letter_context, write_letter
 from src.cv.docx_exporter import export_docx
@@ -18,6 +19,7 @@ from src.cv.fit_check import compare_fit
 from src.cv.models import (
     CoverLetterDraft,
     CVCritique,
+    Education,
     FitReading,
     FitReadout,
     JDAnalysis,
@@ -114,6 +116,84 @@ def test_requirement_map_drops_unknown_ids_and_downgrades_unshown_skills(
     assert checked[1].match == "direct" and checked[1].evidence == ["nimbus-2"]
     assert checked[2].match == "not_evidenced" and checked[2].evidence == []
     assert checked[3].match == "not_evidenced"
+
+
+def test_summary_keeps_the_only_mention_of_a_job_skill(master_cv: MasterCV) -> None:
+    source = master_cv.model_copy(deep=True)
+    source.basics.summary = "Experienced in technology transfer and experimental design."
+    job = JDAnalysis(job_title="Principal Scientist", hard_skills=["Technology transfer"])
+    missing = apply_plan(source, _plan(summary="Experienced in experimental design."), job)
+    assert missing.cv.basics.summary == source.basics.summary
+    assert "Technology transfer" in (missing.changes[-1].reason or "")
+    kept = apply_plan(
+        source, _plan(summary="Experienced in experimental design and technology transfer."), job
+    )
+    assert kept.cv.basics.summary.endswith("technology transfer.")
+
+
+def test_unverified_job_technique_is_red_and_not_counted_as_confirmed(
+    master_cv: MasterCV, tmp_path: Path
+) -> None:
+    source = master_cv.model_copy(deep=True)
+    source.education.append(Education(institution="U", degree="PhD", field="Molecular Biology"))
+    job = JDAnalysis(job_title="Scientist", hard_skills=["RT-PCR", "PyTorch", "cGMP"])
+    plan = _plan(
+        skills_to_confirm=[
+            {
+                "skill": "RT-PCR",
+                "background_quote": "PhD Molecular Biology U",
+                "reason": "Molecular biology training makes this worth confirming",
+            },
+            {
+                "skill": "PyTorch",
+                "background_quote": "PhD Molecular Biology U",
+                "reason": "Already in the CV",
+            },
+            {
+                "skill": "cGMP",
+                "background_quote": "PhD Molecular Biology U",
+                "reason": "Regulated capability must not be inferred",
+            },
+            {
+                "skill": "Western blot",
+                "background_quote": "PhD Molecular Biology U",
+                "reason": "Not named in this posting",
+            },
+            {
+                "skill": "RT-PCR",
+                "background_quote": "Not in this CV",
+                "reason": "The quote is invented",
+            },
+        ]
+    )
+    tailored = apply_plan(source, plan, job)
+    assert [s.skill for s in tailored.skills_to_confirm] == ["RT-PCR"]
+    assert "RT-PCR" not in printed_text(tailored)
+    assert "RT-PCR" in tailored.missing_keywords
+
+    from src.cv.docx_exporter import export_docx
+
+    original = tmp_path / "original.docx"
+    export_docx(source, original)
+    for target, use_original in (
+        (tmp_path / "copy.docx", True),
+        (tmp_path / "classic.docx", False),
+    ):
+        if use_original:
+            write_like_original(
+                original,
+                source,
+                tailored.cv,
+                target,
+                skills_to_confirm=tailored.skills_to_confirm,
+            )
+        else:
+            export_docx(tailored, target)
+        paragraphs = Document(target).paragraphs
+        line = next(p for p in paragraphs if "Skills to confirm before use" in p.text)
+        assert "RT-PCR" in line.text
+        assert all(str(run.font.color.rgb) == "C00000" for run in line.runs)
+        assert check_docx(target, tailored.cv, ["RT-PCR"]).keyword_coverage == 0
 
 
 def test_job_wording_needs_the_bullet_mapped_to_that_requirement(master_cv: MasterCV) -> None:

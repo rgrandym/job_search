@@ -102,7 +102,7 @@ export function TailoredCVPanel({ jobId, result, hasCv, onLetter, letterPending 
   const document = documents.data?.find((item) => item.id === selected);
   return (
     <div className="mt-2 space-y-2 rounded-md bg-surface p-3 text-[12px]">
-      <p className="font-medium">Cover letter source</p>
+      <p className="font-medium">Review CV</p>
       {documents.isPending && <p className="text-muted">Loading saved tailored CVs…</p>}
       {documents.error && <p className="text-bad">{(documents.error as Error).message}</p>}
       {!documents.isPending && !documents.error && (
@@ -142,7 +142,7 @@ export function TailoredCVPanel({ jobId, result, hasCv, onLetter, letterPending 
           ) : <p className="text-muted">{hasCv ? "The letter will cite your selected CV. Older Word drafts can be selected in the CV library." : "No saved tailored CV is available for this job."}</p>}
           {editing && document && <Editor key={document.id + document.updated_at} document={document} onSaved={() => setEditing(false)} />}
           <button className="btn-primary py-1 text-[12px]" disabled={letterPending || (!hasCv && !document) || (document != null && !document.reviewed)} onClick={() => onLetter(selected || undefined)}>
-            {letterPending && <Loader2 size={12} className="animate-spin" />} Write cover letter
+            {letterPending && <Loader2 size={12} className="animate-spin" />} Write cover letter from this CV
           </button>
         </>
       )}

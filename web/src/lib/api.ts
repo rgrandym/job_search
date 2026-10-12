@@ -1,5 +1,6 @@
 import type {
   AppState,
+  LetterFlag,
   Audience,
   BoardView,
   CompanyBoard,
@@ -124,8 +125,14 @@ export interface SearchRequest {
   profile_key?: string | null;
   /** Also search the adjacent role families the profile proposes. */
   widen?: boolean;
+  /** Listing threshold per role area; areas left out use `threshold`. */
+  area_thresholds?: AreaThresholds;
   run_id?: string;
 }
+
+/** Role areas whose listing threshold can differ from the search's (core roles use it). */
+export type AreaTier = "progression" | "adjacent";
+export type AreaThresholds = Partial<Record<AreaTier, number>>;
 
 export interface TrackingUpdate {
   status: "open" | "applied" | "na";
@@ -288,12 +295,12 @@ export const api = {
     request<TailoredCVView[]>(`/api/jobs/${encodeURIComponent(jobId)}/tailored-cvs`),
   allTailoredCVs: () => request<TailoredCVView[]>("/api/tailored-cvs"),
   cvComparison: (jobId: string) =>
-    request<{ comparison: VersionComparison | null; stale: boolean }>(
+    request<{ comparison: VersionComparison | null; stale: boolean; baseline: string | null }>(
       `/api/jobs/${encodeURIComponent(jobId)}/cv-comparison`),
-  compareCVs: (jobId: string, documentIds: string[], progressId?: string) =>
+  compareCVs: (jobId: string, documentIds: string[], baselineId: string | null, progressId?: string) =>
     request<VersionComparison>(
       tracked(`/api/jobs/${encodeURIComponent(jobId)}/cv-comparison`, progressId),
-      json("POST", { document_ids: documentIds }),
+      json("POST", { document_ids: documentIds, baseline_id: baselineId }),
     ),
   importOlderCV: (asset_id: string, title: string, company: string, description: string) =>
     request<TailoredCVView>("/api/tailored-cvs/import", json("POST", { asset_id, title, company, description })),
@@ -303,12 +310,17 @@ export const api = {
   editTailoredCV: (id: string, edits: { headline?: string; summary?: string; bullets?: Record<string, string> }) =>
     request<TailoredCVView>(`/api/tailored-cvs/${encodeURIComponent(id)}`, json("PUT", edits)),
   coverLetter: (jobId: string, template: string, result?: MatchResult, tailored_cv_id?: string, progressId?: string) =>
-    request<{ download_url: string; paragraphs: number; rejections: Rejection[] }>(
+    request<{ id: string | null; download_url: string; paragraphs: number; flags: LetterFlag[]; notes: string[] }>(
       tracked(`/api/jobs/${encodeURIComponent(jobId)}/cover-letter`, progressId),
       json("POST", { template, result, tailored_cv_id }),
     ),
   coverLetters: () => request<CoverLetterView[]>("/api/cover-letters"),
-  editCoverLetter: (id: string, edits: Pick<CoverLetterView, "greeting" | "paragraphs" | "closing">) =>
+  /** The letter as Word lays it out (a PDF). */
+  coverLetterPreview: async (id: string) =>
+    (await checked(`/api/cover-letters/${encodeURIComponent(id)}/preview`, { cache: "no-store" })).blob(),
+  openCoverLetter: (id: string, app: "default" | "word" = "word") =>
+    request<{ opened: boolean }>(`/api/cover-letters/${encodeURIComponent(id)}/open?app=${app}`, { method: "POST" }),
+  editCoverLetter: (id: string, edits: Pick<CoverLetterView, "greeting" | "paragraphs" | "closing"> & { keep?: number[] }) =>
     request<CoverLetterView>(`/api/cover-letters/${encodeURIComponent(id)}`, json("PUT", edits)),
   deleteCoverLetter: (id: string) =>
     request<{ deleted: number }>(`/api/cover-letters/${encodeURIComponent(id)}`, { method: "DELETE" }),

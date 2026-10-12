@@ -6,6 +6,7 @@ import type { AppState, CVAsset, MasterCV } from "../lib/types";
 import { useGmail } from "../lib/useGmail";
 import { useSearchRunner } from "../lib/useSearchRunner";
 import { EMPTY_QUERY, useSearch } from "../stores/searchStore";
+import { AreaThresholds } from "./AreaThresholds";
 import { SourcePicker } from "./SourcePicker";
 import { ProfileDetails } from "./ProfileDetails";
 import { SummaryDialog } from "./SummaryDialog";
@@ -411,8 +412,9 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
           disabled={!s.useCv || !s.smart}
           onChange={(v) => s.set({ widen: v })}
           label="Widen to adjacent roles"
-          title="With empty titles, also search the adjacent role families your profile proposes (each backed by CV evidence). Areas you asked for in your career intent are always searched."
+          title="Also search the adjacent role families your profile proposes (each backed by CV evidence), including leadership roles in neighbouring functions. Areas you asked for in your career intent are always searched."
         />
+        <AreaThresholds disabled={!s.useCv || !s.smart} />
         <Field label="Country" hint={q.country ? "Cities below are searched within this country" : undefined}>
           <select
             className="input"

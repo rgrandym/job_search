@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowDown, ArrowUp, Check, Download, Loader2, Minus, Scale, Trophy } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { api } from "../lib/api";
-import type { AreaChange, TailoredCVView, VersionComparison, VersionReading } from "../lib/types";
+import type { AreaChange, SettingEffect, TailoredCVView, VersionComparison, VersionReading } from "../lib/types";
 import { cn, scoreColor } from "../lib/utils";
 import { TaskError, TaskProgress, useTaskId } from "./TaskProgress";
 import { Modal } from "./ui";
@@ -151,13 +151,27 @@ const CHANGE_STYLE: Record<AreaChange["change"], { title: string; tone: string; 
   same: { title: "No change", tone: "text-faint", icon: <Minus size={11} /> },
 };
 
+const VERDICT_STYLE: Record<Exclude<VersionReading["verdict"], "">, { title: string; tone: string }> = {
+  better: { title: "Meaningful improvement", tone: "text-good" },
+  worse: { title: "Reads worse", tone: "text-warn" },
+  mixed: { title: "Mixed", tone: "text-warn" },
+  same: { title: "No meaningful change", tone: "text-faint" },
+};
+
 function Changes({ reading, original }: { reading: VersionReading; original?: VersionReading }) {
   if (!reading.areas.length) return null;
+  const verdict = reading.verdict ? VERDICT_STYLE[reading.verdict] : null;
   return (
     <div className="rounded-md border border-border p-3">
-      <p className="mb-2 text-[12px]">
+      <p className="mb-1 text-[12px]">
         <span className="font-semibold">{reading.label}</span>
         <span className="text-muted"> against {original?.label ?? "its original"}</span>
+        {verdict && <span className={cn("ml-2 font-medium", verdict.tone)}>{verdict.title}</span>}
+      </p>
+      {reading.verdict_reason && <p className="mb-1 text-[11px] text-muted">{reading.verdict_reason}</p>}
+      <p className="mb-2 text-[11px] text-faint">
+        {reading.rewritten} line{reading.rewritten === 1 ? "" : "s"} reworded · {reading.rejected_changes} rewrite
+        {reading.rejected_changes === 1 ? "" : "s"} rejected by the guards · {reading.left_out} left out
       </p>
       <div className="grid gap-3 sm:grid-cols-3">
         {(["better", "worse", "same"] as const).map((kind) => {
@@ -181,13 +195,39 @@ function Changes({ reading, original }: { reading: VersionReading; original?: Ve
   );
 }
 
+/** What changing one setting did, between two versions that differ only in it. */
+function SettingEffects({ effects }: { effects: SettingEffect[] }) {
+  return (
+    <div className="rounded-md border border-border p-3 text-[12px]">
+      <p className="mb-1 font-medium">Did the settings matter?</p>
+      {effects.length === 0 ? (
+        <p className="text-[11px] text-faint">
+          To see what a setting does (for example Level), tailor two versions that differ only in that setting and
+          compare them together.
+        </p>
+      ) : (
+        effects.map((e) => (
+          <p key={`${e.from_id}-${e.to_id}`} className="text-[11px] text-muted">
+            <span className={cn("font-medium", e.effect === "clear" ? "text-fg" : "text-faint")}>
+              {e.effect === "clear" ? "Clear effect" : "No real effect"}
+            </span>{" "}
+            · {e.text}
+          </p>
+        ))
+      )}
+    </div>
+  );
+}
+
 /** Rows (requirements or keywords) against CVs: shown or not, rows that differ first. */
-function Grid({ title, items, has, readings, open }: {
+function Grid({ title, items, has, readings, open, quote }: {
   title: string;
   items: string[];
   has: (r: VersionReading, index: number) => boolean;
   readings: VersionReading[];
   open?: boolean;
+  /** The CV line behind a tick, shown on hover. */
+  quote?: (r: VersionReading, index: number) => string | undefined;
 }) {
   if (!items.length) return null;
   const rowsOf = items.map((item, i) => ({ item, cells: readings.map((r) => has(r, i)) }));
@@ -212,7 +252,7 @@ function Grid({ title, items, has, readings, open }: {
               <tr key={item} className={cn("border-t border-border", differs(cells) && "bg-surface")}>
                 <td className="p-1 text-fg">{item}</td>
                 {cells.map((shown, i) => (
-                  <td key={readings[i].id} className="p-1">
+                  <td key={readings[i].id} className="p-1" title={shown ? quote?.(readings[i], items.indexOf(item)) : undefined}>
                     {shown ? <Check size={13} className="text-good" aria-label="shown" /> : <Minus size={13} className="text-faint" aria-label="not shown" />}
                   </td>
                 ))}
@@ -248,20 +288,26 @@ function Report({ comparison, downloads, onPick }: {
           {tailored.map((r) => <Changes key={r.id} reading={r} original={r.baseline_id ? byId[r.baseline_id] : undefined} />)}
         </div>
       )}
+      <SettingEffects effects={comparison.setting_effects ?? []} />
       <Grid title="Job requirements shown" items={comparison.requirements} readings={comparison.readings}
-        has={(r, i) => r.requirements_shown.includes(i + 1)} open />
+        has={(r, i) => r.requirements_shown.includes(i + 1)} open
+        quote={(r, i) => r.requirement_quotes?.[String(i + 1)]} />
       <Grid title="Job keywords found" items={comparison.keywords} readings={comparison.readings}
         has={(r, i) => r.keywords_found.includes(comparison.keywords[i])} />
       <p className="text-[11px] text-faint">
-        Every CV was read in one pass by the same recruiter model, in shuffled order and without being told which is the
-        original. Your facts are the same in every version; the scores measure how clearly each CV shows them for this job,
-        not your actual fit.
+        Every CV was read {comparison.reads > 1 ? `${comparison.reads} times` : "once"} by the same recruiter model, in a
+        different order each time and without being told which is the original; the median rating counts. A requirement
+        or a rating above 1 counts only when the reader quoted a line that is really in that CV (hover a tick to see it).
+        Differences under {comparison.margin || 5} points are treated as the same. Readings are kept, so comparing the
+        same CVs again gives the same result. Your facts are the same in every version; the scores measure how clearly
+        each CV shows them for this job, not your actual fit.
       </p>
     </div>
   );
 }
 
-/** Pick a job's tailored CV versions and read them beside the original(s), side by side. */
+/** Pick a job's tailored CV versions and read them beside one original from the CV library
+ *  (the Master or selected CV unless the user picks another), side by side. */
 export function CVVersionCompare({ open, onClose, jobId, versions, onPick }: {
   open: boolean;
   onClose: () => void;
@@ -274,17 +320,22 @@ export function CVVersionCompare({ open, onClose, jobId, versions, onPick }: {
   const qc = useQueryClient();
   const task = useTaskId();
   const saved = useQuery({ queryKey: ["cv-comparison", jobId], queryFn: () => api.cvComparison(jobId), enabled: open });
+  const state = useQuery({ queryKey: ["state"], queryFn: api.state, enabled: open });
+  const library = state.data?.cv_files.available ?? []; // deleted CVs are no longer listed
   const [chosen, setChosen] = useState<string[]>([]);
+  const [picked, setPicked] = useState<string | null>(null);
+  const baseline = picked && library.some((c) => c.id === picked) ? picked : (saved.data?.baseline ?? null);
   useEffect(() => {
-    if (open) setChosen(versions.slice(0, MAX_CVS - 1).map((v) => v.id));
+    if (open) {
+      setChosen(versions.slice(0, MAX_CVS - 1).map((v) => v.id));
+      setPicked(null);
+    }
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps -- reset on opening only
   const run = useMutation({
-    mutationFn: () => api.compareCVs(jobId, chosen, task.next()),
+    mutationFn: () => api.compareCVs(jobId, chosen, baseline, task.next()),
     onSuccess: (data) => qc.setQueryData(["cv-comparison", jobId], { comparison: data, stale: false }),
   });
-  // One original is read per source CV of the chosen versions (an imported Word CV has none).
-  const originals = new Set(versions.filter((v) => chosen.includes(v.id) && !v.imported).map((v) => v.cv_id)).size;
-  const total = chosen.length + originals;
+  const total = chosen.length + 1; // the one original
   const comparison = run.data ?? saved.data?.comparison ?? null;
   const downloads = Object.fromEntries(versions.map((v) => [v.id, v.download_url]));
   const toggle = (id: string) => setChosen((c) => (c.includes(id) ? c.filter((x) => x !== id) : [...c, id]));
@@ -293,9 +344,25 @@ export function CVVersionCompare({ open, onClose, jobId, versions, onPick }: {
       <div className="space-y-3">
         <div className="rounded-md bg-surface p-3 text-[12px]">
           <p className="mb-2 text-muted">
-            Choose the tailored versions to read beside your original CV. To add a version, change Level, Length,
+            Choose the tailored versions to read beside one original CV. To add a version, change Level, Length,
             Emphasis or Audience on the card and tailor again.
           </p>
+          <label className="mb-2 flex flex-wrap items-center gap-2">
+            <span className="text-muted">Compare against</span>
+            <select
+              className="input max-w-full py-1 text-[12px]"
+              value={baseline ?? ""}
+              disabled={state.isPending || !library.length}
+              onChange={(e) => setPicked(e.target.value || null)}
+            >
+              {!baseline && <option value="">{state.isPending ? "Loading your CVs…" : "Choose a CV"}</option>}
+              {library.map((c) => (
+                <option key={c.id} value={c.id}>{c.kind === "master" ? "Master CV" : c.filename}</option>
+              ))}
+            </select>
+          </label>
+          {state.error && <p className="mb-2 text-bad">{(state.error as Error).message}</p>}
+          {!state.isPending && !library.length && <p className="mb-2 text-faint">No CV in your library to compare against.</p>}
           {versions.length === 0 && <p className="text-faint">No tailored CV for this job yet. Tailor one first.</p>}
           <div className="flex flex-wrap gap-2">
             {versions.map((v) => (
@@ -307,12 +374,12 @@ export function CVVersionCompare({ open, onClose, jobId, versions, onPick }: {
             ))}
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-2">
-            <button className="btn-primary py-1 text-[12px]" disabled={!chosen.length || total > MAX_CVS || run.isPending} onClick={() => run.mutate()}>
+            <button className="btn-primary py-1 text-[12px]" disabled={!chosen.length || !baseline || total > MAX_CVS || run.isPending} onClick={() => run.mutate()}>
               {run.isPending ? <Loader2 size={12} className="animate-spin" /> : <Scale size={12} />}
               {comparison ? "Compare again" : "Compare"} {chosen.length} version{chosen.length === 1 ? "" : "s"} with the original
             </button>
             <span className={cn("text-[11px]", total > MAX_CVS ? "text-bad" : "text-faint")}>
-              {total > MAX_CVS ? `At most ${MAX_CVS} CVs in one reading, the original included` : "One model call (CV model)"}
+              {total > MAX_CVS ? `At most ${MAX_CVS} CVs in one reading, the original included` : "Three reads with the CV model; CVs read before keep their scores (no call)"}
             </span>
           </div>
           {run.isPending && <TaskProgress id={task.id} className="mt-2" />}
@@ -321,7 +388,7 @@ export function CVVersionCompare({ open, onClose, jobId, versions, onPick }: {
         {saved.isPending && <p className="text-[12px] text-muted">Loading the last comparison…</p>}
         {saved.error && <p className="text-[12px] text-bad">{(saved.error as Error).message}</p>}
         {!run.data && saved.data?.stale && (
-          <p className="text-[12px] text-warn">A version was edited or removed since this comparison; compare again for current scores.</p>
+          <p className="text-[12px] text-warn">A version or the original CV was edited or removed since this comparison; compare again for current scores.</p>
         )}
         {comparison ? (
           <Report comparison={comparison} downloads={downloads} onPick={onPick && ((id) => { onPick(id); onClose(); })} />

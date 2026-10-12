@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { PROVIDER_LABEL } from "../lib/labels";
 import { syncLists } from "../lib/queryClient";
+import type { AreaThresholds } from "../lib/api";
 import type { ChatEvent, ModelUsageEvent, Provider, SearchQuery } from "../lib/types";
 import { useSearch } from "./searchStore";
 
@@ -24,6 +25,7 @@ export type ChatItem =
 
 type SendOptions = {
   smart: boolean; threshold: number; widen: boolean; profileKey: string | null;
+  areaThresholds: AreaThresholds;
   /** After a spent plan: continue on the other plan's equivalent model. */
   switchPlan?: boolean;
 };
@@ -251,6 +253,7 @@ export const useChat = create<ChatState>()((set, get) => {
         chat_model: chatModel,
         chat_provider: chatProvider,
         smart: options.smart, threshold: options.threshold, widen: options.widen,
+        area_thresholds: options.areaThresholds,
         profile_key: options.profileKey,
         switch: !!options.switchPlan,
       }));

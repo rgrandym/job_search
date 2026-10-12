@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bookmark, CalendarDays, ChevronDown, Download, ExternalLink, FileText, Loader2, Mail, Scale, Trash2 } from "lucide-react";
+import { Bookmark, CalendarDays, ChevronDown, ExternalLink, FileText, Loader2, Mail, Scale, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "../lib/api";
 import type { Rejection } from "../lib/api";
@@ -8,6 +8,7 @@ import { cn, money, scoreColor } from "../lib/utils";
 import { useSearch } from "../stores/searchStore";
 import { CVVersionCompare } from "./CVVersionCompare";
 import { TaskError, TaskProgress, useTaskId } from "./TaskProgress";
+import { CVViewButton, LetterViewButton } from "./LetterDocument";
 import { TailoredCVPanel } from "./TailoredCVPanel";
 import { FitCheckDetails, FitCheckSummary, PositioningDetails } from "./TailorInsights";
 
@@ -428,6 +429,11 @@ export function JobCard({
   // The chosen (else newest) saved version's report, so it is shown again after a reload or in another tab.
   const drafts = useQuery({ queryKey: ["tailored-cvs", "all"], queryFn: api.allTailoredCVs, staleTime: 60_000 });
   const versions = drafts.data?.filter((d) => d.job_id === job.id) ?? [];
+  const letters = useQuery({ queryKey: ["cover-letters"], queryFn: api.coverLetters, staleTime: 60_000 });
+  const jobLetter = letters.data?.find((l) => l.job_id === job.id); // newest first
+  // The cover letter cites the newest reviewed tailored CV for this job, else the selected CV.
+  const letterSource = versions.find((d) => d.reviewed);
+  const canWriteLetter = !!letterSource || canTailor;
   const savedDraft = versions.find((d) => d.id === versionId && d.report) ?? versions.find((d) => d.report);
   const fresh = tailor.data && (!versionId || tailor.data.document_id === versionId) ? tailor.data : null;
   const report = fresh ?? savedDraft?.report ?? null;
@@ -674,10 +680,25 @@ export function JobCard({
         )}
         <button
           className="btn-ghost py-1 text-[12px]"
-          title="Choose a saved tailored CV or your Master CV for the cover letter"
+          disabled={letter.isPending || !canWriteLetter}
+          title={
+            letterSource
+              ? `Write a cover letter citing ${letterSource.label} (to use another CV, open Review CV)`
+              : canTailor
+                ? "Write a cover letter citing your selected CV"
+                : "Select a CV in the library, or tailor one for this job, to write a cover letter"
+          }
+          onClick={() => letter.mutate(letterSource?.id)}
+        >
+          {letter.isPending ? <Loader2 size={12} className="animate-spin" /> : <Mail size={12} />} Cover letter
+        </button>
+        <button
+          className="btn-ghost py-1 text-[12px]"
+          title="Review and edit a saved tailored CV, attach an older Word CV, or write the letter from a CV you choose"
+          aria-expanded={documentsOpen}
           onClick={() => setDocumentsOpen(!documentsOpen)}
         >
-          <Mail size={12} /> Cover letter / review CV
+          <FileText size={12} /> Review CV
         </button>
         {onRemove && !removeAtTop && (
           <button className="btn-ghost py-1 text-[12px] text-bad" title={removeTitle} onClick={onRemove}>
@@ -726,9 +747,8 @@ export function JobCard({
       <CVVersionCompare open={compareOpen} onClose={() => setCompareOpen(false)} jobId={job.id} versions={versions} onPick={pickVersion} />
       {report && (
         <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md bg-surface p-2 text-[12px]">
-          <a className="btn-primary py-1 text-[12px]" href={headlineChoice?.url ?? report.download_url}>
-            <Download size={12} /> Download .docx
-          </a>
+          <CVViewButton downloadUrl={headlineChoice?.url ?? report.download_url} title={`Tailored CV · ${job.title}`} />
+          {jobLetter && <LetterViewButton id={jobLetter.id} title={`Cover letter · ${job.title}`} downloadUrl={jobLetter.docx_url} />}
           {!fresh && savedDraft && (
             <span className="text-faint" title="Saved with this tailored CV">
               {savedDraft.label} · {new Date(savedDraft.created_at).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}
@@ -749,6 +769,15 @@ export function JobCard({
           <PositioningDetails positioning={report.positioning} requirements={report.requirements} />
           {!!report.role_skills?.length && (
             <p className="basis-full text-[11px] text-faint">Added under your summary: Relevant skills for this role: {report.role_skills.join(" · ")}</p>
+          )}
+          {!!report.skills_to_confirm?.length && (
+            <div className="basis-full rounded border border-warn/40 p-2 text-[11px] text-warn">
+              <p className="font-semibold">Skills to confirm before use — shown in red in Word</p>
+              <p>These are plausible suggestions, not confirmed CV facts. Edit or remove them in Word. Add any you can verify to your CV before relying on them in applications.</p>
+              {report.skills_to_confirm.map((item) => (
+                <p key={item.skill}>· {item.skill} — {item.reason} <span className="text-faint">(CV: “{item.background_quote}”)</span></p>
+              ))}
+            </div>
           )}
           {report.missing_keywords.length > 0 && (
             <span className="min-w-0 text-faint" title="Job keywords not found word for word in the tailored CV. Requirements written as sentences are judged by the match verdict, not here. If your experience covers one, add it truthfully to the Master CV.">
@@ -821,11 +850,14 @@ export function JobCard({
       {documentsOpen && <TailoredCVPanel jobId={job.id} result={result} hasCv={canTailor} letterPending={letter.isPending} onLetter={(id) => letter.mutate(id)} />}
       {letter.data && (
         <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md bg-surface p-2 text-[12px]">
-          <a className="btn-primary py-1 text-[12px]" href={letter.data.download_url}>
-            <Download size={12} /> Download cover letter
-          </a>
-          <span className="text-muted">{letter.data.paragraphs} paragraph(s), each backed by your CV</span>
-          <Rejected items={letter.data.rejections} what="paragraph(s)" />
+          {!report && letter.data.id && <LetterViewButton id={letter.data.id} title={`Cover letter · ${job.title}`} downloadUrl={letter.data.download_url} />}
+          <span className="text-muted">Cover letter written: {letter.data.paragraphs} paragraph(s), each backed by your CV{report ? " · View cover letter is next to View CV" : ""}</span>
+          {letter.data.flags.length > 0 && (
+            <span className="text-bad">
+              {letter.data.flags.length} paragraph{letter.data.flags.length === 1 ? "" : "s"} in red to review (open the letter in Cover letters to see why)
+            </span>
+          )}
+          {letter.data.notes.map((n) => <span key={n} className="basis-full text-[11px] text-warn">To check: {n}</span>)}
         </div>
       )}
       {letter.isPending && <TaskProgress id={letterTask.id} className="mt-2" />}

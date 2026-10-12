@@ -37,6 +37,7 @@ from src.core.llm import (
 from src.core.llm.calls import call_group
 from src.jobs.models import SearchQuery
 from src.jobs.sources.base import SourceError
+from src.services.search_service import AreaThresholds
 from src.services.workspace import Workspace
 
 Emit = Callable[[str, dict[str, Any]], Awaitable[None]]
@@ -59,6 +60,7 @@ class AgentContext:
     smart: bool = True
     threshold: float = 60
     widen: bool = False
+    area_thresholds: AreaThresholds = field(default_factory=dict)
     profile_key: str | None = None
     # Native runs: where the app's MCP endpoint is served, and the model's resumable session.
     mcp_url: str | None = None

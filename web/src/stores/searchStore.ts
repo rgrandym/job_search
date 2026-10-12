@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { SearchRequest } from "../lib/api";
+import type { AreaThresholds, SearchRequest } from "../lib/api";
 import type {
   Heartbeat, HistoryItem, JobTracking, MatchReport, ProfileSummary, ProgressEvent, SearchOutcome, SearchQuery,
 } from "../lib/types";
@@ -38,6 +38,8 @@ interface SearchState {
   /** Also search the adjacent role families the profile proposes (tough market). */
   widen: boolean;
   threshold: number;
+  /** Own listing threshold for progression or adjacent roles (absent: the match threshold). */
+  areaThresholds: AreaThresholds;
   outcome: SearchOutcome | null;
   summary: { summary: ProfileSummary; fromMemory: boolean } | null;
   loading: boolean;
@@ -97,6 +99,7 @@ export const useSearch = create<SearchState>()(
       smart: true,
       widen: false,
       threshold: 60,
+      areaThresholds: {},
       outcome: null,
       summary: null,
       loading: false,
@@ -150,6 +153,7 @@ export const useSearch = create<SearchState>()(
         smart: s.smart,
         widen: s.widen,
         threshold: s.threshold,
+        areaThresholds: s.areaThresholds,
         profileKey: s.profileKey,
         disabledSources: s.disabledSources,
         lastSearchId: s.lastSearchId,
@@ -172,6 +176,8 @@ export function openedSearch(request: SearchRequest, outcome: SearchOutcome, ite
     useCv: request.use_cv,
     smart: request.smart,
     threshold: request.threshold,
+    widen: request.widen ?? false,
+    areaThresholds: request.area_thresholds ?? {},
     profileKey: request.profile_key ?? null,
     outcome,
     log: [],
