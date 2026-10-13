@@ -216,7 +216,8 @@ def _path(ws: Workspace, document: SavedLetter) -> Path:
 
 
 def edit(ws: Workspace, document_id: str, edits: LetterEdits) -> SavedLetter:
-    """Save edited text and a new Word version. Claims are checked again when CV evidence is
+    """Save edited text into the letter's own Word file (one file per letter, user's decision
+    2026-10-13). Claims are checked again when CV evidence is
     available; a paragraph the checks question is flagged (red), never refused, unless the
     user keeps it as written or already kept it unchanged."""
     document = load(ws, document_id)
@@ -270,22 +271,40 @@ def edit(ws: Workspace, document_id: str, edits: LetterEdits) -> SavedLetter:
             ]
         }
     )
-    stem = Path(document.filename).stem + "_edited"
-    path = _new_path(ws, stem, ".docx")
+    path = _edit_path(ws, document)
     cv = document.source_cv or MasterCV(basics=Basics(name=document.candidate_name))
-    export_cover_letter(letter, cv, path, document.template)
+    written = path.with_name(f".{path.stem}.writing.docx")  # replaced whole, never half-written
+    export_cover_letter(letter, cv, written, document.template)
+    written.replace(path)
     now = datetime.now(UTC).isoformat()
+    kept = [] if path.name == document.filename else [document.filename]
     updated = document.model_copy(
         update={
             "id": secrets.token_hex(12) if document.id.startswith("legacy-") else document.id,
             "updated_at": now,
             "filename": path.name,
-            "versions": [*document.versions, document.filename],
+            "versions": [*document.versions, *kept],
             "letter": letter,
         }
     )
     _save(ws, updated)
     return updated
+
+
+OUTSIDE_EDIT_SLACK_S = 5.0  # the app writes the file just before it saves the record
+
+
+def _edit_path(ws: Workspace, document: SavedLetter) -> Path:
+    """The letter's own file, rewritten in place; a new file only for a legacy letter (its file
+    is not the app's) or one changed in Word since the app wrote it (never overwritten)."""
+    directory = ws.output_dir / "cover_letters"
+    own = directory / document.filename
+    if document.id.startswith("legacy-") or Path(document.filename).name != document.filename:
+        return _new_path(ws, Path(document.filename).stem + "_edited", ".docx")
+    written = datetime.fromisoformat(document.updated_at).timestamp()
+    if own.is_file() and own.stat().st_mtime > written + OUTSIDE_EDIT_SLACK_S:
+        return _new_path(ws, own.stem + "_edited", ".docx")
+    return own
 
 
 def _new_path(ws: Workspace, stem: str, suffix: str) -> Path:

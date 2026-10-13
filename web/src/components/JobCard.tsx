@@ -834,7 +834,7 @@ export function JobCard({
             <div className="basis-full space-y-1 text-[11px]">
               <p className="text-muted">
                 Headline: <span className="text-fg">{headlineChoice?.headline ?? report.headline ?? "none"}</span>
-                {!headlineChoice || headlineChoice.headline === report.headline ? " (your own)" : " (chosen; a new Word version was saved)"}
+                {!headlineChoice || headlineChoice.headline === report.headline ? " (your own)" : " (chosen; saved in the Word file)"}
               </p>
               <div className="flex flex-wrap gap-1">
                 {[report.headline ?? "", ...report.headline_options].filter(Boolean).map((option, index) => (

@@ -32,7 +32,7 @@ function Editor({ document, onSaved }: { document: TailoredCVView; onSaved: () =
   });
   return (
     <div className="space-y-2 rounded-md border border-border bg-panel p-3 text-[12px]">
-      <p className="text-muted">Review the text before linking it to a letter. Changes are checked against this draft's source CV; saving edits creates a new Word version.</p>
+      <p className="text-muted">Review the text before linking it to a letter. Changes are checked against this draft's source CV; saving updates this draft's Word file.</p>
       {!!document.report?.review_additions?.some((item) => item.status === "pending") && (
         <div className="space-y-2 rounded border border-warn/40 p-2">
           <p className="font-medium text-warn">Confirm or delete each red suggestion before using this CV</p>

@@ -163,7 +163,8 @@ A CV is a factual document. Tailoring may rephrase and reorder. It may never inv
   the draft a second time with them in place, in the same pass, and reports that separately
   as hypothetical (`ProjectedFit`: score, requirements each proposal shows, job terms it adds)
   so the user sees which proposals are worth confirming (user's decision 2026-10-12). Confirming corrected
-  wording explicitly adds it to the selected source CV and a new Word version; deleting it
+  wording explicitly adds it to the selected source CV and rewrites the draft's Word file (one file
+  per draft, user's decision 2026-10-13); deleting it
   removes it. A draft with pending proposals is not reviewed for cover-letter use.
 - Cover letters (user's decision 2026-10-11): the same checks run on every paragraph, but a
   questioned paragraph is kept and flagged in red with its reason (`CoverLetter.flags`) for the

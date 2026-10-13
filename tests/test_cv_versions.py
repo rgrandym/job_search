@@ -761,3 +761,25 @@ def test_comparison_projects_changes_when_all_cv_slots_are_used(
     mine = next(r for r in comparison.readings if r.id == optimised.id)
     assert mine.if_confirmed is not None
     assert mine.if_confirmed.confirmed == mine.score < mine.if_confirmed.projected
+
+
+def test_confirming_works_whichever_cv_is_selected_and_keeps_one_file(
+    ws: Workspace, master_cv: MasterCV
+) -> None:
+    version = _version(ws, master_cv, TailoringSettings(mode="optimised"))
+    proposal = ReviewAddition(
+        id="skill1", kind="skill", text="Azure", requirement="Azure deployment",
+        background_quote="Led migration of model training pipelines to Kubernetes",
+        job_quote="Azure deployment", reason="Ask about hands-on use",
+    )  # fmt: skip
+    tailored = version.tailored.model_copy(update={"review_additions": [proposal]})
+    tailored_documents._save(ws, version.model_copy(update={"tailored": tailored}))
+    other = master_cv.model_copy(
+        update={"basics": master_cv.basics.model_copy(update={"name": "Other"})}
+    )
+    ws.active_cv_id, ws.master_cv = "another-cv", other  # the user selected another CV since
+    confirmed = tailored_documents.review_addition(ws, version.id, "skill1", "confirm", "Azure")
+    assert (ws.active_cv_id, ws.master_cv) == ("another-cv", other)  # selection untouched
+    assert confirmed.filename == version.filename  # the draft's own file, rewritten
+    saved = MasterCV.model_validate_json(ws.settings.master_cv_path.read_text())
+    assert "Azure" in saved.all_skills()  # into the CV the draft came from

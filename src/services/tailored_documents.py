@@ -14,6 +14,7 @@ from src.cv.docx_original import restore_normalized_indents, write_like_original
 from src.cv.models import (
     JDAnalysis,
     MasterCV,
+    ReviewAddition,
     SearchFitBaseline,
     SkillGroup,
     TailoredCV,
@@ -142,7 +143,7 @@ def load(ws: Workspace, document_id: str, job_id: str | None = None) -> Tailored
 
 
 def edit(ws: Workspace, document_id: str, edits: TailoredCVEdits) -> TailoredDocument:
-    """Guard edits against the source CV, then save a new Word version."""
+    """Guard edits against the source CV, then rewrite the draft's Word file."""
     document = load(ws, document_id)
     pending = any(a.status == "pending" for a in document.tailored.review_additions)
     if edits.headline is None and edits.summary is None and not edits.bullets:
@@ -164,26 +165,34 @@ def _write_revision(
     options: list[str] | None = None,
     source_cv: MasterCV | None = None,
 ) -> TailoredDocument:
-    """Write a new Word version after a guarded edit or a proposal decision."""
-    original_path = Path(document.filename)
-    if original_path.name != document.filename:
+    """Rewrite the draft's own Word file after a guarded edit or a proposal decision, so a
+    draft stays one file however often it is edited. A file changed outside the app since the
+    app last wrote it (edited in Word) is never overwritten: the edit goes to a new file and a
+    note says so."""
+    current = Path(document.filename)
+    if current.name != document.filename:
         raise ValueError("Invalid tailored CV filename")
     directory = ws.output_dir / "cvs"
-    path = directory / f"{original_path.stem}_edited.docx"
-    number = 2
-    while path.exists():
-        path = directory / f"{original_path.stem}_edited_{number}.docx"
-        number += 1
+    path = directory / current.name
+    if _changed_outside(path, document):
+        path = _free_path(directory, f"{current.stem}_edited")
+        note = (
+            f"{current.name} was changed outside the app, so it was kept as it is; this "
+            f"edit was saved as {path.name}."
+        )
+        revised = revised.model_copy(update={"document_notes": [*revised.document_notes, note]})
     original = Path(document.original_file) if document.original_file else None
     # Suggested headlines stay in the file until the user picks one.
     headlines = revised.headline_options if options is None else options
     source = source_cv or document.source_cv
+    directory.mkdir(parents=True, exist_ok=True)
+    written = path.with_name(f".{path.stem}.writing.docx")  # replaced whole, never half-written
     if document.template == ORIGINAL and original is not None and original.is_file():
         write_like_original(
             original,
             source,
             revised.cv,
-            path,
+            written,
             headlines,
             revised.role_skills,
             revised.academic,
@@ -193,9 +202,10 @@ def _write_revision(
     else:
         export_docx(
             revised.model_copy(update={"headline_options": headlines}),
-            path,
+            written,
             document.template if document.template in TEMPLATES else "classic",
         )
+    written.replace(path)
     keywords = revised.matched_keywords + revised.missing_keywords
     revised = revised.model_copy(update={"ats": check_docx(path, revised.cv, keywords)})
     updated = document.model_copy(
@@ -211,6 +221,26 @@ def _write_revision(
     return updated
 
 
+OUTSIDE_EDIT_SLACK_S = 5.0  # the app writes the file just before it saves the draft record
+
+
+def _changed_outside(path: Path, document: TailoredDocument) -> bool:
+    """The Word file was saved after the app last wrote it (the user edited it in Word)."""
+    if not path.is_file():
+        return False
+    written = datetime.fromisoformat(document.updated_at).timestamp()
+    return path.stat().st_mtime > written + OUTSIDE_EDIT_SLACK_S
+
+
+def _free_path(directory: Path, stem: str) -> Path:
+    path = directory / f"{stem}.docx"
+    number = 2
+    while path.exists():
+        path = directory / f"{stem}_{number}.docx"
+        number += 1
+    return path
+
+
 def review_addition(
     ws: Workspace,
     document_id: str,
@@ -218,7 +248,8 @@ def review_addition(
     decision: Literal["confirm", "delete"],
     text: str | None = None,
 ) -> TailoredDocument:
-    """Accept a user-confirmed fact into the selected Master CV, or remove the question."""
+    """Accept a user-confirmed fact into the CV the draft came from, or remove the question;
+    either way the draft's own Word file is rewritten."""
     document = load(ws, document_id)
     addition = next((a for a in document.tailored.review_additions if a.id == addition_id), None)
     if addition is None or addition.status != "pending":
@@ -229,45 +260,11 @@ def review_addition(
     source = document.source_cv.model_copy(deep=True)
     revised = document.tailored.model_copy(deep=True)
     if decision == "confirm":
-        from src.cv.edits import CVEdit, apply_edits
-        from src.services import cv_document, cv_service
+        from src.services import cv_service
 
-        if ws.active_cv_id != document.cv_id:
-            raise ValueError("Select the CV this draft came from before confirming a new fact")
-        current = cv_service.cached_selected_cv(ws)
-        if current is None:
-            raise ValueError("The source CV is unavailable; select it in the library first")
-        if addition.kind == "experience":
-            role_id = addition.role_id or ""
-            if not any(r.id == role_id for r in current.experience):
-                raise ValueError("The source role is no longer in the selected CV")
-            updated = apply_edits(
-                current, [CVEdit(action="add_bullet", role_id=role_id, text=wording)]
-            )
-            created = next(
-                b for b in updated.bullet_index().values() if b.id not in current.bullet_index()
-            )
-            for cv in (source, revised.cv):
-                role = next((r for r in cv.experience if r.id == role_id), None)
-                if role is None:
-                    raise ValueError("The proposed role is no longer in this draft")
-                role.bullets.append(created.model_copy(deep=True))
-            synced = cv_document.sync_bullets(ws, current, updated)
-            if synced.not_written:
-                raise ValueError("Could not place the confirmed experience in the source Word CV")
-        else:
-            if any(wording.casefold() == s.casefold() for s in current.all_skills()):
-                raise ValueError("This skill is already in the source CV")
-            updated = current.model_copy(deep=True)
-            for cv in (updated, source, revised.cv):
-                group = next((g for g in cv.skills if g.category == "Additional"), None)
-                if group is None:
-                    cv.skills.append(SkillGroup(category="Additional", items=[wording]))
-                elif wording not in group.items:
-                    group.items.append(wording)
-            cv_document.sync_confirmed_skill(ws, wording)
-            revised.role_skills = list(dict.fromkeys([*revised.role_skills, wording]))[:8]
-        cv_service.save_selected_cv(ws, updated)
+        # the fact goes into the CV this draft came from, whichever CV is selected now
+        with cv_service.working_on(ws, document.cv_id) as current:
+            _confirm(ws, addition, wording, current, source, revised)
         revised.fit_check = None  # the reviewed addition changes the evidence being scored
         matched, missing = keyword_coverage(revised.cv, document.jd)
         revised.matched_keywords = matched
@@ -283,6 +280,50 @@ def review_addition(
         for a in revised.review_additions
     ]
     return _write_revision(ws, document, revised, source_cv=source)
+
+
+def _confirm(
+    ws: Workspace,
+    addition: ReviewAddition,
+    wording: str,
+    current: MasterCV,
+    source: MasterCV,
+    revised: TailoredCV,
+) -> None:
+    """Add the confirmed fact to the source CV (`current`, saved with its Word file), to the
+    draft's copy of it and to the draft."""
+    from src.cv.edits import CVEdit, apply_edits
+    from src.services import cv_document, cv_service
+
+    if addition.kind == "experience":
+        role_id = addition.role_id or ""
+        if not any(r.id == role_id for r in current.experience):
+            raise ValueError("The source role is no longer in the CV this draft came from")
+        updated = apply_edits(current, [CVEdit(action="add_bullet", role_id=role_id, text=wording)])
+        created = next(
+            b for b in updated.bullet_index().values() if b.id not in current.bullet_index()
+        )
+        for cv in (source, revised.cv):
+            role = next((r for r in cv.experience if r.id == role_id), None)
+            if role is None:
+                raise ValueError("The proposed role is no longer in this draft")
+            role.bullets.append(created.model_copy(deep=True))
+        synced = cv_document.sync_bullets(ws, current, updated)
+        if synced.not_written:
+            raise ValueError("Could not place the confirmed experience in the source Word CV")
+    else:
+        if any(wording.casefold() == s.casefold() for s in current.all_skills()):
+            raise ValueError("This skill is already in the source CV")
+        updated = current.model_copy(deep=True)
+        for cv in (updated, source, revised.cv):
+            group = next((g for g in cv.skills if g.category == "Additional"), None)
+            if group is None:
+                cv.skills.append(SkillGroup(category="Additional", items=[wording]))
+            elif wording not in group.items:
+                group.items.append(wording)
+        cv_document.sync_confirmed_skill(ws, wording)
+        revised.role_skills = list(dict.fromkeys([*revised.role_skills, wording]))[:8]
+    cv_service.save_selected_cv(ws, updated)
 
 
 def as_tailored(document: TailoredDocument) -> MasterCV:

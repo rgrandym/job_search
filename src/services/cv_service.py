@@ -8,6 +8,8 @@ import io
 import json
 import re
 import shutil
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Literal
@@ -624,6 +626,28 @@ def _parsed_path(ws: Workspace, asset_id: str) -> Path:
 def _parsed_cv(ws: Workspace, asset_id: str) -> MasterCV | None:
     path = _parsed_path(ws, asset_id)
     return mgr.load(path) if path.exists() else None
+
+
+@contextmanager
+def working_on(ws: Workspace, cv_id: str) -> Iterator[MasterCV]:
+    """Act on one library CV (its structured copy and Word file) as if selected, without
+    changing the user's selection: a draft's facts go back to the CV it came from."""
+    if cv_id == "master":
+        path = ws.settings.master_cv_path
+        cv = mgr.load(path) if path.exists() else None
+    else:
+        cv = _parsed_cv(ws, cv_id) if any(a.id == cv_id for a in list_cvs(ws)) else None
+    if cv is None:
+        raise ValueError("The CV this draft came from is no longer in the CV library")
+    selected, selected_cv = ws.active_cv_id, ws.master_cv
+    ws.active_cv_id, ws.master_cv = cv_id, cv
+    try:
+        yield cv
+    finally:
+        if selected != cv_id:  # another CV is selected: put it back as it was
+            ws.active_cv_id, ws.master_cv = selected, selected_cv
+        else:  # this CV is the selected one: keep its updated copy
+            ws.active_cv_id = selected
 
 
 def _select(ws: Workspace, asset_id: str, cv: MasterCV | None) -> None:

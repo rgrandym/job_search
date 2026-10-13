@@ -127,7 +127,7 @@ These hold for every tailored CV (user's decision; mandatory):
    held, no role the CV does not show, no unevidenced skills or numbers) and the passing ones
    are offered in `TailoredCV.headline_options` and written into the Word file under the CV's
    own headline, in its formatting, so the user can delete the ones they do not want. Picking
-   one in the app saves a new Word version with only that headline, through the guarded edit
+   one in the app rewrites the draft's Word file with only that headline, through the guarded edit
    (`tailored_documents.edit`). The second reader sees the CV as printed (no per-bullet skill
    tags) and is told these rules, so it suggests rewording and reordering only.
 3. **Never lose information.** The bullets that fit the post move to the top of their role and
@@ -176,7 +176,7 @@ when none of its proposals for open gaps survives the checks, one hiring-manager
 (`propose_review_additions`) proposes them. Each request saves one Word version.
 It remains separate from `TailoredCV.cv` and prints in red with `[CONFIRM ... BEFORE USE]`.
 The user reviews each in the app: delete, or edit and explicitly confirm. Confirmation adds
-the corrected fact to the selected source CV and produces a new Word version; pending text
+the corrected fact to the selected source CV and rewrites the draft's Word file; pending text
 never contributes to the draft's own score, keyword coverage, or cover letters. The fit
 check (and the version comparison) reads the draft again with every pending proposal in place,
 in the same blind pass, and reports it apart as hypothetical (`FitComparison.if_confirmed`,
@@ -304,7 +304,7 @@ and asks for one correction only if wording was rejected; no extra model critiqu
 Each tailored Word export also saves its structured draft under `data/tailored_cvs/`. The job
 card's **Cover letter / review CV** panel loads these drafts after a restart. Users can edit
 the headline, summary and visible bullet text; `tailor.revise_tailored` checks edits against
-the source CV's fabrication guards and saves a new Word version. A cover letter can explicitly
+the source CV's fabrication guards and rewrites the draft's own Word file in place, so a draft stays one file however often it is edited (user's decision 2026-10-13); a file changed in Word since the app wrote it is never overwritten: the edit goes to a new file and a note says so. A cover letter can explicitly
 cite a selected saved draft; batch document preparation links each letter to the draft it just
 created. The centre panel's **Documents** tab lists saved drafts even when their job cards are
 no longer in the current search; each draft retains the posting text needed to write a letter.
@@ -450,7 +450,9 @@ fixes, one redraft is made and used only if the checks find no more problems in 
 one-letter skill (R, C) counts only as a standalone capital letter, never inside "R&D" or
 "U.S." (`search_tools.mentions`).
 The user reviews and can edit the resulting letter in the app; omitted examples do not block
-creation.
+creation. Saving an edit rewrites the letter's own Word file (one file per letter, user's
+decision 2026-10-13); a file changed in Word since the app wrote it, or an older letter the
+app did not create, is never overwritten: the edit goes to a new file.
 Motivation comes **only** from the user's career intent (direction, energising work, target
 areas); without one, interest stays grounded in the work described in the posting.
 Every paragraph is recorded in `CoverLetter.changes`; flagged ones are shown in red. The Word

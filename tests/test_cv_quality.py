@@ -18,6 +18,7 @@ from src.cv.docx_exporter import export_cover_letter, export_docx
 from src.cv.models import (
     Bullet,
     BulletIssue,
+    ChangeRecord,
     CoverLetter,
     CoverLetterDraft,
     CVCritique,
@@ -563,6 +564,27 @@ def test_letter_motivation_comes_only_from_the_career_intent(
     assert draft_letter  # the drafting step is the only LLM call besides the JD analysis
 
 
+def test_an_edit_never_overwrites_a_word_file_changed_outside_the_app(
+    master_cv: MasterCV, settings: Any
+) -> None:
+    import os
+
+    ws = Workspace(settings)
+    ws.master_cv, ws.active_cv_id = master_cv, "master"
+    tailored = apply_plan(master_cv, TailoringPlan(), JD)
+    (settings.output_dir / "cvs").mkdir(parents=True, exist_ok=True)
+    path = export_docx(tailored, settings.output_dir / "cvs" / "first.docx")
+    document = tailored_documents.create(ws, "job", master_cv, JD, tailored, "classic", path)
+    later = path.stat().st_mtime + 60
+    os.utime(path, (later, later))  # the user saved it in Word after the app wrote it
+    before = path.read_bytes()
+    text = "Built a recommendation service in Python and PyTorch serving 4M users."
+    edited = tailored_documents.edit(ws, document.id, TailoredCVEdits(bullets={"nimbus-1": text}))
+    assert path.read_bytes() == before  # their Word edits are kept
+    assert edited.filename == "first_edited.docx"
+    assert "changed outside the app" in edited.tailored.document_notes[-1]
+
+
 def test_saved_tailored_cv_edits_feed_letter_after_restart(
     master_cv: MasterCV, settings: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -570,7 +592,8 @@ def test_saved_tailored_cv_edits_feed_letter_after_restart(
     ws.master_cv, ws.active_cv_id = master_cv, "master"
     job = JobPosting(id="saved-role", title="Senior ML Engineer", company="Orbit AI")
     tailored = apply_plan(master_cv, TailoringPlan(), JD)
-    original_path = export_docx(tailored, settings.output_dir / "first.docx")
+    (settings.output_dir / "cvs").mkdir(parents=True, exist_ok=True)
+    original_path = export_docx(tailored, settings.output_dir / "cvs" / "first.docx")
     document = tailored_documents.create(
         ws, job.id, master_cv, JD, tailored, "classic", original_path, posting=job
     )
@@ -582,7 +605,11 @@ def test_saved_tailored_cv_edits_feed_letter_after_restart(
     edited = tailored_documents.edit(
         ws, document.id, TailoredCVEdits(bullets={"nimbus-1": new_text})
     )
-    assert edited.filename != document.filename
+    tailored_documents.edit(ws, document.id, TailoredCVEdits(summary=master_cv.basics.summary))
+    # every save rewrites the draft's own file: one Word file however often it is edited
+    assert edited.filename == document.filename
+    assert [p.name for p in (settings.output_dir / "cvs").glob("*.docx")] == ["first.docx"]
+    assert new_text in "\n".join(p.text for p in Document(str(original_path)).paragraphs)
     assert edited.tailored.cv.bullet_index()["nimbus-1"].text == new_text
 
     restarted = Workspace(settings)
@@ -880,3 +907,34 @@ def test_word_text_includes_tables_in_document_order() -> None:
     lines = extract_text("cv.docx", buffer.getvalue()).splitlines()
     assert lines[1] == "Publications | Doe J. Graph recommenders. Nature 2023."
     assert lines[2].startswith("References")
+
+
+def test_editing_a_cover_letter_rewrites_its_own_word_file(
+    master_cv: MasterCV, settings: Any
+) -> None:
+    from src.cv.docx_exporter import export_cover_letter
+
+    ws = Workspace(settings)
+    letter = CoverLetter(
+        target_title="Senior ML Engineer",
+        greeting="Dear team,",
+        paragraphs=["First draft."],
+        closing="Regards,",
+        changes=[ChangeRecord(source_id="paragraph-1", original="nimbus", tailored="First draft.",
+                              accepted=True)],
+    )  # fmt: skip
+    directory = settings.output_dir / "cover_letters"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "letter.docx"
+    export_cover_letter(letter, master_cv, path, "classic")
+    job = JobPosting(id="job", title="Senior ML Engineer", company="Orbit AI")
+    saved = cover_letters.create(ws, job, letter, master_cv, "", "classic", path)
+    for text in ("Second draft.", "Third draft."):
+        edits = cover_letters.LetterEdits(
+            greeting="Dear team,", paragraphs=[text], closing="Regards,"
+        )
+        edited = cover_letters.edit(ws, saved.id, edits)
+    assert edited.filename == "letter.docx" and edited.versions == []
+    assert [p.name for p in directory.glob("*.docx")] == ["letter.docx"]
+    body = "\n".join(p.text for p in Document(str(path)).paragraphs)
+    assert "Third draft." in body
