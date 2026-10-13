@@ -1,8 +1,8 @@
 """How much better the tailored CV shows the fit for one job, against the CV it came from.
 
     compare_fit: code measures keyword coverage (whole CV and first page), then one LLM call
-    reads both CVs as a recruiter would (in an order that does not reveal which is which)
-    -> FitComparison
+    reads both CVs as a recruiter would (in an order that does not reveal which is which;
+    every rating and requirement must quote a line code finds in that CV) -> FitComparison
 
     read_versions: several CVs for one job read side by side by the same blind reader,
     `READS` times in different orders; every rating and requirement must quote a line that
@@ -36,7 +36,6 @@ from src.cv.models import (
     EvidencedReadings,
     FitComparison,
     FitReading,
-    FitReadout,
     JDAnalysis,
     MasterCV,
     ProjectedFit,
@@ -59,33 +58,7 @@ MAX_VERSIONS = 6  # CVs read in one call; more and one reader's standard drifts
 READS = 3  # independent reads per comparison; the median rating and majority requirements count
 NOISE_MARGIN = 5  # score points: less than one rating step on a 20-weight dimension
 UNQUOTED_CAP = 1  # a rating above this needs a line found in the CV
-
-_RUBRIC = """Read each CV on its own, as if it were the only one in front of you, and judge it \
-only by what it shows on the page: what a reader concludes about this candidate for this job, not \
-what the candidate might have done. Rate each 0-4:
-Identify the few capabilities and experiences central to delivering the role from its work \
-and outcomes. An item can be pivotal even when listed as desirable. Treat long lists of \
-tools and isolated keywords as supporting context, and judge transferable experience by \
-what it actually demonstrates.
-- function: 4 does this work now or in the last role; 3 did it earlier or most of it now; \
-2 adjacent work with clear transfer; 1 shares only tools or subject; 0 different discipline
-- domain: 4 same field or technology; 3 close neighbour; 2 related with transferable core \
-knowledge; 1 distant link; 0 unrelated
-- seniority: 4 same level and scope; 3 one step; 2 two steps or unclear; 1 three steps; 0 far off
-- leadership: 4 same kind and size (or none required); 3 one step different; 2 different \
-mode; 1 much more than shown; 0 a kind never shown that the role centres on
-- sector: 4 same industry and organisation type; 3 same industry, different organisation \
-type; 2 different type with real overlap; 1 distant; 0 unrelated
-When torn between two ratings, give the lower one. `requirements_shown`: the numbers of the \
-listed requirements that a specific line of the CV shows the candidate meets; leave out any \
-you would have to infer. `impression`: one sentence on what the top of the CV conveys for \
-this job."""
-
-FIT_SYSTEM = f"""You are a recruiter screening applications for one job. You see the job \
-description, a numbered list of its requirements, and two CVs (CV 1 and CV 2). {UNTRUSTED}
-
-{_RUBRIC}
-Return the readings in order: `first` for CV 1, `second` for CV 2."""
+CORE_UNMET = "core requirement unmet:"  # the search verdict's cap_reason prefix (screener)
 
 VERSIONS_SYSTEM = f"""You are a recruiter screening applications for one job. You see the job \
 description, a numbered list of its requirements, and several CVs of the same candidate \
@@ -116,15 +89,59 @@ Use the same standard for every CV, so the ratings can be compared. Return one r
 CV in `readings`, in the order given: CV 1 first."""
 
 
-def requirements_for(tailored: TailoredCV, jd: JDAnalysis) -> list[str]:
-    """Read pivotal requirements first, then other essentials and desirables."""
+def requirements_for(
+    tailored: TailoredCV, jd: JDAnalysis, search_fit: SearchFitBaseline | None = None
+) -> list[str]:
+    """Read the core requirements the search found unmet first (whether a CV now shows them
+    decides the search's cap), then pivotal requirements, other essentials and desirables."""
     rows = tailored.requirements
     ordered = sorted(
         rows,
         key=lambda r: (r.importance != "key", r.priority != "essential"),
     )
     listed = [r.requirement for r in ordered] or [*jd.must_have, *jd.nice_to_have]
+    core = core_unmet(search_fit)
+    seen = {_plain(c) for c in core}
+    listed = [*core, *(r for r in listed if _plain(r) not in seen)]
     return list(dict.fromkeys(r for r in listed if r.strip()))[:MAX_REQUIREMENTS]
+
+
+def core_unmet(search_fit: SearchFitBaseline | None) -> list[str]:
+    """The core requirements the search verdict found unmet (they cap its score)."""
+    reason = (search_fit.cap_reason if search_fit else None) or ""
+    if not reason.startswith(CORE_UNMET):
+        return []
+    return [part.strip() for part in reason.removeprefix(CORE_UNMET).split(";") if part.strip()]
+
+
+def _still_unmet(
+    baseline: SearchFitBaseline,
+    original: FitReading,
+    version: FitReading,
+    requirements: list[str] | None,
+) -> bool:
+    """Whether the search's unmet-core cap still holds for `version`. It lifts only when the
+    version shows every core requirement the search found unmet, each with a line code found
+    in that CV, and the original CV's reading did not: the cap came from what the CV showed,
+    so a CV that now shows it is read as the matcher would read it."""
+    if not (baseline.cap_reason or "").startswith(CORE_UNMET):
+        return False
+    core = [_plain(c) for c in core_unmet(baseline)]
+    plain = [_plain(r) for r in requirements or []]
+    if not core or any(c not in plain for c in core):
+        return True
+    numbers = {plain.index(c) + 1 for c in core}
+    quoted_now = {int(n) for n in version.requirement_quotes}
+    newly = (set(version.requirements_shown) & quoted_now) - set(original.requirements_shown)
+    return not numbers <= newly
+
+
+def ats_match(keywords: float, shown: int, total: int) -> int:
+    """What screening software scores: the share of the job's keywords the CV contains and of
+    its requirements a checked reading found shown, equally weighted (keywords alone when no
+    requirements were read)."""
+    requirements = shown / total if total else keywords
+    return round(100 * (keywords + requirements) / 2)
 
 
 def _coverage(text: str, keywords: list[str]) -> float:
@@ -143,21 +160,28 @@ def _score(reading: FitReading) -> int:
     return sum(points_for(levels).values())
 
 
-def anchored_score(baseline: SearchFitBaseline, original: FitReading, version: FitReading) -> int:
+def anchored_score(
+    baseline: SearchFitBaseline,
+    original: FitReading,
+    version: FitReading,
+    requirements: list[str] | None = None,
+) -> int:
     """Apply CV visibility changes to the saved six-dimension search assessment.
 
     The candidate and job are unchanged. Only a dimension with a different CV reading
     moves; practicality stays fixed. The original score remains exactly the search score.
     Both sides go through the matcher's own capped total, so a capped search score moves
-    only as far as the matcher itself would move it.
+    only as far as the matcher itself would move it: an unmet-core cap lifts for a version
+    that newly shows those requirements (`_still_unmet`; `requirements` as read).
     """
-    unmet = (baseline.cap_reason or "").startswith("core requirement unmet:")
+    unmet = (baseline.cap_reason or "").startswith(CORE_UNMET)
     checked = baseline.requirements_checked and not (baseline.cap_reason or "").startswith(
         "requirements not checked:"
     )
     old = capped_score(points_for(baseline.ratings), unmet=unmet, checked=checked)
+    still = unmet and _still_unmet(baseline, original, version, requirements)
     new = capped_score(
-        points_for(anchored_levels(baseline, original, version)), unmet=unmet, checked=checked
+        points_for(anchored_levels(baseline, original, version)), unmet=still, checked=checked
     )
     return max(0, min(100, baseline.score + new - old))
 
@@ -173,25 +197,6 @@ def anchored_levels(
     for name in WEIGHTS:
         new[name] = max(0, min(4, old[name] + getattr(version, name) - getattr(original, name)))
     return new
-
-
-def _read(
-    before: str, after: str, requirements: list[str], jd_text: str, llm: LLMProvider
-) -> tuple[FitReading, FitReading]:
-    """Both CVs read in one call, in an order fixed by the job text (so a reader cannot learn
-    that the second is always the tailored one); returns (before, after)."""
-    tailored_first = hashlib.sha256(jd_text.encode()).digest()[0] % 2 == 0
-    one, two = (after, before) if tailored_first else (before, after)
-    listed = "\n".join(f"{n}. {r}" for n, r in enumerate(requirements, 1))
-    prompt = (
-        f"<job_description>\n{jd_text}\n</job_description>\n\n"
-        f"<requirements>\n{listed or 'none listed'}\n</requirements>\n\n"
-        f"<cv_1>\n{one}\n</cv_1>\n\n<cv_2>\n{two}\n</cv_2>"
-    )
-    readout = llm.generate(system=FIT_SYSTEM, prompt=prompt, output_model=FitReadout)
-    if tailored_first:
-        return readout.second, readout.first
-    return readout.first, readout.second
 
 
 def _shown(reading: FitReading, total: int) -> int:
@@ -213,18 +218,54 @@ def compare_fit(
     before_text = cv_to_text(source, tags=False)
     after_text = printed_text(tailored)
     keywords = ats_keywords(jd)
-    requirements = requirements_for(tailored, jd)
+    requirements = requirements_for(tailored, jd, search_fit)
     proposed = with_proposals(tailored)
     projection: ProjectedFit | None = None
     if proposed is None:
-        before, after = _read(before_text, after_text, requirements, jd_text, llm)
+        before, after = _read_once([before_text, after_text], requirements, jd_text, llm, 0)
     else:
         texts = [before_text, after_text, printed_text(proposed)]
         before, after, projected = _read_once(texts, requirements, jd_text, llm, 0)
         projection = project(before, after, projected, _pending(tailored), requirements, search_fit)
         projection = with_keywords(projection, keywords, after_text, texts[2])
+    dimensions = _dimensions(search_fit, before, after)
+    worse = [f"{d.name}: {d.before} → {d.after}" for d in dimensions if d.after < d.before]
+    shown_before, shown_after = _shown(before, len(requirements)), _shown(after, len(requirements))
+    if shown_after < shown_before:
+        worse.append(f"requirements shown: {shown_before} → {shown_after}")
+    total = len(requirements)
+    kw_before, kw_after = _coverage(before_text, keywords), _coverage(after_text, keywords)
+    return FitComparison(
+        before=search_fit.score if search_fit else _score(before),
+        after=_scored(search_fit, before, after, requirements),
+        search_anchored=search_fit is not None,
+        dimensions=dimensions,
+        requirements_total=len(requirements),
+        requirements_before=shown_before,
+        requirements_after=shown_after,
+        keywords_before=kw_before,
+        keywords_after=kw_after,
+        ats_before=ats_match(kw_before, shown_before, total),
+        ats_after=ats_match(kw_after, shown_after, total),
+        requirements_missing=[
+            r for n, r in enumerate(requirements, 1) if n not in set(after.requirements_shown)
+        ],
+        first_page_before=_coverage(_first_page(before_text), keywords),
+        first_page_after=_coverage(_first_page(after_text), keywords),
+        impression_before=before.impression,
+        impression_after=after.impression,
+        worse=worse,
+        if_confirmed=projection,
+    )
+
+
+def _dimensions(
+    search_fit: SearchFitBaseline | None, before: FitReading, after: FitReading
+) -> list[DimensionChange]:
+    """Each dimension before and after: the search's levels moved by the readings' change,
+    else the readings themselves (practicality neutral)."""
     adjusted = anchored_levels(search_fit, before, after) if search_fit else None
-    dimensions = [
+    return [
         DimensionChange(
             name=name,
             before=search_fit.ratings[name]
@@ -236,31 +277,15 @@ def compare_fit(
         )
         for name in FIT_WEIGHTS
     ]
-    worse = [f"{d.name}: {d.before} → {d.after}" for d in dimensions if d.after < d.before]
-    shown_before, shown_after = _shown(before, len(requirements)), _shown(after, len(requirements))
-    if shown_after < shown_before:
-        worse.append(f"requirements shown: {shown_before} → {shown_after}")
-    return FitComparison(
-        before=search_fit.score if search_fit else _score(before),
-        after=_scored(search_fit, before, after),
-        search_anchored=search_fit is not None,
-        dimensions=dimensions,
-        requirements_total=len(requirements),
-        requirements_before=shown_before,
-        requirements_after=shown_after,
-        keywords_before=_coverage(before_text, keywords),
-        keywords_after=_coverage(after_text, keywords),
-        first_page_before=_coverage(_first_page(before_text), keywords),
-        first_page_after=_coverage(_first_page(after_text), keywords),
-        impression_before=before.impression,
-        impression_after=after.impression,
-        worse=worse,
-        if_confirmed=projection,
-    )
 
 
-def _scored(search_fit: SearchFitBaseline | None, original: FitReading, cv: FitReading) -> int:
-    return anchored_score(search_fit, original, cv) if search_fit else _score(cv)
+def _scored(
+    search_fit: SearchFitBaseline | None,
+    original: FitReading,
+    cv: FitReading,
+    requirements: list[str] | None = None,
+) -> int:
+    return anchored_score(search_fit, original, cv, requirements) if search_fit else _score(cv)
 
 
 def _levels(
@@ -325,8 +350,8 @@ def project(
     credited = {g.addition_id for g in gained}
     old, new = _levels(search_fit, original, confirmed), _levels(search_fit, original, projected)
     return ProjectedFit(
-        confirmed=_scored(search_fit, original, confirmed),
-        projected=_scored(search_fit, original, projected),
+        confirmed=_scored(search_fit, original, confirmed, requirements),
+        projected=_scored(search_fit, original, projected, requirements),
         proposals=len(pending),
         dimensions=[DimensionChange(name=n, before=old[n], after=new[n]) for n in FIT_WEIGHTS],
         requirements_total=total,
@@ -344,11 +369,15 @@ def with_keywords(
 ) -> ProjectedFit:
     """The job terms an ATS or recruiter search would find only with the proposals."""
     found = set(_found(confirmed, keywords))
+    before, after = _coverage(confirmed, keywords), _coverage(projected, keywords)
+    total = projection.requirements_total
     return projection.model_copy(
         update={
-            "keywords_confirmed": _coverage(confirmed, keywords),
-            "keywords_projected": _coverage(projected, keywords),
+            "keywords_confirmed": before,
+            "keywords_projected": after,
             "keywords_added": [k for k in _found(projected, keywords) if k not in found],
+            "ats_confirmed": ats_match(before, projection.requirements_confirmed, total),
+            "ats_projected": ats_match(after, projection.requirements_projected, total),
         }
     )
 
@@ -641,7 +670,7 @@ def score_versions(
             levels = anchored_levels(search_fit, original, readings[index])
             measured[index] = measured[index].model_copy(
                 update={
-                    "score": anchored_score(search_fit, original, readings[index]),
+                    "score": anchored_score(search_fit, original, readings[index], requirements),
                     "dimensions": [
                         DimensionChange(name=n, before=levels[n], after=levels[n])
                         for n in FIT_WEIGHTS

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { AreaThresholds, SearchRequest } from "../lib/api";
+import type { AreaThresholds } from "../lib/api";
 import type {
   Heartbeat, HistoryItem, JobTracking, MatchReport, ProfileSummary, ProgressEvent, SearchOutcome, SearchQuery,
 } from "../lib/types";
@@ -20,6 +20,8 @@ export const EMPTY_QUERY: SearchQuery = {
   sources: [],
   exclude_boards: [],
 };
+
+export const DEFAULT_MATCH_THRESHOLD = 60;
 
 /** Hidden legacy filters must never constrain a new profile-led search. */
 export const profileSearchQuery = (query: SearchQuery): SearchQuery => ({
@@ -69,6 +71,7 @@ interface SearchState {
   /** Take a deleted job out of the current results. */
   removeJob: (jobId: string) => void;
   set: (patch: Partial<Omit<SearchState, "set" | "setQuery" | "setTracking" | "removeJob" | "toggleSelected">>) => void;
+  resetSearch: () => void;
 }
 
 const BUCKETS = ["matches", "to_check", "below_threshold", "excluded", "applied", "dismissed"] as const;
@@ -98,7 +101,7 @@ export const useSearch = create<SearchState>()(
       useCv: true,
       smart: true,
       widen: false,
-      threshold: 60,
+      threshold: DEFAULT_MATCH_THRESHOLD,
       areaThresholds: {},
       outcome: null,
       summary: null,
@@ -129,6 +132,23 @@ export const useSearch = create<SearchState>()(
           ...(s.outcome ? { outcome: { ...s.outcome, report: withoutJob(s.outcome.report, jobId) } } : {}),
         })),
       set: (patch) => set(patch),
+      resetSearch: () => set({
+        query: { ...EMPTY_QUERY },
+        useCv: true,
+        smart: true,
+        widen: false,
+        threshold: DEFAULT_MATCH_THRESHOLD,
+        areaThresholds: {},
+        profileKey: null,
+        disabledSources: ["demo"],
+        outcome: null,
+        summary: null,
+        log: [],
+        error: null,
+        openedFrom: null,
+        lastSearchId: null,
+        selected: [],
+      }),
     }),
     {
       name: "jobsearch.filters",
@@ -169,16 +189,9 @@ useSearch.subscribe((s) => {
   if (id && id !== s.lastSearchId) useSearch.setState({ lastSearchId: id });
 });
 
-/** Store fields that show a search reopened from the history. */
-export function openedSearch(request: SearchRequest, outcome: SearchOutcome, item: HistoryItem): Partial<SearchState> {
+/** Show historical results without changing the user's current search settings. */
+export function openedSearch(outcome: SearchOutcome, item: HistoryItem): Partial<SearchState> {
   return {
-    query: profileSearchQuery({ ...EMPTY_QUERY, ...request.query }),
-    useCv: request.use_cv,
-    smart: request.smart,
-    threshold: request.threshold,
-    widen: request.widen ?? false,
-    areaThresholds: request.area_thresholds ?? {},
-    profileKey: request.profile_key ?? null,
     outcome,
     log: [],
     error: null,

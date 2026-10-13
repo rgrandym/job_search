@@ -25,7 +25,7 @@ function Change({ before, after, text }: { before: number; after: number; text?:
 }
 
 /** One line under the job: how much better the tailored CV shows the fit. */
-export function FitCheckSummary({ check }: { check: FitComparison | null | undefined }) {
+export function FitCheckSummary({ check, capReason }: { check: FitComparison | null | undefined; capReason?: string | null }) {
   if (!check) return <span className="text-faint">Before/after fit check not available for this draft</span>;
   return (
     <span className="text-muted" title="Both CVs read for this job by a recruiter model that does not know which is which. Your actual fit is the same (same facts); this measures how clearly each CV shows it.">
@@ -35,6 +35,15 @@ export function FitCheckSummary({ check }: { check: FitComparison | null | undef
           {" · requirements shown "}
           <Change before={check.requirements_before} after={check.requirements_after} text={`${check.requirements_before} → ${check.requirements_after} of ${check.requirements_total}`} />
         </>
+      )}
+      {check.ats_before != null && check.ats_after != null && (
+        <span title="ATS match: the share of the job's keywords the CV contains and of its requirements a checked reading found shown, as screening software scores it">
+          {" · ATS match "}
+          <Change before={check.ats_before} after={check.ats_after} text={`${check.ats_before} → ${check.ats_after}`} />
+        </span>
+      )}
+      {capReason && check.after === check.before && (
+        <span className="text-warn"> · search score limit still applies</span>
       )}
     </span>
   );
@@ -51,6 +60,12 @@ export function IfConfirmed({ projection, labels }: { projection: ProjectedFit; 
       <p className="text-muted">
         <span className="font-medium text-warn">If you confirm the {p.proposals} red proposal{p.proposals === 1 ? "" : "s"} (hypothetical): </span>
         <Change before={p.confirmed} after={p.projected} text={`${p.confirmed} → ${p.projected}`} />/100
+        {p.ats_confirmed != null && p.ats_projected != null && (
+          <>
+            {" · ATS match "}
+            <Change before={p.ats_confirmed} after={p.ats_projected} text={`${p.ats_confirmed} → ${p.ats_projected}`} />
+          </>
+        )}
         {p.requirements_total > 0 && (
           <>
             {" · requirements shown "}
@@ -85,7 +100,7 @@ export function IfConfirmed({ projection, labels }: { projection: ProjectedFit; 
 }
 
 /** The before/after reading in detail. */
-export function FitCheckDetails({ check }: { check: FitComparison }) {
+export function FitCheckDetails({ check, capReason }: { check: FitComparison; capReason?: string | null }) {
   return (
     <div className="basis-full space-y-1 text-[11px]">
       <p className="text-muted">Before / after, read for this job (0-4 per dimension):</p>
@@ -104,6 +119,14 @@ export function FitCheckDetails({ check }: { check: FitComparison }) {
       </div>
       {check.impression_after && <p className="text-faint">Top of the tailored CV: {check.impression_after}</p>}
       {check.impression_before && <p className="text-faint">Top of the original: {check.impression_before}</p>}
+      {capReason && (
+        <p className="text-warn">
+          Search score limit: {capReason}.{" "}
+          {capReason.startsWith("core requirement unmet:")
+            ? "It lifts when the CV shows each of these requirements with a line of its own: add the evidence to your CV, or confirm a red proposal that covers it."
+            : "Rewording can show existing evidence more clearly; the underlying assessment must change for this limit to lift."}
+        </p>
+      )}
       {check.worse.length > 0 && <p className="text-warn">Reads worse on: {check.worse.join("; ")}</p>}
     </div>
   );

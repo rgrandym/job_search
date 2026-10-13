@@ -133,6 +133,7 @@ and breadth, the publication record if any, and the directions they credibly fit
 # Evidence a family needs to be searched, by tier (ids that exist in the CV).
 MIN_EVIDENCE = {"core": 0, "progression": 1, "adjacent": 2}
 MAX_FAMILIES = {"core": 4, "progression": 2, "adjacent": 6}  # model-suggested, per tier
+UNSPECIFIED_GAP = "Check the posting's specific requirements against this experience"
 SOURCE_ID = re.compile(r"src-\d+")
 SOURCE_CHARS = 60_000  # the whole of any real CV; guards against pasted books
 
@@ -269,6 +270,8 @@ def check_families(
         requested = fam.requested and asked
         evidence = [i.strip("[] ") for i in fam.evidence if known(i.strip("[] "))]
         fam = fam.model_copy(update={"evidence": evidence, "requested": requested})
+        if fam.tier != "core" and evidence and not fam.gap.strip():
+            fam = fam.model_copy(update={"gap": UNSPECIFIED_GAP})
         problem = _family_problem(fam)
         if cv is None and fam.tier != "core":
             problem = "no CV to show the experience transfers"
@@ -278,6 +281,18 @@ def check_families(
                 problem = f"more than {MAX_FAMILIES[fam.tier]} {fam.tier} families proposed"
         out.append(fam.model_copy(update={"rejected": problem}))
     return summary.model_copy(update={"role_families": out})
+
+
+def restore_missing_family_gaps(summary: ProfileSummary) -> ProfileSummary:
+    """Restore a stored family rejected only because its model omitted the gap text."""
+    families = [
+        fam.model_copy(update={"gap": UNSPECIFIED_GAP, "rejected": None})
+        if fam.rejected == "no gap stated: an honest transfer always has one"
+        and len(fam.evidence) >= MIN_EVIDENCE[fam.tier]
+        else fam
+        for fam in summary.role_families
+    ]
+    return summary.model_copy(update={"role_families": families})
 
 
 class ProfileRecord(BaseModel):
@@ -677,7 +692,8 @@ def family_of(title: str, families: list[RoleFamily]) -> str | None:
     words ("Business Development Manager") matches it whole. Ties go to core first."""
     order = sorted(families, key=lambda f: list(TIER_BUDGET).index(f.tier))
     vocab = {
-        f.name: set().union(*(role_words(t) for t in [*f.titles, *f.domain_terms])) for f in order
+        f.name: set().union(*(role_words(t) for t in [f.name, *f.titles, *f.domain_terms]))
+        for f in order
     }
     spread = Counter(w for words in vocab.values() for w in words)
     words = role_words(title)

@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, Loader2, RotateCcw } from "lucide-react";
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { api } from "../lib/api";
 import type { MatchResult, OutcomeStage, TrackedJob } from "../lib/types";
 import { JobCard } from "./JobCard";
@@ -55,8 +55,13 @@ function applicationResult(entry: TrackedJob): MatchResult {
 }
 
 /** Application register: compact by default, with the saved job card on demand. */
-export function AppliedJobs({ query }: { query: UseQueryResult<TrackedJob[]> }) {
+export function AppliedJobs({ query, focusId = null }: { query: UseQueryResult<TrackedJob[]>; focusId?: string | null }) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  // A job picked in "Find in lists" opens expanded.
+  const focusEntry = (query.data ?? []).find((entry) => focusId && (entry.job_id ?? entry.id) === focusId)?.id;
+  useEffect(() => {
+    if (focusEntry) setExpandedId(focusEntry);
+  }, [focusEntry, focusId]);
   const qc = useQueryClient();
   const response = useMutation({
     meta: { syncLists: true },
@@ -98,7 +103,7 @@ export function AppliedJobs({ query }: { query: UseQueryResult<TrackedJob[]> }) 
               const fromSearch = entry.source !== "manual" && !!entry.job_id;
               return (
                 <Fragment key={entry.id}>
-                  <tr className={expanded ? "bg-accent-bg" : "hover:bg-surface"}>
+                  <tr data-job-id={entry.job_id ?? entry.id} className={expanded ? "bg-accent-bg" : "hover:bg-surface"}>
                     <td className="max-w-[280px] px-3 py-2 font-medium">
                       <button
                         type="button"

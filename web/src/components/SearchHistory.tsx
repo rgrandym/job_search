@@ -19,7 +19,7 @@ export function SearchHistory() {
 
   const open = useMutation({
     mutationFn: (item: HistoryItem) => api.openHistory(item.id),
-    onSuccess: ({ request, outcome }, item) => s.set(openedSearch(request, outcome, item)),
+    onSuccess: ({ outcome }, item) => s.set(openedSearch(outcome, item)),
     onError: () => void refresh(),
   });
   const remove = useMutation({

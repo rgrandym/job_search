@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from typing import Literal
@@ -47,8 +48,10 @@ from src.cv.models import (
     TailoredCV,
     TailoredCVEdits,
     TailoringPlan,
+    TermBridge,
     TrimAssessment,
 )
+from src.cv.terms import BRIDGE_MATCHES, verified_bridges, with_bridges
 from src.tools.search_tools import (
     extract_numbers,
     extract_skills,
@@ -199,7 +202,15 @@ regulatory authority, years, ownership, leadership, or specialist platform exper
 general background. Never put unverified skills in the summary, role_skills, bullets or headline.
 - `bullet_order` for every role, and `skills_priority`: the CV's skills ordered by relevance \
 to the job (skills you leave out stay, after the listed ones).
-- In optimised mode only, `review_candidates`: at most five pivotal missing experience or \
+- `term_bridges`: screening software matches the job's keywords word for word. For each \
+keyword in <jd_analysis> (hard_skills, short must_have) that a CV bullet shows in other \
+words, give the keyword exactly as the job writes it, that bullet's id, the bullet's exact \
+words that show the same thing (`quote`), and the requirement row it serves; the row must \
+list that bullet as evidence and be `direct` (in optimised mode, `direct` or `transferable`). \
+Then use the keyword in that bullet's rewrite and in role_skills. Only the same thing under \
+another name: never a named tool, platform or acronym the bullet does not name, a \
+regulated or credential term, or management. Code checks every pairing.
+- In optimised mode only, `review_candidates`: up to eight pivotal missing experience or \
 skills to ask the candidate about. Each must quote exact words from the source CV and the \
 posting, identify the job need it would address, and name what the candidate must verify. \
 These are separate red questions, never factual CV text. Return an empty list when no \
@@ -390,18 +401,25 @@ class Steering:
         if self.optimised:
             out += (
                 "\n\n<optimised_draft>\nThis is one job-specific CV, not a new career history. "
-                "Read the posting for the work the hire must deliver and the few requirements "
-                "that decide an interview. Choose the source CV evidence that answers those "
-                "needs, including transferable work, and make it visible in the summary and "
-                "the first bullets of the relevant roles. Preserve the candidate's level, "
-                "scope, details and distinctive breadth. Map at most eight decision-relevant "
-                "requirements, essentials first; do not restate the whole posting. Reword at "
-                "most five bullets that materially improve this case; reorder the rest. "
-                "Do not force job terms where "
-                "the source does not support them. Put plausible but unproven pivotal "
-                "experience or skills only in review_candidates, with exact source and job "
-                "quotes, for the candidate to confirm or delete. Do not add them to the "
-                "factual summary, bullets, skills, or headline."
+                "Its aim is the strongest screening result the facts allow, read by ATS "
+                "software and an AI or recruiter screen. Read the posting for the work the "
+                "hire must deliver and the requirements that decide an interview. Choose the "
+                "source CV evidence that answers those needs, including transferable work, "
+                "and make it visible in the summary and the first bullets of the relevant "
+                "roles, in the job's own words wherever a term_bridge or the bullet supports "
+                "them. Reword every bullet that gains from it; reorder the rest. Preserve the "
+                "candidate's level, scope, details and distinctive breadth. Map the "
+                "decision-relevant requirements, essentials first. Fill the gaps with "
+                "review_candidates: for each key or essential requirement that is adjacent, "
+                "needs_confirmation or not_evidenced, and each job keyword the CV does not "
+                "show, infer from the documented work of a role what that person would "
+                "realistically have done, and propose it when the background makes it "
+                "plausible, with exact source and job quotes, for the candidate to confirm "
+                "or delete. Never add them to the factual summary, bullets, skills or "
+                "headline. Core requirements unmet in the match_assessment decide this "
+                "application: map each one first, show any source evidence for it in the "
+                "summary and the first bullets, and where the CV gives a credible basis but "
+                "no proof, make it a review_candidate for that requirement."
                 "\n</optimised_draft>"
             )
         return out + (_trimming(self.trim) if self.trim else "")
@@ -594,11 +612,22 @@ def revise_optimised_plan(
 
 
 def apply_plan(
-    master: MasterCV, plan: TailoringPlan, jd: JDAnalysis, trim: TrimAssessment | None = None
+    master: MasterCV,
+    plan: TailoringPlan,
+    jd: JDAnalysis,
+    trim: TrimAssessment | None = None,
+    mode: Literal["standard", "optimised"] = "standard",
 ) -> TailoredCV:
     """Apply `plan` to a copy of `master`, rejecting any change that adds unsupported facts.
     The headline stays; bullets and skills are reordered, and bullets are left out only when
-    `trim` allows it."""
+    `trim` allows it. A job term the plan pairs with a bullet's own words is checked
+    (`terms.verified_bridges`, stricter in standard `mode`) and then counts as that bullet's
+    evidence."""
+    keywords = ats_keywords(jd)
+    bridges = verified_bridges(
+        plan.term_bridges, plan.requirements, master, keywords, BRIDGE_MATCHES[mode]
+    )
+    master = with_bridges(master, bridges)
     cv = master.model_copy(deep=True)
     requirements = check_requirements(plan.requirements, master, jd)
     changes = _apply_rewrites(cv, master, plan, jd, requirements)
@@ -608,6 +637,7 @@ def apply_plan(
     role_skills = _role_skills(plan.role_skills, master)
     role_skills = _retain_summary_terms(master, plan.summary, jd, role_skills)
     changes += _apply_summary(cv, master, plan.summary, jd, role_skills)
+    role_skills = _job_terms_on_top(role_skills, cv, keywords, bridges)
     options, rejected = _headline_options(cv, master, plan.headline_options, jd)
     changes += rejected
     restored = _restore_dropped(cv, before_order, jd)
@@ -630,6 +660,7 @@ def apply_plan(
         requirements=requirements,
         role_skills=role_skills,
         skills_to_confirm=_skills_to_confirm(plan.skills_to_confirm, master, jd),
+        term_bridges=bridges,
         academic=jd.academic,
     )
 
@@ -638,6 +669,7 @@ def revise_tailored(
     source: MasterCV, tailored: TailoredCV, edits: TailoredCVEdits, jd: JDAnalysis
 ) -> TailoredCV:
     """Apply user text edits only when the original CV supports every changed claim."""
+    source = with_bridges(source, tailored.term_bridges)
     cv = tailored.cv.model_copy(deep=True)
     visible = cv.bullet_index()
     original = source.bullet_index()
@@ -675,6 +707,13 @@ def revise_tailored(
     )
 
 
+HIGH_FIT = 85  # an original read this strongly needs no score-driven revision
+CLEAR_GAIN = 5  # fit points that count as clearly better (the fit check's noise margin)
+CLEAR_ATS_GAIN = 10  # ATS match points that, with a requirement gained, count as clearly better
+
+Check = Callable[[TailoredCV], TailoredCV]
+
+
 def tailor(
     master: MasterCV,
     jd_text: str,
@@ -689,12 +728,15 @@ def tailor(
     audience: Audience = "auto",
     suggest_unverified: bool = False,
     mode: Literal["standard", "optimised"] = "standard",
+    check: Check | None = None,
 ) -> TailoredCV:
     """End-to-end: JD text + Master CV -> guarded TailoredCV. With `review`, a second reader
     critiques the result and, if it finds issues, one revised plan replaces the first (both
     pass the same guards). `jd`: an analysis already made of this JD text (saves a call).
     `profile`: the stored profile as prompt text. `audience` "auto" writes for an academic
-    post when the analysis says the job is one."""
+    post when the analysis says the job is one. `check` attaches the before/after fit check;
+    a draft that does not clearly read better than the original is revised once from that
+    reading and the better of the two is kept (`_improve`)."""
     if jd is None:
         progress.step("Analysing the job description")
         jd = analyze_jd(jd_text, llm)
@@ -714,50 +756,200 @@ def tailor(
     progress.step("Mapping the job's requirements to your evidence and planning the CV")
     plan = propose_plan(master, jd, jd_text, llm, steer)
     progress.step("Checking every change against your CV")
-    out = apply_plan(master, plan, jd, trim)
+    out = apply_plan(master, plan, jd, trim, mode)
+    draft = _Draft(master, jd, jd_text, llm, steer, trim, mode)
     if mode == "optimised":
-        rejected = [change for change in out.changes if not change.accepted]
-        if review and rejected:
-            progress.step("Correcting wording the factual checks rejected")
-            revised = revise_optimised_plan(master, jd, jd_text, plan, rejected, llm, steer)
-            corrected = apply_plan(master, revised, jd, trim)
-            accepted = {c.source_id: c.tailored for c in out.changes if c.accepted and c.tailored}
-            kept = all(
-                corrected.cv.bullet_index().get(source_id) is not None
-                and corrected.cv.bullet_index()[source_id].text == text
-                for source_id, text in accepted.items()
-            )
-            if kept and sum(not c.accepted for c in corrected.changes) < len(rejected):
-                plan, out = revised, corrected
-        progress.step("Checking suggestions against the CV and posting")
-        additions = _review_additions(plan.review_candidates, master, out, jd_text)
-        return out.model_copy(update={"skills_to_confirm": [], "review_additions": additions})
-    if review:
-        progress.step("Reviewing the draft as a hiring manager and a recruiter")
-        critique = critique_cv(master, out, jd, jd_text, llm)
-        if critique.has_issues():
-            progress.step("Revising the draft from the review")
-            revised = revise_plan(master, jd, jd_text, plan, critique, llm, steer)
-            out = apply_plan(master, revised, jd, trim).model_copy(
-                update={"critique": critique.notes()}
+        plan, out = _optimised(draft, plan, out, review)
+    else:
+        plan, out = _reviewed(draft, plan, out, review)
+        if suggest_unverified and not out.skills_to_confirm:
+            out = _with_suggestions(draft, out)
+    return out if check is None else _improve(draft, plan, out, check)
+
+
+@dataclass(frozen=True)
+class _Draft:
+    """What every step of one tailoring shares."""
+
+    master: MasterCV
+    jd: JDAnalysis
+    jd_text: str
+    llm: LLMProvider
+    steer: Steering
+    trim: TrimAssessment | None
+    mode: Literal["standard", "optimised"]
+
+    def apply(self, plan: TailoringPlan) -> TailoredCV:
+        return apply_plan(self.master, plan, self.jd, self.trim, self.mode)
+
+
+def _reviewed(
+    d: _Draft, plan: TailoringPlan, out: TailoredCV, review: bool
+) -> tuple[TailoringPlan, TailoredCV]:
+    """Standard mode: a hiring manager and recruiter review, and one revision if needed."""
+    if not review:
+        return plan, out
+    progress.step("Reviewing the draft as a hiring manager and a recruiter")
+    critique = critique_cv(d.master, out, d.jd, d.jd_text, d.llm)
+    if not critique.has_issues():
+        progress.step("No revision needed")
+        return plan, out
+    progress.step("Revising the draft from the review")
+    revised = revise_plan(d.master, d.jd, d.jd_text, plan, critique, d.llm, d.steer)
+    return revised, d.apply(revised).model_copy(update={"critique": critique.notes()})
+
+
+def _with_suggestions(d: _Draft, out: TailoredCV) -> TailoredCV:
+    progress.step("Checking for omitted techniques to flag for your review")
+    try:
+        suggestions = suggest_skills_to_confirm(d.master, d.jd, d.jd_text, d.llm)
+        return out.model_copy(update={"skills_to_confirm": suggestions})
+    except Exception as exc:  # noqa: BLE001 - a review suggestion cannot lose the CV
+        note = f"Skill suggestions could not run: {exc}"
+        return out.model_copy(update={"document_notes": [*out.document_notes, note]})
+
+
+def _optimised(
+    d: _Draft, plan: TailoringPlan, out: TailoredCV, review: bool
+) -> tuple[TailoringPlan, TailoredCV]:
+    """Optimised mode: one correction of rejected wording, then the red proposals; when the
+    plan's own proposals leave the pivotal gaps open, one hiring-manager pass fills them."""
+    rejected = [change for change in out.changes if not change.accepted]
+    if review and rejected:
+        progress.step("Correcting wording the factual checks rejected")
+        revised = revise_optimised_plan(d.master, d.jd, d.jd_text, plan, rejected, d.llm, d.steer)
+        corrected = d.apply(revised)
+        accepted = {c.source_id: c.tailored for c in out.changes if c.accepted and c.tailored}
+        kept = all(
+            corrected.cv.bullet_index().get(source_id) is not None
+            and corrected.cv.bullet_index()[source_id].text == text
+            for source_id, text in accepted.items()
+        )
+        if kept and sum(not c.accepted for c in corrected.changes) < len(rejected):
+            plan, out = revised, corrected
+    progress.step("Checking suggestions against the CV and posting")
+    return plan, _proposals(d, plan.review_candidates, out)
+
+
+def _proposals(d: _Draft, proposed: list[AdditionCandidate], out: TailoredCV) -> TailoredCV:
+    additions = _review_additions(proposed, d.master, out, d.jd_text)
+    if not additions and (_open_gaps(out) or out.missing_keywords):
+        progress.step("Inferring what your roles very probably involved, to close the gaps")
+        guidance = d.steer.guidance
+        try:
+            additions = propose_review_additions(d.master, out, d.jd, d.jd_text, d.llm, guidance)
+        except Exception as exc:  # noqa: BLE001 - proposals are optional; the CV stands
+            note = f"Gap proposals could not run: {exc}"
+            out = out.model_copy(update={"document_notes": [*out.document_notes, note]})
+    return out.model_copy(update={"skills_to_confirm": [], "review_additions": additions})
+
+
+def _open_gaps(out: TailoredCV) -> list[RequirementEvidence]:
+    return [
+        r
+        for r in out.requirements
+        if (r.importance == "key" or r.priority == "essential")
+        and r.match in {"adjacent", "needs_confirmation", "not_evidenced"}
+    ]
+
+
+def _needs_revision(tailored: TailoredCV) -> bool:
+    """Revise unless the draft clearly reads better than the original (or the original
+    already reads very strongly, or there is no reading)."""
+    fc = tailored.fit_check
+    if fc is None or fc.before >= HIGH_FIT:
+        return False
+    if fc.after - fc.before >= CLEAR_GAIN:
+        return False
+    gained = fc.requirements_after > fc.requirements_before
+    return not (gained and fc.ats_after - fc.ats_before >= CLEAR_ATS_GAIN)
+
+
+def _reading(tailored: TailoredCV) -> tuple[int, int, int]:
+    fc = tailored.fit_check
+    return (fc.after, fc.ats_after, fc.requirements_after) if fc else (-1, -1, -1)
+
+
+def _improve(d: _Draft, plan: TailoringPlan, out: TailoredCV, check: Check) -> TailoredCV:
+    """Read the draft beside the original; if it is not clearly better, revise once from what
+    the reader missed and keep whichever draft reads better."""
+    progress.step("Comparing how well each CV shows your fit for this job")
+    first = check(out)
+    if not _needs_revision(first):
+        return first
+    progress.step("Revising where the reading found the case could be stronger")
+    feedback = reader_feedback(first, d.jd)
+    try:
+        revised = revise_for_reader(d, plan, feedback)
+    except Exception as exc:  # noqa: BLE001 - the first draft stands
+        note = f"The score-driven revision could not run: {exc}"
+        return first.model_copy(update={"revision": note})
+    second = d.apply(revised)
+    if d.mode == "optimised":
+        second = _proposals(d, [*revised.review_candidates, *first.review_additions], second)
+    else:
+        kept = {"skills_to_confirm": first.skills_to_confirm, "critique": first.critique}
+        second = second.model_copy(update=kept)
+    progress.step("Reading the revised draft")
+    second = check(second)
+    a, b = first.fit_check, second.fit_check
+    shown = f"fit {a.after} → {b.after}, ATS match {a.ats_after} → {b.ats_after}" if a and b else ""
+    if _reading(second) > _reading(first):
+        note = f"Revised once after a blind reading ({shown}); the revision reads better."
+        return second.model_copy(update={"revision": note})
+    note = f"Revised once after a blind reading ({shown}); the first draft read as well or "
+    return first.model_copy(update={"revision": note + "better and is kept."})
+
+
+def reader_feedback(tailored: TailoredCV, jd: JDAnalysis) -> str:
+    """What the blind reading of a draft found missing, for one revision."""
+    fc = tailored.fit_check
+    if fc is None:
+        return ""
+    lines = [
+        f"Fit read for this job: original {fc.before}, draft {fc.after}; ATS match original "
+        f"{fc.ats_before}, draft {fc.ats_after} (requirements shown {fc.requirements_after} "
+        f"of {fc.requirements_total})."
+    ]
+    rows = {r.requirement: r for r in tailored.requirements}
+    for requirement in fc.requirements_missing:
+        row = rows.get(requirement)
+        if row is not None and row.match in CLAIMABLE and row.evidence:
+            where = ", ".join(row.evidence)
+            lines.append(
+                f"- Not read as shown: {requirement}. The CV evidences it ({row.match}: "
+                f"{where}): say so plainly in the summary and lead those bullets with it."
             )
         else:
-            progress.step("No revision needed")
-    if suggest_unverified and not out.skills_to_confirm:
-        progress.step("Checking for omitted techniques to flag for your review")
-        try:
-            suggestions = suggest_skills_to_confirm(master, jd, jd_text, llm)
-            out = out.model_copy(update={"skills_to_confirm": suggestions})
-        except Exception as exc:  # noqa: BLE001 - a review suggestion cannot lose the CV
-            out = out.model_copy(
-                update={
-                    "document_notes": [
-                        *out.document_notes,
-                        f"Skill suggestions could not run: {exc}",
-                    ]
-                }
-            )
-    return out
+            lines.append(f"- Not read as shown: {requirement} (no CV evidence mapped).")
+    printed = printed_text(tailored)
+    missing = [k for k in ats_keywords(jd) if not mentions(printed, k)]
+    if missing:
+        lines.append(
+            "- Job keywords the printed CV does not contain: " + ", ".join(missing) + ". Where "
+            "a bullet shows one in other words, add a term_bridge and use the keyword."
+        )
+    if fc.impression_after:
+        lines.append(f"- What the top of the draft conveys: {fc.impression_after}")
+    if fc.worse:
+        lines.append("- Reads worse than the original on: " + "; ".join(fc.worse))
+    return "\n".join(lines)
+
+
+def revise_for_reader(d: _Draft, plan: TailoringPlan, feedback: str) -> TailoringPlan:
+    """One revised plan from a blind reading (untrusted until `apply_plan`)."""
+    prompt = (
+        _context(d.master, d.jd, d.jd_text)
+        + d.steer.prompt()
+        + f"\n\n<previous_plan>\n{plan.model_dump_json()}\n</previous_plan>"
+        + f"\n\n<reading>\n{feedback}\n</reading>"
+        + "\n\nA blind screen read this draft beside the original CV and did not find it "
+        "clearly stronger. Return one revised plan that makes the requirements and job "
+        "keywords listed in <reading> visible wherever the CV's facts support them: in the "
+        "summary, role_skills, term_bridges and the first bullets of the roles that "
+        "evidence them. Keep rewrites that already work. The hard rules still apply."
+    )
+    return d.llm.generate(system=PLAN_SYSTEM, prompt=prompt, output_model=TailoringPlan)
 
 
 def _cv_ids(cv: MasterCV) -> dict[str, str]:
@@ -812,6 +1004,22 @@ def _role_skills(proposed: list[str], master: MasterCV) -> list[str]:
     text = cv_to_text(master)
     kept = [s.strip() for s in proposed if s.strip() and mentions(text, s.strip())]
     return list(dict.fromkeys(kept))[:MAX_ROLE_SKILLS]
+
+
+def _job_terms_on_top(
+    skills: list[str], cv: MasterCV, keywords: list[str], bridges: list[TermBridge]
+) -> list[str]:
+    """The relevant-skills line leads with the job's own keywords the CV shows (an ATS and a
+    recruiter's scan read the top of the page): a verified job term no printed line names
+    yet, then job keywords the CV names only further down; the plan's other skills follow."""
+    top = f"{cv.basics.summary or ''} {' '.join(skills)}"
+    printed = cv_to_text(cv, tags=False)
+    is_keyword = [s for s in skills if any(mentions(s, k) or mentions(k, s) for k in keywords)]
+    bridged = [b.term for b in bridges if not mentions(printed, b.term)]
+    lower = [k for k in keywords if mentions(printed, k) and not mentions(top, k)]
+    others = [s for s in skills if s not in is_keyword]
+    ranked = [*is_keyword, *bridged, *lower, *others]
+    return list(dict.fromkeys(t for t in ranked if t.strip()))[:MAX_ROLE_SKILLS]
 
 
 def _retain_summary_terms(

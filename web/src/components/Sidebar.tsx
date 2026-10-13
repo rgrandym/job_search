@@ -15,6 +15,7 @@ import { SearchHistory } from "./SearchHistory";
 import { TrackerPanel } from "./TrackerPanel";
 import { CVDocument } from "./CVDocument";
 import { CVEditor } from "./CVEditor";
+import { FindOneJob } from "./FindOneJob";
 import { ChipInput, Field, Modal, Toggle, Resizable } from "./ui";
 
 const DISTANCES = [5, 10, 25, 50, 100];
@@ -54,6 +55,7 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
   const [dragging, setDragging] = useState(false);
   const [expandedProfileKey, setExpandedProfileKey] = useState<string | null>(null);
   const [editingProfile, setEditingProfile] = useState(false);
+  const [findingOneJob, setFindingOneJob] = useState(false);
   const [editingCV, setEditingCV] = useState<CVAsset | null>(null);
   const [editableCV, setEditableCV] = useState<MasterCV | null>(null);
   const { status: gmail, healthy: gmailHealthy, waiting: gmailWaiting, connect: connectGmail, cancel: cancelGmail } = useGmail();
@@ -493,7 +495,7 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
             </select>
           </Field>
         </div>
-        <div className="pt-1">
+        <div className="grid grid-cols-2 gap-2 pt-1">
           {s.loading ? (
             <button className="btn-ghost w-full min-w-0 justify-center px-2 text-bad" disabled={!s.runId} onClick={runner.stop} title="Stop the search; results so far are kept">
               <Square size={14} className="shrink-0" /> <span className="truncate">Stop</span>
@@ -507,19 +509,30 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
               <Search size={14} /> <span className="truncate">Search</span>
             </button>
           )}
+          <button
+            type="button"
+            className="btn-ghost flex min-w-0 items-center justify-center gap-1 px-2"
+            title="Look online for a posting you found yourself (link, or title and company), to save it for CV and letter writing"
+            onClick={() => setFindingOneJob(true)}
+          >
+            <Search size={14} /> <span className="truncate">Find one job</span>
+          </button>
         </div>
         <button
           type="button"
           className="flex w-full items-center justify-center gap-1 text-[11px] text-faint hover:text-fg"
           disabled={s.loading}
-          title="Reset the filters and clear the results panel (history is kept)"
-          onClick={() => s.set({ query: EMPTY_QUERY, outcome: null, log: [], error: null, openedFrom: null, lastSearchId: null })}
+          title="Reset search filters, thresholds and matching options; clear results (history is kept)"
+          onClick={s.resetSearch}
         >
-          <Eraser size={12} /> Clear filters and results
+          <Eraser size={12} /> Reset search settings and results
         </button>
         </div>
         </Resizable>
       </details>
+      <Modal open={findingOneJob} title="Find one job" onClose={() => setFindingOneJob(false)} resizable>
+        <FindOneJob onSaved={() => setFindingOneJob(false)} />
+      </Modal>
       <SearchHistory />
       <TrackerPanel />
       <details className="card group p-3" open>

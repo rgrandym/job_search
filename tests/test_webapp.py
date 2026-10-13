@@ -1817,6 +1817,34 @@ def test_tracker_matches_roles_not_employers_and_ages_out(ws: Workspace) -> None
     assert not aside and [j.id for j in keep] == ["b"]
 
 
+def test_applied_subsidiary_role_is_set_aside_when_board_names_parent(ws: Workspace) -> None:
+    from datetime import date
+
+    from src.jobs.models import MatchReport, MatchResult
+    from src.services import tracker
+
+    title = "Sr. Leader, Project Management (Commercial Excellence)"
+    applied = JobPosting(id="workday:danaher:R1317291", title=title, company="Cytiva")
+    tracker.set_status(ws, applied, "applied", today=date(2026, 10, 11))
+    board = JobPosting(
+        id="adzuna:5921899214",
+        title=title,
+        company="Danaher",
+        description="Working at Cytiva means helping people. This is a global project role.",
+    )
+    unrelated = board.model_copy(update={"id": "other", "description": "Working at Danaher."})
+    keep, aside, _ = tracker.set_aside(ws, [board, unrelated], today=date(2026, 10, 13))
+    assert [r.job.id for r in aside] == [board.id]
+    assert [j.id for j in keep] == [unrelated.id]
+
+    report = MatchReport(
+        profile=build_profile(ws.master_cv), threshold=60, matches=[MatchResult(job=board)]
+    )
+    report.matches[0].tracking = tracker.tracking_for(ws, board)
+    tracker.refresh(ws, report)
+    assert not report.matches and [r.job.id for r in report.applied] == [board.id]
+
+
 def test_new_then_open_and_notes_survive_searches(ws: Workspace) -> None:
     from src.services import tracker
 

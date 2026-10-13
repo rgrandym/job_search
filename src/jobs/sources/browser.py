@@ -172,7 +172,10 @@ class BrowserFetcher:
         with tempfile.TemporaryDirectory(prefix="jobsearch-chrome-") as profile:
             cmd = [
                 str(self.chrome), "--headless=new", "--disable-gpu", "--no-first-run",
-                "--no-default-browser-check", "--disable-extensions", f"--user-data-dir={profile}",
+                "--no-default-browser-check", "--disable-extensions",
+                # No Cast/device discovery or unrelated background connections.
+                "--disable-background-networking", "--disable-features=MediaRouter",
+                f"--user-data-dir={profile}",
                 # never the macOS Keychain ("Chrome Safe Storage" prompts) for a throwaway profile
                 "--use-mock-keychain", "--password-store=basic", "--mute-audio",
                 f"--virtual-time-budget={self.settings.browser_wait_ms}", "--dump-dom", url,

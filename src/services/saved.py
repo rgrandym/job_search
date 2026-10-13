@@ -14,7 +14,10 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
-from src.jobs.models import SavedJob
+from pydantic import BaseModel, Field
+
+from src.jobs.models import JobPosting, MatchResult, SavedJob
+from src.jobs.sources.base import stable_id
 from src.services import tracker
 from src.services.workspace import Workspace
 
@@ -56,6 +59,67 @@ def save(ws: Workspace, job_ids: list[str]) -> list[SavedJob]:
     if new:
         _write(ws, new + items)
     return new
+
+
+class OutsideJob(BaseModel):
+    """A posting the user found elsewhere and supplies for document creation."""
+
+    title: str = Field(min_length=1)
+    company: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    url: str | None = None
+    location: str | None = None
+
+
+def import_job(ws: Workspace, posting: OutsideJob) -> SavedJob:
+    """Keep an outside posting in Saved so existing document actions can use it."""
+    from urllib.parse import urlsplit
+
+    title, company, description = (
+        posting.title.strip(),
+        posting.company.strip(),
+        posting.description.strip(),
+    )
+    if not title or not company or not description:
+        raise ValueError("Title, company and job description are required")
+    url = (posting.url or "").strip() or None
+    if url and (urlsplit(url).scheme not in ("http", "https") or not urlsplit(url).netloc):
+        raise ValueError("The posting link must be an http or https URL")
+    job = JobPosting(
+        id=f"manual:{stable_id(url or title, company)}",
+        title=title,
+        company=company,
+        description=description,
+        url=url,
+        location=(posting.location or "").strip() or None,
+        source="manual",
+    )
+    items = ws.saved_jobs()
+    existing = next((item for item in items if item.result.job.id == job.id), None)
+    if existing is not None:
+        return existing
+    item = SavedJob(
+        result=MatchResult(job=job), saved_at=datetime.now(UTC).isoformat(timespec="seconds")
+    )
+    _write(ws, [item, *items])
+    return item
+
+
+def save_found(ws: Workspace, job: JobPosting) -> SavedJob:
+    """Keep a focused lookup result with its original board ID and full posting text."""
+    if not job.title.strip() or not job.company.strip() or not job.description.strip():
+        raise ValueError(
+            "This posting has no readable description; paste its text under Add a job you found"
+        )
+    items = ws.saved_jobs()
+    existing = next((item for item in items if item.result.job.id == job.id), None)
+    if existing is not None:
+        return existing
+    item = SavedJob(
+        result=MatchResult(job=job), saved_at=datetime.now(UTC).isoformat(timespec="seconds")
+    )
+    _write(ws, [item, *items])
+    return item
 
 
 def remove(ws: Workspace, job_ids: list[str]) -> int:

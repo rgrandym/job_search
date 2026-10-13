@@ -1,13 +1,13 @@
 {
   "$comment": "Runtime: src/jobs/screener.py (MATCHER_SYSTEM). Runs inside the search pipeline (services/search_service.run_search); not a chat agent.",
   "name": "job_matcher",
-  "version": "0.7.1",
+  "version": "0.7.3",
   "description": "Semantic screening: judges each shortlisted posting against the profile summary (realistic role families only) and the career intent, and returns a verdict.",
   "model_role": "screening (first pass); quality (second opinions on every match and near the threshold)",
   "input": [
     "Saved ProfileSummary, or one built with the search quality model from the original CV document and its structured extract (capabilities, publication record, what sets the level, role families with CV or [src-N] document evidence; families code rejected are removed; the pitch, expansion routes and family positioning are presentation and are left out), with the preferences the user accepted from their labels (services.learning)",
     "career intent (optional)",
-    "candidate base + search constraints (job-level exclusions only when the user sets a minimum or maximum)",
+    "candidate home location + search constraints and confirmed languages (a country-only search is nationwide, with no inferred commute limit; job-level exclusions only when the user sets a minimum or maximum)",
     "posting digests (batch of 3, or 1 for a second opinion); long descriptions keep their requirements section (3000 chars)"
   ],
   "output": "JobAssessment {job_id, fit_summary, reasons, transferable, gaps, essential_unmet, unknowns, dealbreakers, alignment (against|neutral|aligned), alignment_note, ratings {function, domain, seniority, leadership, sector, practicality: level 0-4}} -> screener.finalize -> JobVerdict {+ dimensions (points: level/4 of weights 30/20/20/10/10/10), fit_score, band, priority, match, borderline, cap_reason, reviewed, from_memory}",
@@ -26,5 +26,6 @@
     "memory": "data/verdict_cache.json keyed by normalized posting text (known company aliases and presentation-only description labels) + profile summary + career intent + constraints + provider:screening model:effort|review:quality model:effort + MATCHER_VERSION; verdicts judged by a replacement model (a spent plan) are labelled (JobVerdict.model) and not remembered",
     "second_opinion": "every first-pass match, postings within 5 points of the threshold, scoring 65-80 with seniority and leadership both at levels 2-3, or matching but for an unmet core requirement (never a posting whose requirements could not be read): one more single-posting assessment by the quality model, levels averaged and rounded down; an unmet core requirement stands only when most readings find one (a third reading breaks a tie); unread would-be matches go to report.to_check, not matches"
   },
-  "sector_and_domain": "profile-driven (the profile's domains), not tied to one industry; adjacent role families are rated on how much of the work their evidence covers, never a dealbreaker on discipline alone; for leadership-level postings, leadership counts founding or running a company, teams, budgets, fundraising and partnerships at their scale"
+  "sector_and_domain": "profile-driven (the profile's domains), not tied to one industry; adjacent role families are rated on how much of the work their evidence covers, never a dealbreaker on discipline or a missing past job title alone; work done in another setting counts as transferable when its underlying activities match; preferred experience is never an essential requirement; for leadership-level postings, leadership counts founding or running a company, teams, budgets, fundraising and partnerships at their scale; a location inside a country-only search cannot be rejected for an inferred commute or relocation restriction",
+  "review_presentation": "The UI shows a screened non-match with fit >= 40 and concrete transferable evidence as an Adjacent possibility, with all gaps and dealbreakers visible. It remains a non-match in the report. Not selected and Not screened review lists hide scores below 40 without removing them from report or history."
 }

@@ -73,6 +73,28 @@ def test_api_save_list_and_remove(ws: Workspace, monkeypatch: Any) -> None:
     assert client.post("/api/saved/remove", json={"job_ids": ["a"]}).json() == {"removed": 1}
 
 
+def test_import_outside_job_is_available_for_documents(ws: Workspace, monkeypatch: Any) -> None:
+    from src.web import app as webapp
+
+    monkeypatch.setattr(webapp, "get_workspace", lambda: ws)
+    client = TestClient(webapp.app)
+    posting = {
+        "title": "Research manager",
+        "company": "Example Bio",
+        "description": "Lead a research programme and write technical reports.",
+        "url": "https://example.org/jobs/123",
+        "location": "London",
+    }
+    response = client.post("/api/saved/import", json=posting)
+    assert response.status_code == 200
+    job_id = response.json()["result"]["job"]["id"]
+    assert ws.job(job_id) is not None
+    assert ws.result(job_id).job.description == posting["description"]
+    assert len(client.get("/api/saved").json()) == 1
+    assert client.post("/api/saved/import", json=posting).json()["result"]["job"]["id"] == job_id
+    assert len(client.get("/api/saved").json()) == 1
+
+
 def test_deleting_a_result_clears_it_from_every_list_but_the_register(ws: Workspace) -> None:
     from src.jobs.models import SearchQuery
     from src.services import history, search_service

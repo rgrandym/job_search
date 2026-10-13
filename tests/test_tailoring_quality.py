@@ -4,7 +4,7 @@ before/after fit check, letter bridge and review, and profile claim checks."""
 
 from __future__ import annotations
 
-import hashlib
+import re
 from pathlib import Path
 
 import pytest
@@ -21,15 +21,17 @@ from src.cv.models import (
     CoverLetterDraft,
     CVCritique,
     Education,
-    FitReading,
-    FitReadout,
+    EvidencedReading,
+    EvidencedReadings,
     JDAnalysis,
     LetterOpening,
     LetterParagraph,
     LetterReview,
     LetterSections,
     MasterCV,
+    MetRequirement,
     Positioning,
+    RatedLine,
     RequirementEvidence,
     RewrittenBullet,
     SkillSuggestions,
@@ -309,8 +311,7 @@ def test_optimised_mode_revises_once_only_when_factual_check_rejects(
                     RewrittenBullet(
                         source_id="nimbus-3",
                         text=(
-                            "Managed 5 engineers and introduced code review standards "
-                            "for ML code."
+                            "Managed 5 engineers and introduced code review standards for ML code."
                         ),
                     )
                 ]
@@ -321,8 +322,15 @@ def test_optimised_mode_revises_once_only_when_factual_check_rejects(
     llm = FakeLLM({TailoringPlan: lambda _prompt: next(drafts)})
     out = tailor(master_cv, "ML engineering leadership", llm, jd=JD, mode="optimised")
     assert out.cv.bullet_index()["nimbus-3"].text == master_cv.bullet_index()["nimbus-3"].text
-    assert [model for _, model in llm.calls] == [TailoringPlan, TailoringPlan]
+    # one correction of the rejected wording; then, with no proposals for the open gaps,
+    # one gap pass (it fails here and is noted; the CV stands)
+    assert [model for _, model in llm.calls] == [
+        TailoringPlan,
+        TailoringPlan,
+        AdditionCandidates,
+    ]
     assert "<guard_feedback>" in llm.calls[1][0]
+    assert any("Gap proposals could not run" in n for n in out.document_notes)
 
 
 def test_focused_suggestion_can_link_an_implied_technique_to_the_job(
@@ -520,7 +528,7 @@ def test_template_export_carries_role_skills_and_puts_education_first_for_academ
     tailored = apply_plan(master_cv, _plan(role_skills=["Python"]), JD)
     tailored = tailored.model_copy(update={"academic": True})
     texts = _texts(export_docx(tailored, tmp_path / "t.docx", "classic"))
-    assert "Relevant skills for this role: Python" in texts
+    assert "Relevant skills for this role: Python · PyTorch" in texts  # job keywords lead
     upper = [t.casefold() for t in texts]
     assert upper.index("education") < upper.index("experience")
 
@@ -530,15 +538,24 @@ def test_template_export_carries_role_skills_and_puts_education_first_for_academ
 
 def test_fit_check_reads_both_cvs_blind_and_reports_the_change(master_cv: MasterCV) -> None:
     tailored = apply_plan(master_cv, _plan(role_skills=["PyTorch"]), JD)
-    before = FitReading(function=2, domain=3, seniority=3, leadership=2, sector=2,
-                        requirements_shown=[1], impression="generic")  # fmt: skip
-    after = FitReading(function=4, domain=3, seniority=3, leadership=1, sector=3,
-                       requirements_shown=[1, 2, 9], impression="clear fit")  # fmt: skip
-    jd_text = "We need a senior ML engineer."
-    tailored_first = hashlib.sha256(jd_text.encode()).digest()[0] % 2 == 0
-    first, second = (after, before) if tailored_first else (before, after)
-    llm = FakeLLM({FitReadout: FitReadout(first=first, second=second)})
-    check = compare_fit(master_cv, tailored, JD, jd_text, llm)
+    before = {"function": 2, "domain": 3, "seniority": 3, "leadership": 2, "sector": 2}
+    after = {"function": 4, "domain": 3, "seniority": 3, "leadership": 1, "sector": 3}
+
+    def reader(prompt: str) -> EvidencedReadings:
+        out = []
+        for _, text in re.findall(r"<cv_(\d+)>\n(.*?)\n</cv_\1>", prompt, re.DOTALL):
+            line = next(ln for ln in text.splitlines() if len(ln.split()) >= 2)
+            mine = "Relevant skills for this role" in text
+            levels, met = (after, [1, 2, 9]) if mine else (before, [1])
+            out.append(EvidencedReading(
+                **{n: RatedLine(rating=r, quote=line) for n, r in levels.items()},
+                requirements_met=[MetRequirement(number=n, quote=line) for n in met],
+                impression="clear fit" if mine else "generic",
+            ))  # fmt: skip
+        return EvidencedReadings(readings=out)
+
+    llm = FakeLLM({EvidencedReadings: reader})
+    check = compare_fit(master_cv, tailored, JD, "We need a senior ML engineer.", llm)
     assert check.before < check.after and check.impression_after == "clear fit"
     assert check.requirements_total == 1 and check.requirements_after == 1  # "MLOps" only
     assert check.worse == ["leadership: 2 → 1"]

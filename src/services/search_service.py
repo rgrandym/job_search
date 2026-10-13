@@ -79,7 +79,8 @@ T = TypeVar("T")
 STOP_GRACE_S = 0.5
 # Postings with less text than this get their full posting opened before screening.
 ENRICH_BELOW = 600
-BOARD_TERMS = 16  # job-board searches per source (profile roles split into short terms)
+BOARD_TERMS = 16  # core/progression searches retained when widening
+ADJACENT_TERMS = 8  # additional searches, never taken from the normal plan
 # Server-side search by title.
 KEYWORD_SOURCES = {
     "reed", "cv_library", "adzuna", "linkedin_search", "totaljobs", "jobs_ac_uk", "nhs_jobs",
@@ -782,7 +783,7 @@ async def _plan_query(
                 raise
             return query, None  # stopped: the sources are skipped and the run ends at once
         summary = profile[0]
-        planned = family_terms(summary, req.widen, BOARD_TERMS)
+        planned = planned_family_terms(summary, req.widen)
         if planned and not any(f.tier == "core" for f in searched_families(summary, req.widen)):
             # Searching only the next level up or other functions would silently drop the
             # roles the candidate does now: fall back to the profile's target roles.
@@ -796,6 +797,25 @@ async def _plan_query(
         if query.titles:
             await _say(emit, "plan", _plan_message(summary, planned, terms, req.widen))
     return query, profile
+
+
+def planned_family_terms(summary: ProfileSummary, widen: bool) -> list[tuple[str, str]]:
+    """Keep the normal search intact and append terms for newly included adjacent families."""
+    normal = family_terms(summary, False, BOARD_TERMS)
+    if not widen:
+        return normal
+    extra_families = {
+        f.name
+        for f in summary.role_families
+        if f.tier == "adjacent" and not f.requested and f.rejected is None
+    }
+    seen = {term.lower() for term, _ in normal}
+    extra = [
+        (term, family)
+        for term, family in family_terms(summary, True, BOARD_TERMS + ADJACENT_TERMS)
+        if family in extra_families and term.lower() not in seen
+    ][:ADJACENT_TERMS]
+    return [*normal, *extra]
 
 
 def widen_note(ws: Workspace, req: SearchRequest) -> str | None:
@@ -985,6 +1005,13 @@ def _judged_cv(ws: Workspace, cv: Any) -> str:
 
 def screening_base(cv: Any, query: SearchQuery) -> str:
     """Where the candidate lives and how they will work, for the matcher's practicality score."""
+    if query.country and not query.locations:
+        home = getattr(getattr(cv, "basics", None), "location", "")
+        place = f"home: {home}; " if home else ""
+        return (
+            f"{place}nationwide search area; no city, commute radius or relocation "
+            "limit specified by this search"
+        )
     profile = build_profile(cv, query=query) if cv is not None else None
     if profile is None or not profile.locations:
         return ""
@@ -1084,6 +1111,7 @@ async def _screen(
         intent=intent,
         review_progress=review_progress,
         thresholds=thresholds,
+        confirmed_languages=report.profile.languages,
     )
     # Tailored CVs are scored against this verdict only when they come from the same CV.
     verdicts = {k: v.model_copy(update={"cv_id": cv_id}) for k, v in verdicts.items()}

@@ -169,8 +169,11 @@ the contribution the role makes plausible), or a skill the job depends on. Wordi
 posting's terms where accurate, but never trades accuracy for a keyword; each `reason` names
 the doubt it settles. Every proposal also quotes the
 posting, carries the relevant requirement and a reason, and is checked against both texts.
-The factual guards can trigger one focused model revision of rejected wording. Optimised mode
-does not call a separate critic or suggestion model, and each request saves one Word version.
+The factual guards can trigger one focused model revision of rejected wording. For each key
+or essential requirement the CV does not directly show and each missing job keyword, the
+writer infers what the role's documented work realistically involved and proposes it in red;
+when none of its proposals for open gaps survives the checks, one hiring-manager pass
+(`propose_review_additions`) proposes them. Each request saves one Word version.
 It remains separate from `TailoredCV.cv` and prints in red with `[CONFIRM ... BEFORE USE]`.
 The user reviews each in the app: delete, or edit and explicitly confirm. Confirmation adds
 the corrected fact to the selected source CV and produces a new Word version; pending text
@@ -264,6 +267,29 @@ Also produced, and guarded the same way (recorded in `changes` as `summary`):
   `missing_keywords` are then true gaps. Keywords are `tailor.ats_keywords`: hard skills and
   must-haves of at most 4 words; requirement sentences are left to the job_matcher's verdict.
 
+**Job terms for the CV's own wording** (`cv/terms.py`, user's decision 2026-10-13). ATS
+software matches the job's keywords word for word. The plan's `term_bridges` pair a job
+keyword with the exact words of one bullet that show the same thing ("Mammalian cell culture"
+← "cultured HEK293 and CHO lines"). Code keeps a pairing only when the term is an ATS keyword
+and a general method, domain or practice (never a named tool, acronym, a term with a number,
+or a regulated, credential or management term: those need the CV's own word), the quoted
+words are in that bullet, and the requirement map cites that bullet for a requirement naming
+the term as `direct` (standard) or `direct`/`transferable` (optimised). A kept pairing is that
+bullet's evidence for every guard (`with_bridges` adds it as an unprinted skill tag), so the
+bullet's rewrite, the summary and the relevant-skills line may use the term; nothing else
+changes. The relevant-skills line leads with the job's keywords: the plan's keyword skills, a
+paired term no printed line names, then keywords the CV names only further down
+(`_job_terms_on_top`). Pairings are listed in the report for the user to check.
+
+**Score-driven revision** (`tailor(..., check=...)`, both modes; `cv_service` passes the fit
+check). After the draft is written, the fit check reads it beside the original. Unless it
+clearly reads better (fit +5, or a requirement gained with ATS match +10) or the original
+already reads 85+, `reader_feedback` lists what the reading missed (requirements not shown
+with the evidence the map cites, job keywords not printed, the top-of-CV impression, what
+reads worse) and `revise_for_reader` makes one revised plan, applied under the same guards
+and read again; the draft that reads better (fit, then ATS match, then requirements) is kept
+and `TailoredCV.revision` says what happened.
+
 **Review and revision** (`tailor(..., review=True)`, the default): a second, fresh reader
 (`critique_cv`, `CVCritique`), as hiring manager and recruiter, lists JD requirements a Master
 CV bullet evidences but the tailored CV leaves out or buries (citing that bullet; points
@@ -304,20 +330,32 @@ keywords, so the UI can compare like with like; neither value changes the job ma
 
 ## 3b. Before/after fit check (runs on every tailored CV)
 
+`FitComparison.ats_before/ats_after` (and `ProjectedFit.ats_confirmed/ats_projected`) is the
+ATS match: the mean of keyword coverage and the share of requirements a checked reading found
+shown (`fit_check.ats_match`), shown beside the fit score.
+
 `fit_check.compare_fit(source, tailored, jd, jd_text, llm) -> FitComparison`, run by
 `cv_service.tailor_to_job` after the revision (user's decision 2026-10-10: always on). Code
 measures the job's ATS keywords in the whole CV and in its first ~450 words, for the original
 (the CV as aligned to its Word file) and the tailored CV (as printed, with the role-skills
 line). One LLM call reads both CVs as a recruiter, labelled CV 1 and CV 2 in an order fixed by
-a hash of the job text (so it cannot learn which is tailored), rating function, domain,
-seniority, leadership and sector 0-4 from the page alone and listing which of the job's
-essential requirements (the requirement map, else must-haves; at most 15) each clearly
-shows. When the search verdict is available, its score is the original baseline and the
+a hash of the job and the texts (so it cannot learn which is tailored), rating function,
+domain, seniority, leadership and sector 0-4 from the page alone and listing which of the
+job's essential requirements (the core requirements the search found unmet first, then the
+requirement map, else must-haves; at most 15) each clearly shows. It is the same checked
+reader as the version comparison: every rating above 1 and every requirement must quote a
+line code finds in that CV. When the search verdict is available, its score is the original baseline and the
 reader's before/after level changes adjust that score using the job matcher's exact weighted
 point conversion (30/20/20/10/10); practicality (10) is held fixed. Both sides go through the
 matcher's own capped total (`fit_rubric.capped_score`: unmet core requirement 55, unread posting
 62, a weak dimension 65), and the score moves by the difference, so a capped search score moves
-only as far as the matcher would move it. Without a saved verdict, practicality is neutral (level 2) and both CVs are scored
+only as far as the matcher would move it. The unmet-core cap (55) came from what the CV
+showed, so it lifts for a CV that newly shows every core requirement the search found unmet,
+each with a quoted line, when the original CV's reading did not (`fit_check._still_unmet`);
+this applies to the draft, to an optimised draft's "if confirmed" projection and to the
+version comparison. The verdict's unmet core requirements are also passed to the tailoring
+plan (`matcher_guidance`), and an optimised plan addresses each first: source evidence where
+the CV has it, else a review candidate. Without a saved verdict, practicality is neutral (level 2) and both CVs are scored
 from the same rubric. `worse` lists any
 dimension or requirement count that dropped. The candidate's actual fit is unchanged (same
 facts); the job_matcher's verdict judges that. A failed check never loses the CV: it is noted

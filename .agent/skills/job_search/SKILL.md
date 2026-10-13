@@ -80,7 +80,8 @@ posted no later than the alert that lists it).
 **Empty titles + selected CV + smart matching** (not alert-only): the profile
 summary is built (or reused from memory, keyed by CV id and role family "any") *before*
 capture, and `search_tools.board_terms` turns its `target_roles` and `search_keywords` into up
-to `BOARD_TERMS` (16) short job-board searches (Reed, CV-Library, Adzuna): composite roles are
+to `BOARD_TERMS` (16) short job-board searches (Reed, CV-Library, Adzuna); widening adds up
+to 8 adjacent-family searches after those terms. Composite roles are
 split ("Principal Scientist, Cell Therapy / iPSC" -> "Principal Scientist Cell Therapy",
 "Principal Scientist iPSC"); the first variant of every role comes first, then the keywords,
 then further variants, so a limit never drops a role family. User-typed titles go through the
@@ -201,7 +202,7 @@ name (`search_tools.same_employer`: "IQVIA" = "Iqvia IES UK Limited").
 | Location | Non-remote, in a **known different country**, not radius-verified, and no relocation. A town we cannot place is kept (distance unverified) for the job_matcher to judge |
 | Salary | The job's known maximum is below the salary floor (never an estimated salary: `salary_maybe_estimated`) |
 | Seniority | Only when the user sets a minimum or maximum job level in the sidebar. With both unset, no role is excluded for its level, whatever title the CV currently holds. The job_matcher still judges scope and fit. |
-| Language | The posting states a language as essential (fluent German, native Japanese speaker, ...; not "desirable" or "a plus") that the candidate has **not declared** at all. Only when languages are declared (career intent, else the CV's list); a CV read in English counts as professional English |
+| Language | The posting states a language as essential (fluent German, native Japanese speaker, ...; not "desirable" or "a plus") that the candidate has **not declared** at all. Only when languages are declared (career intent, else the CV's list); a CV read in English counts as professional English. In "one of" alternatives, any one at the required level satisfies the group. |
 
 **Eligibility flags** (`scorer.eligibility_flags`, `MatchResult.flags`; never exclusions):
 a required language above the declared level, or an undeclared one when none are declared;
@@ -246,7 +247,8 @@ arrangements and salary floor come from the form.
 within it (`place_names()` gives "Oxford, United Kingdom", or the country alone). Adzuna searches
 that country's API (19 countries); Reed and CV-Library are UK-only and report other countries as
 not searched. A country-only search marks board results as inside the search area, and a town
-without a country scores "unknown" (0.7), not "unverified".
+without a country scores "unknown" (0.7), not "unverified". A country-only search is nationwide:
+the matcher must not infer a home city, commute limit or relocation refusal from the country.
 
 **History** (`src/services/history.py`): every `run_search` is recorded with its full results
 and its progress log (`SearchOutcome.progress_log`: every progress line with seconds since the
@@ -382,7 +384,7 @@ updated.
   `positioning` (how to present the candidate for these roles). Every career-intent target area becomes a
   `requested` adjacent family. **LLM proposes, code decides** (`check_families`): evidence ids
   must exist in the CV or, for `[src-N]`, in the document the summary was built from
-  (re-checks without the document keep src ids verified then; adjacent ≥ 2, progression ≥ 1), non-core families must state a gap,
+  (re-checks without the document keep src ids verified then; adjacent ≥ 2, progression ≥ 1), non-core families must state a gap (if the model omitted it, code supplies a review reminder rather than discarding an evidenced family),
   titles are never removed solely for their distance from the CV's current title, at most
   4 core / 2 progression / 6 adjacent model-suggested families, and without a CV only
   core families. **Code never rejects a family on title words** (e.g. `not_a_fit` naming
@@ -397,8 +399,9 @@ updated.
   budgeted core 60% · progression 20% · adjacent 20% (rescaled over the tiers searched),
   every family keeping its first title, then **mixed across tiers in proportion** (core
   first on ties), so a source that stops after its first few searches (LinkedIn's
-  `linkedin_max_search_requests`) still covers every tier. Adjacent families run when requested, or for all
-  realistic ones with `SearchRequest.widen` (UI "Widen to adjacent roles"). **Titles given
+  `linkedin_max_search_requests`) still covers every tier. Adjacent families run when requested.
+  `SearchRequest.widen` (UI "Widen to adjacent roles") keeps all 16 normal terms in their
+  original order, then adds up to 8 terms from other realistic adjacent families. **Titles given
   win**: only they are searched (the profile still judges every posting) and, with `widen`
   on, the progress log and the assistant's tool result say widening did not apply
   (`search_service.widen_note`). Summaries without families fall back to `target_roles` +
@@ -410,7 +413,7 @@ updated.
   for matching, borderline and second opinions alike.
 - **Attribution and yield**: every result carries the `family` its title belongs to
   (`family_of`: the family sharing the most distinctive domain words with the title, from its
-  titles and domain terms; job nouns such as "scientist" never decide it; a title whose
+  name, titles and domain terms; job nouns such as "scientist" never decide it; a title whose
   domain words no family has is left unattributed), and each search logs found / matches per family in
   `data/family_yield.json` (`history.family_yield`, shown in the Profiles dialog). A family
   with no true match after 3 searches is flagged **not landing**: the realism check, measured
@@ -470,6 +473,8 @@ first, then levels) and `screener.finalize` computes the `JobVerdict`.
 then the `JOBSEARCH_SCREEN_EXTRA` (10) best-scoring others, up to the safety ceiling
 `JOBSEARCH_SCREEN_MAX_JOBS` (250; the progress log says when it is reached). Without target
 roles, the best `JOBSEARCH_SCREEN_UNTARGETED` (40).
+The UI separates captured postings outside that shortlist into **Not screened**, rather
+than calling them **Not selected**; they have no semantic verdict.
 
 **Rated levels, not free points.** Each dimension is rated 0-4 against level descriptions in
 `MATCHER_SYSTEM` (when torn, the lower); code converts a level to `level/4` of the weight,
@@ -486,9 +491,13 @@ choosing a number out of 30.
 | `practicality` | 10 | easy from the base … unworkable under the constraints |
 
 The prompt is **profile-driven, not tied to one industry**: sectors and domains come from the
-profile. A posting in a searched **adjacent** family is never "a different discipline": its
+profile. Confirmed languages are supplied separately as evidence and included in the verdict
+cache key. A posting in a searched **adjacent** family is never "a different discipline": its
 `function` is rated on how much of the work the family's evidence covers (usually 1-2) and
-the family's gap is listed. For a **leadership-level** posting (head, director, VP, chief
+the family's gap is listed. Work done in another setting counts as transferable when the
+underlying activities match; a missing past job title alone cannot block the role. Mixed essential and preferred
+wording is split, so "preferably" cannot create an essential requirement. For a
+**leadership-level** posting (head, director, VP, chief
 officer, general manager), `leadership` is rated on all the leadership the profile evidences:
 founding or running a company, teams, budgets, fundraising, partnerships and external
 collaborators count, at their scale (2-3 for a comparable or one-step-larger scope; 1 only
@@ -582,8 +591,12 @@ judges only those, keeps the existing verdicts, and updates the history entry in
 checked, best fit first (threshold default **60**, the v2 listing floor). `to_check` ("To
 check") = would match, but the full posting could not be read yet (capped at 62, fetched by
 the automatic follow-up, **Fetch full posting** or **Paste description**).
-`below_threshold` ("Not selected") = everything else that was
-scored, still with its full explanation. `excluded` = hard exclusions. If no LLM is configured,
+`below_threshold` retains every other scored posting and its full explanation. In the UI,
+screened postings with a fit score of at least 40 and concrete transferable evidence appear
+under **Adjacent possibilities**, even when an unmet requirement prevents a strict match;
+their gaps and dealbreakers stay visible. The remaining screened jobs appear under **Not
+selected**. **Not selected** and **Not screened** omit scores below 40 from the review lists,
+without deleting them from the report or history. `excluded` = hard exclusions. If no LLM is configured,
 or screening fails, the report falls back to pre-filter scores and says so (`smart_unavailable`).
 
 ## 6. Reporting
@@ -591,7 +604,7 @@ or screening fails, the report falls back to pre-filter scores and says so (`sma
 For each true match give: title, company, location, salary, fit score and band, the
 fit_summary, 1–2 direct reasons, transferable points if relevant, the main gap or unknown, and
 the URL. Then counts (fetched / matches / not selected / excluded) and any source
-problems worth fixing. Never present a rejected or below-threshold job as a match. If nothing
+problems worth fixing. Never present an adjacent possibility or other below-threshold job as a true match. If nothing
 truly matches, say so and suggest what to relax: `widen` (the profile's realistic adjacent
 families), a wider radius, a lower salary floor, or more sources. Name each match's role
 family (say plainly when it is a move into a new function, with its gap), its alignment

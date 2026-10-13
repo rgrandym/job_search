@@ -138,6 +138,12 @@ A CV is a factual document. Tailoring may rephrase and reorder. It may never inv
 - Every tailored bullet carries `source_id` → a Master CV bullet. Unknown ids are rejected.
 - `apply_plan` rejects rewrites that add numbers, or add JD skills that the Master CV doesn't evidence.
   **Do not weaken these guards** to make a test or a demo pass. Fix the prompt or the data.
+- Job terms (user's decision 2026-10-13): a job keyword may name what one bullet already shows
+  in other words only through a code-checked pairing (`cv/terms.py`: the bullet's exact words
+  quoted, a requirement row citing that bullet as `direct`, or in optimised mode also
+  `transferable`; never a named tool, acronym, number, regulated, credential or management
+  term). A pairing makes the term that bullet's evidence and puts it on the relevant-skills
+  line; pairings are shown to the user. All other guards are unchanged.
 - Every accept/reject is recorded in `TailoredCV.changes` with a reason. Surface rejections and
   `missing_keywords` to the user.
 - New facts go into the Master CV (after the user confirms them), never straight into a tailored CV.
@@ -147,9 +153,11 @@ A CV is a factual document. Tailoring may rephrase and reorder. It may never inv
   comparison readings, keyword coverage and cover-letter evidence. The user edits or removes
   them before applying; confirmed facts should be added to the Master CV.
 - The optional `optimised` tailoring mode also proposes red, role-placed experience or skills.
-  Its writer plans the factual CV and the red questions in one model call. Code checks the
-  proposed wording; only rejected wording can trigger one revision. There is no separate
-  model critique or suggestion pass, and the request saves one Word version.
+  Its writer plans the factual CV and the red questions in one model call, filling every
+  pivotal gap it can with a realistic inference from a role's documented work. Code checks the
+  proposed wording; only rejected wording can trigger one correction. When no proposal for
+  the open gaps survives the checks, one hiring-manager pass (`propose_review_additions`)
+  proposes them (user's decision 2026-10-13). The request saves one Word version.
   Each proposal quotes source-CV and posting text, is labelled CONFIRM BEFORE USE, and stays
   outside the factual CV, fit score, ATS keyword coverage and letters. The fit check reads
   the draft a second time with them in place, in the same pass, and reports that separately
@@ -196,6 +204,12 @@ Every tailored CV is written the same way (`tailor.apply_plan`, `cv/docx_origina
   for a higher one, never claim the level. Every plan maps the job's requirements to CV
   evidence (`check_requirements`); the job's wording goes only into bullets mapped to that
   requirement, and no rewrite adds ownership or scope (`claims.escalation`).
+- **Score-driven revision (user's decision 2026-10-13):** both modes aim to read better
+  than the original to ATS and AI screens. A draft that does not clearly beat the original
+  (fit +5, or a requirement gained with ATS match +10), unless the original already reads 85+,
+  is revised once from the blind reading (requirements not shown, job keywords not printed)
+  and read again; the better draft is kept (`tailor._improve`). The relevant-skills line leads
+  with the job's keywords the CV shows. `FitComparison.ats_before/after` is the ATS match.
 - **Every tailored CV gets a before/after fit check** (`fit_check.compare_fit`): both CVs
   read blind for the job. The saved search verdict is the original score when available;
   verified changes in CV presentation adjust its five evidence dimensions with the search

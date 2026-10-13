@@ -24,6 +24,7 @@ Stored in `data/job_tracker.json` (git-ignored, personal data), one entry per ro
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import date, timedelta
 from pathlib import Path
@@ -139,7 +140,22 @@ def role_id(title: str, company: str) -> str:
 
 def same_role(title: str, company: str, job: JobPosting) -> bool:
     """`job` is the role `title` at `company`, perhaps under another name for the employer."""
-    if not same_employer(company, job.company):
+    same_company = same_employer(company, job.company)
+    if not same_company:
+        # Boards sometimes name the parent while the application names the subsidiary.
+        # Require the exact title and an explicit employer phrase in the posting; a
+        # generic mention of that company elsewhere in the description is insufficient.
+        employer = re.escape(company.strip())
+        same_company = bool(
+            employer
+            and _title(title) == _title(job.title)
+            and re.search(
+                rf"\b(?:at|for|with)\s+{employer}\b|\b{employer}\s*,\s+an?\b",
+                job.description[:4000],
+                re.I,
+            )
+        )
+    if not same_company:
         return False
     if _title(title) == _title(job.title):
         return True
@@ -288,6 +304,28 @@ def refresh(ws: Workspace, report: MatchReport) -> None:
         elif status in ("applied", "na"):
             status = "open"
         result.tracking = _tracking(entry, status, entries, result.job)
+    # A posting may have been judged before the user recorded an application, or a
+    # board may have used a parent company's name. Reopened results must reflect the
+    # current tracker decision, not their old ranked bucket.
+    newly_applied: list[MatchResult] = []
+    for bucket in (report.matches, report.to_check, report.below_threshold, report.excluded):
+        moved = [
+            result
+            for result in bucket
+            if result.tracking is not None
+            and result.tracking.status == "applied"
+            and _recent(result.tracking.applied_at, date.today())
+        ]
+        for result in moved:
+            assert result.tracking is not None
+            result.excluded = True
+            result.exclusion_reasons = [
+                f"already applied on {result.tracking.applied_at or 'an earlier date'}"
+            ]
+        bucket[:] = [result for result in bucket if result not in moved]
+        newly_applied.extend(moved)
+    known = {result.job.id for result in report.applied}
+    report.applied.extend(result for result in newly_applied if result.job.id not in known)
     # Jobs applied to before this search were set aside without screening. Once the
     # application is cleared, show them in results again without inventing a verdict.
     restored = [

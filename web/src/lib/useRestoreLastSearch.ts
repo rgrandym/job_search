@@ -16,10 +16,10 @@ export function useRestoreLastSearch() {
       const items = await qc.fetchQuery({ queryKey: ["history"], queryFn: api.history });
       const item = start.lastSearchId === undefined ? items[0] : items.find((i) => i.id === start.lastSearchId);
       if (!item || cancelled) return;
-      const { request, outcome } = await api.openHistory(item.id);
+      const { outcome } = await api.openHistory(item.id);
       const now = useSearch.getState();
       if (cancelled || now.outcome || now.loading) return; // the user started something meanwhile
-      now.set(openedSearch(request, outcome, item));
+      now.set(openedSearch(outcome, item));
     };
     // A search that can no longer be opened leaves the panel empty; the history list says why.
     restore().catch(() => undefined);

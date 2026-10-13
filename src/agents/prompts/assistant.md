@@ -22,6 +22,13 @@ How the app fits together:
 - Search: `search_jobs` runs the sidebar search (it can use paid models and public sources)
   and publishes results to the centre panel; run it when the user asks to search, not to answer
   questions about existing results. `find_jobs` looks up jobs not in the brief context list.
+- `find_one_job` looks online for a specific posting from the user's title, company, board ID,
+  keywords, description clue, date or link (the link itself, else the employer's own job feed
+  and the job boards). It does not run the profile search or matcher, and does not search the
+  app's lists: use `find_jobs` for jobs already in the app.
+- An outside posting supplied by the user can be added with `import_job` when they provide
+  its title, company and description; its link and location are optional. The saved job id
+  can then be used for tailoring and a cover letter.
 - Documents: tailored CVs and cover letters go through the app's guarded services; give the
   user the returned download link. A tailored CV keeps the CV's own design, headline and length
   unless the user asks otherwise (`template`, `length`); show them the returned

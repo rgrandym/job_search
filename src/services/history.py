@@ -141,7 +141,15 @@ def find_result(ws: Workspace, job_id: str) -> MatchResult | None:
 def open_entry(ws: Workspace, entry_id: str) -> tuple[SearchRequest, SearchOutcome]:
     """A past search's request and results; it becomes the workspace's current report, so its
     jobs can be tailored and discussed with the agent again."""
-    from src.services.search_service import SearchOutcome, SearchRequest, count_unscreened
+    from src.jobs.profile_memory import restore_missing_family_gaps
+    from src.jobs.screener import correct_nationwide_report
+    from src.services.search_service import (
+        SearchOutcome,
+        SearchRequest,
+        _attribute,
+        area_thresholds,
+        count_unscreened,
+    )
 
     entry = next((e for e in _entries(ws) if e.get("id") == entry_id), None)
     if entry is None:
@@ -150,6 +158,15 @@ def open_entry(ws: Workspace, entry_id: str) -> tuple[SearchRequest, SearchOutco
     outcome = SearchOutcome.model_validate(entry["outcome"])
     outcome.history_id = entry_id
     _move_unchecked(outcome.report)
+    if outcome.report.summary is not None:
+        outcome.report.summary = restore_missing_family_gaps(outcome.report.summary)
+        outcome.families = _attribute(outcome.report, req.widen)
+    cuts = (
+        area_thresholds(outcome.report.summary, req, [r.job for r in outcome.report.scored()])
+        if outcome.report.summary is not None
+        else {}
+    )
+    correct_nationwide_report(outcome.report, req.query, cuts)
     tracker.refresh(ws, outcome.report)  # statuses and notes may have changed since
     # Entries saved before this was recorded (or with failed batches) can still be continued.
     outcome.unscreened = count_unscreened(ws, req, outcome.report)

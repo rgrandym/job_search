@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { UseQueryResult } from "@tanstack/react-query";
 import { AlertTriangle, ArrowRightLeft, Bookmark, BookmarkX, BrainCircuit, ClipboardList, Download, FileText, History, ListChecks, Loader2, Mail, Play, RotateCw, Square, X } from "lucide-react";
 import { api } from "../lib/api";
+import { isAdjacentPossibility, reviewScore, type ResultTab } from "../lib/resultGroups";
 import { syncLists } from "../lib/queryClient";
 import { useGmail } from "../lib/useGmail";
 import { useSearchRunner } from "../lib/useSearchRunner";
@@ -16,22 +17,27 @@ import { CoverLettersPanel } from "./CoverLettersPanel";
 import { ProgressLog, SearchStatus } from "./ProgressLog";
 import { SavedJobs } from "./SavedJobs";
 import { AppliedJobs } from "./AppliedJobs";
+import { FindInLists, jobsInLists, type FoundJob } from "./FindInLists";
 import { TailoredCVPanel } from "./TailoredCVPanel";
 import { ProgressBar, STOPPED, TaskError, TaskProgress, useTaskId } from "./TaskProgress";
 import { Empty, Resizable } from "./ui";
 
-type Tab = "matches" | "to_check" | "below_threshold" | "excluded" | "dismissed";
+type Tab = ResultTab;
 
 const TAB_LABEL: Record<Tab, string> = {
   matches: "Matches",
   to_check: "To check",
+  adjacent: "Adjacent possibilities",
   below_threshold: "Not selected",
+  not_screened: "Not screened",
   excluded: "Excluded",
   dismissed: "Set aside",
 };
 const TAB_HINT: Partial<Record<Tab, string>> = {
+  adjacent: "Roles with transferable evidence that may be worth an application. Check the missing requirements and any dealbreakers before applying",
   to_check:
     "Would match on the title and snippet, but the full posting could not be read yet, so its requirements were not checked. Fetch it, or paste the description",
+  not_screened: "Captured jobs outside the screening shortlist. The job_matcher has made no decision about them",
   dismissed: "Jobs you marked N/A, deleted from a search or labelled (reviewed already): set aside before screening, with your reason",
 };
 
@@ -155,6 +161,8 @@ function SourcesUsed({
 /** The centre panel: the current search's results, or the jobs the user saved. */
 export function ResultsPanel({ hasCv }: { hasCv: boolean }) {
   const [view, setView] = useState<"results" | "saved" | "applied" | "documents" | "cover_letters">("results");
+  const [focus, setFocus] = useState<(FoundJob & { at: number }) | null>(null);
+  const report = useSearch((st) => st.outcome?.report);
   const saved = useQuery({ queryKey: ["saved"], queryFn: api.saved });
   const tracker = useQuery({ queryKey: ["tracker"], queryFn: api.tracker });
   const documents = useQuery({ queryKey: ["tailored-cvs", "all"], queryFn: api.allTailoredCVs });
@@ -186,16 +194,43 @@ export function ResultsPanel({ hasCv }: { hasCv: boolean }) {
             {v.count != null && <span className="text-faint">{v.count}</span>}
           </button>
         ))}
+        <FindInLists
+          jobs={jobsInLists(report, saved.data ?? [], tracker.data ?? [])}
+          onPick={(job) => { setView(job.view); setFocus({ ...job, at: Date.now() }); }}
+        />
       </nav>
+      <FocusCard focus={focus} />
       {view === "results" || view === "saved" ? <SelectionBar savedIds={savedAt} saved={saved.data ?? []} hasCv={hasCv} /> : null}
       <div className="min-h-0 flex-1">
-        {view === "results" ? <SearchResults hasCv={hasCv} savedAt={savedAt} tracked={tracker.data ?? []} /> :
+        {view === "results" ? <SearchResults hasCv={hasCv} savedAt={savedAt} tracked={tracker.data ?? []} focus={focus?.view === "results" ? focus : null} /> :
           view === "saved" ? <SavedJobs hasCv={hasCv} query={saved} /> :
-          view === "applied" ? <AppliedJobs query={tracker} /> :
+          view === "applied" ? <AppliedJobs query={tracker} focusId={focus?.view === "applied" ? focus.jobId : null} /> :
             view === "documents" ? <DocumentsView query={documents} /> : <CoverLettersPanel />}
       </div>
     </div>
   );
+}
+
+/** Scroll to the card of a job picked in "Find in lists" and outline it for a moment. */
+function FocusCard({ focus }: { focus: { jobId: string; at: number } | null }) {
+  useEffect(() => {
+    if (!focus) return;
+    let tries = 0;
+    let timer = 0;
+    const seek = () => {
+      const card = [...document.querySelectorAll<HTMLElement>("[data-job-id]")].find((el) => el.dataset.jobId === focus.jobId);
+      if (!card) {
+        if (++tries < 20) timer = window.setTimeout(seek, 100); // the list renders after the view switch
+        return;
+      }
+      card.scrollIntoView({ behavior: "smooth", block: "center" });
+      card.classList.add("ring-2", "ring-accent");
+      timer = window.setTimeout(() => card.classList.remove("ring-2", "ring-accent"), 2500);
+    };
+    seek();
+    return () => window.clearTimeout(timer);
+  }, [focus]);
+  return null;
 }
 
 function DocumentsView({ query }: { query: UseQueryResult<TailoredCVView[]> }) {
@@ -423,7 +458,13 @@ function SelectionBar({ savedIds, saved, hasCv }: { savedIds: Map<string, string
   );
 }
 
-function SearchResults({ hasCv, savedAt, tracked }: { hasCv: boolean; savedAt: Map<string, string>; tracked: TrackedJob[] }) {
+function SearchResults({ hasCv, savedAt, tracked, focus }: {
+  hasCv: boolean;
+  savedAt: Map<string, string>;
+  tracked: TrackedJob[];
+  /** A job picked in "Find in lists": its list opens and its card is shown. */
+  focus: { jobId: string; tab?: ResultTab; at: number } | null;
+}) {
   const { outcome, loading, progress, error, log, beat, startedAt, openedFrom, set, runId, selected, toggleSelected, removeJob } =
     useSearch();
   const runner = useSearchRunner();
@@ -443,6 +484,9 @@ function SearchResults({ hasCv, savedAt, tracked }: { hasCv: boolean; savedAt: M
     </button>
   );
   const [tab, setTab] = useState<Tab>("matches");
+  useEffect(() => {
+    if (focus?.tab) setTab(focus.tab);
+  }, [focus]);
   const [limitDismissed, setLimitDismissed] = useState(false);
   useEffect(() => setLimitDismissed(false), [outcome?.history_id, outcome?.limit?.resets_at]);
 
@@ -486,7 +530,9 @@ function SearchResults({ hasCv, savedAt, tracked }: { hasCv: boolean; savedAt: M
   const counts: Record<Tab, number> = {
     matches: rep.matches.length,
     to_check: rep.to_check?.length ?? 0,
+    adjacent: 0,
     below_threshold: rep.below_threshold.length,
+    not_screened: 0,
     excluded: rep.excluded.length,
     dismissed: rep.dismissed?.length ?? 0,
   };
@@ -498,17 +544,30 @@ function SearchResults({ hasCv, savedAt, tracked }: { hasCv: boolean; savedAt: M
   const isMoved = (r: MatchResult) => savedAt.has(r.job.id) || isApplied(r);
   const movedToSaved = [...rep.matches, ...(rep.to_check ?? []), ...rep.below_threshold, ...rep.excluded, ...(rep.dismissed ?? [])]
     .filter((r) => savedAt.has(r.job.id) && !isApplied(r)).length;
-  const items = (rep[tab] ?? []).filter((r) => !isMoved(r));
+  const below = rep.below_threshold.filter((r) => !isMoved(r) && reviewScore(r) >= 40);
+  const adjacent = rep.screened ? below.filter(isAdjacentPossibility) : [];
+  const listed = tab === "adjacent" ? adjacent :
+    tab === "not_screened" ? below.filter((r) => !r.verdict) :
+    tab === "below_threshold" && rep.screened ? below.filter((r) => !!r.verdict && !isAdjacentPossibility(r)) :
+      (rep[tab] ?? []).filter((r) => !isMoved(r));
+  // A job found with "Find in lists" is shown even when its list hides it (fit below 40).
+  const focused = focus?.tab === tab && !listed.some((r) => r.job.id === focus.jobId)
+    ? rep.below_threshold.find((r) => r.job.id === focus.jobId)
+    : undefined;
+  const items = focused ? [focused, ...listed] : listed;
   counts.matches = rep.matches.filter((r) => !isMoved(r)).length;
   counts.to_check = (rep.to_check ?? []).filter((r) => !isMoved(r)).length;
-  counts.below_threshold = rep.below_threshold.filter((r) => !isMoved(r)).length;
+  counts.adjacent = adjacent.length;
+  counts.below_threshold = rep.screened ? below.filter((r) => !!r.verdict && !isAdjacentPossibility(r)).length : below.length;
+  counts.not_screened = rep.screened ? below.filter((r) => !r.verdict).length : 0;
   counts.excluded = rep.excluded.filter((r) => !isMoved(r)).length;
   counts.dismissed = (rep.dismissed ?? []).filter((r) => !isMoved(r)).length;
   const tabs = (Object.keys(TAB_LABEL) as Tab[]).filter(
     (t) => counts[t] > 0 || t === "matches" || t === "below_threshold" || t === "excluded" || t === tab,
   );
-  const fresh = [...rep.matches, ...rep.below_threshold].filter((r) => !isMoved(r) && r.tracking?.status === "new").length;
-  const borderline = [...rep.matches, ...rep.below_threshold].filter((r) => !isMoved(r) && r.verdict?.borderline).length;
+  const visible = [...rep.matches, ...below];
+  const fresh = visible.filter((r) => !isMoved(r) && r.tracking?.status === "new").length;
+  const borderline = visible.filter((r) => !isMoved(r) && r.verdict?.borderline).length;
   const problems = { ...outcome.skipped_sources, ...outcome.errors };
   const alertProblem = outcome.alert_only && !!problems.gmail_alerts;
   const emptyTitle = alertProblem
@@ -731,6 +790,7 @@ function SearchResults({ hasCv, savedAt, tracked }: { hasCv: boolean; savedAt: M
             <JobCard
               key={r.job.id}
               result={r}
+              notScreened={tab === "not_screened"}
               canTailor={hasCv}
               selected={selected.includes(r.job.id)}
               onSelect={() => toggleSelected(r.job.id)}

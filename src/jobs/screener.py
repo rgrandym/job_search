@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from collections.abc import Awaitable, Callable
 from datetime import date
 from pathlib import Path
@@ -40,12 +41,14 @@ from src.jobs.models import (
     JobAssessment,
     JobPosting,
     JobVerdict,
+    LanguageSkill,
     MatchReport,
     Priority,
     ProfileSummary,
     SearchQuery,
     rating_points,
 )
+from src.jobs.sources.base import country_names, located_in
 from src.tools.search_tools import company_key, posting_description, posting_excerpt
 
 MATCHER_SYSTEM = """You are job_matcher, an executive research specialist screening live \
@@ -85,8 +88,12 @@ Role families: the profile's role_families are the searches run for this candida
 posting in an "adjacent" family (a different function with cited CV evidence and a stated \
 gap) is not "a different discipline": rate function on how much of its day-to-day work \
 the evidence covers (usually 1-2), put the family's gap under gaps, and never make it a \
-dealbreaker on discipline alone. For a leadership-level posting (head, director, VP, chief \
-officer, general manager), rate leadership on all the leadership the profile evidences, not \
+dealbreaker on discipline alone. Count work performed in a different setting as \
+transferable when its underlying activities match the posting. Missing the advertised \
+job title is a gap, not a blocker; do not require a particular past title when the work \
+is evidenced. For a leadership-level posting (head, director, \
+VP, chief officer, general manager), rate leadership on all the leadership the profile \
+evidences, not \
 only line management in its current function: founding or running a company, leading teams, \
 holding a budget, raising funding, building partnerships and managing external collaborators \
 all count. A founder or chief executive of a small company has done executive work at that \
@@ -111,6 +118,8 @@ words, at most 2 per posting, and function is then at most 2. Never core: day-to
 or outputs (producing reports, presentations, coordinating meetings), common tools learnable \
 within weeks (Linux, git, Excel, a named software package), organisation-specific knowledge, \
 and desirable or nice-to-have items; list those under gaps when the profile lacks them. In \
+mixed wording such as "X and preferably Y", X may be essential while Y is preferred; \
+never put "preferably Y" in essential_unmet. In \
 an adjacent-family posting, a requirement the family's evidence covers through transferable \
 experience is not unmet; a core skill or experience nothing in the profile shows is unmet, \
 as for any role.
@@ -129,6 +138,10 @@ evidence. Code never lists such a role as a match, so be exact: neither miss one
 what the profile does show.
 - dealbreakers: only a clearly different discipline, a role in not_a_fit, or a stated \
 constraint violated. A dealbreaker means the role should not be listed.
+- A country-only search is nationwide. Do not infer a home city, commute distance or \
+relocation refusal from its country name. A job inside that country has no location \
+dealbreaker unless a city/radius or another explicit geographical restriction is supplied. \
+Put uncertainty about the commute under unknowns.
 - Keyword overlap must never inflate a score where function, level or location are wrong.
 - fit_summary says, in plain words, how and how well the role matches (e.g. "Direct match \
 on the core method; one level junior; 12 miles from base"). Reasons, transferable and \
@@ -147,7 +160,7 @@ MAX_POINTS = 3
 
 # Bump whenever the prompt or the scale changes: remembered verdicts from another version are
 # not reused.
-MATCHER_VERSION = "levels-5"  # founder and partnership leadership counts at its scale
+MATCHER_VERSION = "levels-7"  # adjacent transfers and preferred requirements calibrated
 CACHE_SIZE = 5000  # remembered assessments kept (newest)
 
 DESCRIPTION_CHARS = 3000  # long postings keep their requirements section (`posting_excerpt`)
@@ -178,6 +191,63 @@ def _priority(score: int, blocked: bool, against_intent: bool = False) -> Priori
 def checkable(job: JobPosting) -> bool:
     """Whether the posting shows enough to check its requirements against the profile."""
     return bool(job.required_skills) or len(posting_description(job.description)) >= CHECKABLE_CHARS
+
+
+_LOCATION_CLAIM = re.compile(r"\b(location|commut\w*|relocat\w*|onsite|on-site|distance)\b", re.I)
+_OTHER_CONSTRAINT = re.compile(r"\b(clearance|visa|salary|certification|licen[cs]e)\b", re.I)
+
+
+def _correct_nationwide_location(
+    assessment: JobAssessment, job: JobPosting, query: SearchQuery | None
+) -> JobAssessment:
+    """A country-wide filter gives no basis for an invented local commute restriction."""
+    if query is None or query.locations or not query.country:
+        return assessment
+    if not located_in(country_names(query.country))(job.location or ""):
+        return assessment
+    removed = [
+        reason
+        for reason in assessment.dealbreakers
+        if _LOCATION_CLAIM.search(reason) and not _OTHER_CONSTRAINT.search(reason)
+    ]
+    if not removed and assessment.ratings.practicality >= 3:
+        return assessment
+    ratings = assessment.ratings.model_copy(
+        update={"practicality": max(3, assessment.ratings.practicality)}
+    )
+    summary = "; ".join(
+        part for part in assessment.fit_summary.split(";") if not _LOCATION_CLAIM.search(part)
+    ).strip()
+    return assessment.model_copy(
+        update={
+            "ratings": ratings,
+            "dealbreakers": [d for d in assessment.dealbreakers if d not in removed],
+            "fit_summary": summary or assessment.fit_summary,
+        }
+    )
+
+
+def _separate_preferred_requirements(assessment: JobAssessment) -> JobAssessment:
+    """A preferred clause cannot itself block a match, even inside a mixed requirement."""
+    required = []
+    gaps = list(assessment.gaps)
+    for item in assessment.essential_unmet:
+        if re.match(r"\s*(?:preferred|desirable)\b", item, re.I):
+            gaps.append(item)
+            continue
+        preferred = re.search(r"\b(?:and\s+)?preferably\b", item, re.I)
+        if preferred is None:
+            required.append(item)
+            continue
+        mandatory = item[: preferred.start()].strip(" ,;:-")
+        if mandatory:
+            required.append(mandatory)
+        optional = item[preferred.end() :].strip(" ,;:-")
+        if optional and not any(optional.lower() in gap.lower() for gap in gaps):
+            gaps.append(f"Preferred: {optional}")
+    if required == assessment.essential_unmet:
+        return assessment
+    return assessment.model_copy(update={"essential_unmet": required, "gaps": gaps})
 
 
 def finalize(
@@ -369,7 +439,9 @@ def job_digest(job: JobPosting) -> str:
     return "\n".join(lines)
 
 
-def _constraints(query: SearchQuery | None, base: str = "") -> str:
+def _constraints(
+    query: SearchQuery | None, base: str = "", languages: list[LanguageSkill] | None = None
+) -> str:
     parts = [f"candidate base: {base}"] if base else []
     if query is not None:
         if query.locations:
@@ -382,6 +454,11 @@ def _constraints(query: SearchQuery | None, base: str = "") -> str:
             parts.append(f"arrangements: {', '.join(query.work_arrangements)}")
         if query.salary_min or query.salary_max:
             parts.append(f"salary: {query.salary_min or '-'} to {query.salary_max or '-'}")
+    if languages:
+        parts.append(
+            "confirmed languages: "
+            + ", ".join(f"{item.language} ({item.level})" for item in languages)
+        )
     return "; ".join(parts) or "none"
 
 
@@ -545,7 +622,9 @@ def _recall(
             continue
         if cache is not None and cache.get(keys[job.id]) is None:
             cache.put(keys[job.id], hit.assessment, hit.reviewed)
-        found = hit.assessment.model_copy(update={"job_id": job.id})
+        found = _separate_preferred_requirements(
+            hit.assessment.model_copy(update={"job_id": job.id})
+        )
         if not hit.reviewed and _needs_review(found, limits[job.id], checkable(job)):
             pending[job.id] = found
         else:
@@ -579,6 +658,7 @@ async def screen_jobs(
     review_llm: LLMProvider | None = None,
     review_progress: Callable[[int, int], Awaitable[None]] | None = None,
     thresholds: dict[str, float] | None = None,
+    confirmed_languages: list[LanguageSkill] | None = None,
 ) -> tuple[dict[str, JobVerdict], list[str]]:
     """Screen `jobs`. Returns (final verdicts by job id, errors). Failed batches are reported.
 
@@ -593,7 +673,7 @@ async def screen_jobs(
     `review_progress(done, total)` follows the second opinions. `thresholds` overrides
     `threshold` per job id (a role area listed from a different score).
     """
-    constraints = _constraints(query, base)
+    constraints = _constraints(query, base, confirmed_languages)
     profile = matcher_profile(summary)
     header = (
         f"<candidate_profile>\n{profile}\n</candidate_profile>\n{intent}"
@@ -607,15 +687,24 @@ async def screen_jobs(
     verdicts, pending, todo = _recall(jobs, keys, context, cache, limits)
     todo.sort(key=lambda j: keys[j.id])  # the same postings always meet in the same batches
     first = {**pending, **await runner.run(todo, batch_size, progress)}
+    by_id = {j.id: j for j in jobs}
+    first = {
+        job_id: _correct_nationwide_location(
+            _separate_preferred_requirements(a), by_id[job_id], query
+        )
+        for job_id, a in first.items()
+    }
     reviewer = runner
     if review_llm is not None:
         reviewer = _Runner(review_llm, header, concurrency, batch_timeout, stop)
     final = await _review(reviewer, first, {j.id: j for j in jobs}, limits, note, review_progress)
     if reviewer is not runner:
         runner.errors += reviewer.errors
-    by_id = {j.id: j for j in jobs}
     served, switched = _served(runner, reviewer)
     for job_id, (assessment, reviewed) in final.items():
+        assessment = _correct_nationwide_location(
+            _separate_preferred_requirements(assessment), by_id[job_id], query
+        )
         checked = checkable(by_id[job_id])
         remember = reviewed or not _needs_review(assessment, limits[job_id], checked)
         if cache is not None and remember and job_id not in switched:
@@ -676,3 +765,37 @@ def apply_verdicts(
         rest, key=lambda r: (r.verdict is not None, r.rank_key()), reverse=True
     )
     report.screened = True
+
+
+def correct_nationwide_report(
+    report: MatchReport, query: SearchQuery, thresholds: dict[str, float] | None = None
+) -> None:
+    """Correct old saved verdicts in memory when reopening a country-wide search."""
+    if query.locations or not query.country:
+        return
+    changed = False
+    verdicts: dict[str, JobVerdict] = {}
+    for result in report.scored():
+        old = result.verdict
+        if old is None:
+            continue
+        verdicts[result.job.id] = old
+        if old.ratings is None:
+            continue
+        assessment = JobAssessment.model_validate(
+            {name: getattr(old, name) for name in JobAssessment.model_fields}
+        )
+        corrected = _correct_nationwide_location(assessment, result.job, query)
+        if corrected == assessment:
+            continue
+        cut = (thresholds or {}).get(result.job.id, report.threshold)
+        verdicts[result.job.id] = finalize(
+            corrected,
+            cut,
+            reviewed=old.reviewed,
+            remembered=old.from_memory,
+            checked=old.requirements_checked,
+        ).model_copy(update={"model": old.model, "cv_id": old.cv_id})
+        changed = True
+    if changed:
+        apply_verdicts(report, verdicts, report.threshold, thresholds)

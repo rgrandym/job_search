@@ -10,6 +10,9 @@ import type {
   OnLimit,
   HistoryItem,
   JobTracking,
+  JobPosting,
+  OneJobQuery,
+  OneJobResults,
   MatchResult,
   LabelReview,
   LearningState,
@@ -253,6 +256,11 @@ export const api = {
   labelJob: (jobId: string, label: UserLabel | null) =>
     request<{ label: UserLabel | null }>(`/api/jobs/${encodeURIComponent(jobId)}/label`, json("PUT", { label })),
   saved: () => request<SavedJob[]>("/api/saved"),
+  findOneJob: (query: OneJobQuery, progressId?: string) =>
+    request<OneJobResults>(tracked("/api/jobs/find-one", progressId), json("POST", query)),
+  saveFoundJob: (job: JobPosting) => request<SavedJob>("/api/saved/found", json("POST", job)),
+  importJob: (job: { title: string; company: string; description: string; url?: string; location?: string }) =>
+    request<SavedJob>("/api/saved/import", json("POST", job)),
   saveJobs: (job_ids: string[]) => request<SavedJob[]>("/api/saved", json("POST", { job_ids })),
   removeSaved: (job_ids: string[]) => request<{ removed: number }>("/api/saved/remove", json("POST", { job_ids })),
   evidence: () => request<QueuedEvidence[]>("/api/evidence"),

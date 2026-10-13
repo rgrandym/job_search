@@ -90,6 +90,7 @@ from src.services import (
     intent,
     labels,
     learning,
+    one_job,
     saved,
     search_service,
     tailored_documents,
@@ -956,6 +957,8 @@ def _tailor_report(tailored: TailoredCV, document_id: str | None, url: str) -> d
         "role_skills": tailored.role_skills,
         "skills_to_confirm": tailored.skills_to_confirm,
         "review_additions": tailored.review_additions,
+        "term_bridges": tailored.term_bridges,
+        "revision": tailored.revision,
         "academic": tailored.academic,
         "fit_check": tailored.fit_check,
         "rejected": sum(not c.accepted for c in tailored.changes),
@@ -1371,6 +1374,38 @@ def save_jobs(body: JobIds) -> list[SavedJob]:
         return saved.save(get_workspace(), body.job_ids)
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/api/saved/import")
+def import_outside_job(body: saved.OutsideJob) -> SavedJob:
+    """Save a posting found outside the search for CV and letter actions."""
+    try:
+        return saved.import_job(get_workspace(), body)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/jobs/find-one")
+async def find_one_job(
+    body: one_job.OneJobQuery, progress_id: str | None = None
+) -> one_job.OneJobResults:
+    """Look for a specific posting using supplied clues, without profile matching."""
+    try:
+        return await progress.run(
+            progress_id,
+            "Finding a specific job",
+            asyncio.to_thread(one_job.find, get_workspace(), body),
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/saved/found")
+def save_found_job(job: JobPosting) -> SavedJob:
+    try:
+        return saved.save_found(get_workspace(), job)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.post("/api/saved/remove")

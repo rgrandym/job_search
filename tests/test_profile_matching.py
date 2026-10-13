@@ -21,6 +21,7 @@ from src.jobs.models import (
     JobAssessment,
     JobPosting,
     LanguageSkill,
+    MatchReport,
     MatchResult,
     ProfileSummary,
     RoleFamily,
@@ -36,6 +37,7 @@ from src.jobs.profile_memory import (
     numbered_source,
     pivot_titles,
     profile_cv_text,
+    restore_missing_family_gaps,
     summarize_profile,
 )
 from src.jobs.screener import MATCHER_SYSTEM, ScreeningBatch, combine, finalize, job_digest
@@ -154,6 +156,36 @@ def test_summary_prompt_asks_for_capabilities_publications_and_adjacent_routes()
         assert phrase in SUMMARY_SYSTEM
     # Leadership carries into senior roles in a neighbouring function, at the scope it shows.
     assert "leadership-level adjacent families" in SUMMARY_SYSTEM
+    assert "preferably Y" in MATCHER_SYSTEM
+    assert "underlying activities match" in MATCHER_SYSTEM
+
+
+def test_matcher_receives_confirmed_languages_as_evidence() -> None:
+    from src.jobs.screener import _constraints
+
+    constraints = _constraints(
+        SearchQuery(country="United Kingdom"),
+        languages=[
+            LanguageSkill(language="English", level="professional"),
+            LanguageSkill(language="Spanish", level="professional"),
+        ],
+    )
+    assert "Spanish (professional)" in constraints
+
+
+def test_preferred_part_of_a_requirement_does_not_block_match() -> None:
+    from src.jobs.screener import _separate_preferred_requirements
+
+    assessed = _assessment(
+        (3, 3, 3, 3, 3, 3),
+        essential_unmet=[
+            "Proven understanding of immuno assay and preferably Luminex workflows",
+            "Preferably prior Luminex experience",
+        ],
+    )
+    cleaned = _separate_preferred_requirements(assessed)
+    assert cleaned.essential_unmet == ["Proven understanding of immuno assay"]
+    assert any("Luminex" in gap for gap in cleaned.gaps)
     assert "founding or running a company" in MATCHER_SYSTEM
     record = ProfileSummary.model_fields["publications"]
     assert record.default is None  # profiles stored before the field still load
@@ -165,7 +197,7 @@ def test_family_checks_require_evidence_and_a_gap(master_cv: MasterCV) -> None:
     checked = check_families(_summary(CORE, thin, no_gap), master_cv).role_families
     assert checked[0].rejected is None
     assert checked[1].rejected and "2 piece(s) of CV evidence, found 1" in checked[1].rejected
-    assert checked[2].rejected and "no gap" in checked[2].rejected
+    assert checked[2].rejected is None and checked[2].gap
 
 
 def test_not_a_fit_never_rejects_families_by_title_words(master_cv: MasterCV) -> None:
@@ -247,6 +279,9 @@ def test_up_to_six_adjacent_families_are_searched(master_cv: MasterCV) -> None:
     many = [SALES.model_copy(update={"name": f"Area {n}"}) for n in range(7)]
     checked = check_families(_summary(CORE, *many), master_cv).role_families
     assert [f.rejected is None for f in checked[1:]] == [True] * 6 + [False]
+    without_gap = LEAD.model_copy(update={"gap": ""})
+    repaired = check_families(_summary(CORE, without_gap), master_cv).role_families[1]
+    assert repaired.rejected is None and repaired.gap
 
 
 # ---------------------------------------------------------------- search planning
@@ -277,6 +312,74 @@ def test_family_terms_mix_tiers_so_a_capped_source_reaches_each_one() -> None:
     assert first == {"core", "progression", "adjacent"}  # LinkedIn stops after a few searches
 
 
+def test_widen_adds_adjacent_terms_without_replacing_normal_searches() -> None:
+    summary = _summary(CORE, LEAD, BD, SALES)
+    normal = search_service.planned_family_terms(summary, False)
+    wide = search_service.planned_family_terms(summary, True)
+    assert wide[: len(normal)] == normal
+    assert ("Solutions Consultant", "Solutions consulting") in wide
+
+
+def test_nationwide_search_does_not_invent_a_commute_dealbreaker(master_cv: MasterCV) -> None:
+    from src.jobs.screener import _correct_nationwide_location
+
+    job = JobPosting(
+        id="scotland",
+        title="Senior Scientist",
+        company="A",
+        location="Scotland",
+        description=LONG,
+        work_arrangement="onsite",
+    )
+    assessment = _assessment(
+        (3, 3, 3, 3, 3, 1),
+        dealbreakers=["Onsite Edinburgh location: candidate will not relocate from UK base"],
+    ).model_copy(
+        update={"fit_summary": "Strong scientific match; onsite Edinburgh cannot be commuted to"}
+    )
+    corrected = _correct_nationwide_location(assessment, job, SearchQuery(country="United Kingdom"))
+    verdict = finalize(corrected, 60)
+    assert verdict.match
+    assert verdict.fit_score > 65
+    assert verdict.priority != "low"
+    assert not verdict.dealbreakers
+    assert "commuted" not in verdict.fit_summary
+    assert "no city, commute radius or relocation limit" in search_service.screening_base(
+        master_cv, SearchQuery(country="United Kingdom")
+    )
+    assert "home: Lisbon, Portugal" in search_service.screening_base(
+        master_cv, SearchQuery(country="United Kingdom")
+    )
+    city_search = SearchQuery(country="United Kingdom", locations=["Oxford"])
+    assert _correct_nationwide_location(assessment, job, city_search) == assessment
+    foreign = job.model_copy(update={"location": "Santa Monica, California, United States"})
+    assert (
+        _correct_nationwide_location(assessment, foreign, SearchQuery(country="United Kingdom"))
+        == assessment
+    )
+    with_other_blocker = assessment.model_copy(
+        update={"dealbreakers": [*assessment.dealbreakers, "Required clearance is missing"]}
+    )
+    retained = _correct_nationwide_location(
+        with_other_blocker, job, SearchQuery(country="United Kingdom")
+    )
+    assert retained.dealbreakers == ["Required clearance is missing"]
+    from src.jobs.screener import correct_nationwide_report
+
+    old = finalize(assessment, 60)
+    report = MatchReport(
+        profile=build_profile(master_cv),
+        threshold=60,
+        screened=True,
+        matches=[],
+        below_threshold=[MatchResult(job=job, verdict=old)],
+    )
+    correct_nationwide_report(report, SearchQuery(country="United Kingdom"))
+    assert [r.job.id for r in report.matches] == ["scotland"]
+    assert report.matches[0].verdict and report.matches[0].verdict.fit_score > 65
+    assert old.dealbreakers  # stored assessment was not mutated
+
+
 def test_generic_titles_match_and_attribute_to_their_family() -> None:
     assert shares_role_words(
         "Senior Business Development Manager, Oncology", ["Business Development Manager"]
@@ -284,6 +387,19 @@ def test_generic_titles_match_and_attribute_to_their_family() -> None:
     assert not shares_role_words("Business Analyst", ["Business Development Manager"])
     assert family_of("Business Development Director", [CORE, BD]) == "Business development"
     assert family_of("Lead Machine Learning Engineer", [BD, CORE]) == "ML engineering"
+    process = RoleFamily(
+        name="Cell therapy process & analytical development (CMC)",
+        tier="progression",
+        titles=["Principal Scientist, Analytical Development"],
+        evidence=["nimbus-2"],
+        gap="No cGMP operations",
+    )
+    assert family_of("Associate Director, Process Development", [CORE, process]) == process.name
+    rejected = process.model_copy(
+        update={"gap": "", "rejected": "no gap stated: an honest transfer always has one"}
+    )
+    restored = restore_missing_family_gaps(_summary(CORE, rejected)).role_families[1]
+    assert restored.rejected is None and restored.gap
     cell = RoleFamily(name="iPSC R&D", tier="core", titles=["Principal Scientist iPSC"],
                       domain_terms=["cell therapy"])  # fmt: skip
     ops = RoleFamily(name="R&D operations", tier="adjacent", titles=["Scientific Operations Lead"],
@@ -457,6 +573,29 @@ def test_undeclared_essential_language_excludes_and_levels_flag(master_cv: Maste
     assert scorer.eligibility_flags(weaker, german)[0].startswith("German (above your declared")
 
 
+def test_one_of_several_required_languages_accepts_fluent_spanish(master_cv: MasterCV) -> None:
+    profile = build_profile(master_cv).model_copy(
+        update={
+            "languages": [
+                LanguageSkill(language="English", level="professional"),
+                LanguageSkill(language="Spanish", level="professional"),
+            ]
+        }
+    )
+    job = _posting(
+        "Fluent in English and at least one other European language "
+        "(Italian, Spanish, German, or French)."
+    )
+    assert scorer.hard_exclusions(profile, job) == []
+    assert scorer.eligibility_flags(profile, job) == []
+    without_spanish = profile.model_copy(
+        update={"languages": [LanguageSkill(language="English", level="professional")]}
+    )
+    reasons = scorer.hard_exclusions(without_spanish, job)
+    assert len(reasons) == 1
+    assert all(name in reasons[0] for name in ("Italian", "Spanish", "German", "French"))
+
+
 def test_undeclared_languages_flag_instead_of_excluding(master_cv: MasterCV) -> None:
     profile = build_profile(master_cv).model_copy(update={"languages": []})
     german = _posting("Native German speaker required.")
@@ -520,11 +659,16 @@ def test_matcher_sees_intent_and_only_realistic_families(ws: Workspace) -> None:
     wants = SearchIntent(avoid_work=["pure research"])
     asyncio.run(
         screen_jobs(
-            summary, [_posting("x")], FakeLLM({ScreeningBatch: screen}), intent=intent_text(wants)
+            summary,
+            [_posting("x")],
+            FakeLLM({ScreeningBatch: screen}),
+            intent=intent_text(wants),
+            confirmed_languages=[LanguageSkill(language="Spanish", level="professional")],
         )
     )
     assert "avoid_work: pure research" in seen[0]
     assert "ML engineering" in seen[0] and "Solutions consulting" not in seen[0]
+    assert "Spanish (professional)" in seen[0]
 
 
 # ---------------------------------------------------------------- career intent store

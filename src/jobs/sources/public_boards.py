@@ -231,6 +231,12 @@ def linkedin_details(page: str, job: JobPosting) -> dict[str, Any]:
         lines.insert(0, "LinkedIn: no longer accepting applications")
     description = "\n".join([*lines, "", text]).strip() if text else job.description
     update: dict[str, Any] = {"description": description}
+    # A posting opened from a pasted link has no search card to name it ("?" = unknown).
+    if job.title == "?":
+        update["title"] = _first(r'class="[^"]*topcard__title[^"]*"[^>]*>(.*?)</h', page) or "?"
+    if job.company == "?":
+        company = _first(r'class="[^"]*topcard__org-name-link[^"]*"[^>]*>(.*?)</a>', page)
+        update["company"] = company or "?"
     if job.work_arrangement == "onsite":  # untagged search: the full text says more
         update["work_arrangement"] = infer_arrangement(job.location, text[:1500])
     return update

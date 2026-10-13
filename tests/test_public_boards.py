@@ -447,6 +447,7 @@ def test_chrome_reads_linkedin_about_the_job_signed_out(settings: Settings) -> N
     assert "design novel algorithms" in full.description
     cmd = opened[0]
     assert "--headless=new" in cmd and "--dump-dom" in cmd and "--use-mock-keychain" in cmd
+    assert "--disable-background-networking" in cmd and "--disable-features=MediaRouter" in cmd
     assert any(c.startswith("--user-data-dir=") and "jobsearch-chrome-" in c for c in cmd)
 
 

@@ -257,6 +257,16 @@ class AdditionCandidate(_Strict):
     reason: str = Field(description="Why this is plausible and what the user must verify")
 
 
+class TermBridge(_Strict):
+    """The job's own word for something a CV bullet already shows in other words (LLM output;
+    `tailor.verified_bridges` checks it), so ATS search finds the evidence the CV has."""
+
+    term: str = Field(description="One of the job's keywords, exactly as the job names it")
+    source_id: str = Field(description="The CV bullet that shows it")
+    quote: str = Field(description="The exact words of that bullet that show the same thing")
+    requirement: str = Field(description="The requirement row (as in `requirements`) it serves")
+
+
 class AdditionCandidates(_Strict):
     items: list[AdditionCandidate] = Field(default_factory=list)
 
@@ -303,6 +313,11 @@ class TailoringPlan(_Strict):
         default_factory=list,
         description="Optimised mode only: plausible missing experience or skills to ask the user "
         "to confirm, never included in the factual CV",
+    )
+    term_bridges: list[TermBridge] = Field(
+        default_factory=list,
+        description="Job keywords a CV bullet shows in other words, each with that bullet's "
+        "exact words; code checks them before the term may be used",
     )
 
     @field_validator("bullet_order", mode="before")
@@ -445,13 +460,6 @@ class EvidencedReadings(_Strict):
     readings: list[EvidencedReading] = Field(description="One reading per CV, in the order given")
 
 
-class FitReadout(_Strict):
-    """Two CVs read independently, in the order given (LLM output)."""
-
-    first: FitReading
-    second: FitReading
-
-
 class DimensionChange(_Strict):
     name: FitDimension
     before: int = Field(ge=0, le=4)
@@ -494,6 +502,8 @@ class ProjectedFit(_Strict):
     keywords_added: list[str] = Field(
         default_factory=list, description="Job terms only the proposals name (ATS search)"
     )
+    ats_confirmed: int = Field(0, ge=0, le=100, description="ATS match of the draft as it is")
+    ats_projected: int = Field(0, ge=0, le=100, description="ATS match with the proposals")
     impression: str = ""
 
 
@@ -515,6 +525,11 @@ class FitComparison(_Strict):
     impression_before: str = ""
     impression_after: str = ""
     worse: list[str] = Field(default_factory=list, description="Where the tailored CV reads worse")
+    ats_before: int = Field(0, ge=0, le=100, description="ATS match of the original")
+    ats_after: int = Field(0, ge=0, le=100, description="ATS match of the tailored CV")
+    requirements_missing: list[str] = Field(
+        default_factory=list, description="Requirements the tailored CV was not read as showing"
+    )
     if_confirmed: ProjectedFit | None = Field(
         None, description="Optimised draft: the same reading with its pending proposals in place"
     )
@@ -563,6 +578,11 @@ class TailoredCV(_Strict):
         description="Unverified job techniques shown in red, outside the confirmed CV facts",
     )
     review_additions: list[ReviewAddition] = Field(default_factory=list)
+    term_bridges: list[TermBridge] = Field(
+        default_factory=list,
+        description="Job keywords used for what a CV bullet shows in its own words (checked)",
+    )
+    revision: str = Field("", description="What the score-driven revision did, if it ran")
     academic: bool = Field(False, description="Written for an academic post")
     fit_check: FitComparison | None = None
 

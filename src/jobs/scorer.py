@@ -206,11 +206,24 @@ def _language_exclusions(profile: CandidateProfile, job: JobPosting) -> list[str
     if not profile.languages:
         return []
     known = _known_languages(profile)
-    return [
-        f'requires {name.title()}, not among your languages: "{said}"'
-        for name, _, essential, said in language_requirements(job.description)
-        if essential and name not in known
-    ]
+    reasons = []
+    for group in _language_groups(job):
+        required = [(name, level, said) for name, level, essential, said in group if essential]
+        if required and not any(name in known for name, _, _ in required):
+            names = " or ".join(name.title() for name, _, _ in required)
+            reasons.append(f'requires {names}, not among your languages: "{required[0][2]}"')
+    return reasons
+
+
+def _language_groups(job: JobPosting) -> list[list[tuple[str, int, bool, str]]]:
+    """Group alternatives in a stated 'one of these languages' requirement."""
+    groups: dict[str, list[tuple[str, int, bool, str]]] = {}
+    for name, level, essential, said in language_requirements(job.description):
+        choice = re.search(r"\b(?:at least one|one of|either|any of)\b", said, re.I)
+        named = re.search(rf"\b{re.escape(name)}\b", said, re.I)
+        key = said if choice and named and named.start() > choice.start() else f"{said}:{name}"
+        groups.setdefault(key, []).append((name, level, essential, said))
+    return list(groups.values())
 
 
 def eligibility_flags(profile: CandidateProfile, job: JobPosting) -> list[str]:
@@ -219,14 +232,19 @@ def eligibility_flags(profile: CandidateProfile, job: JobPosting) -> list[str]:
     (right to work, clearance, driving licence, registration) not confirmed in the intent."""
     flags: list[str] = []
     known = _known_languages(profile)
-    for name, level, essential, said in language_requirements(job.description):
-        have = known.get(name)
-        if not essential or (have is not None and have >= level):
+    for group in _language_groups(job):
+        required = [(name, level, said) for name, level, essential, said in group if essential]
+        if not required or any(known.get(name, 0) >= level for name, level, _ in required):
             continue
-        if have is None and profile.languages:
+        if profile.languages and all(name not in known for name, _, _ in required):
             continue  # already an exclusion
-        what = "not declared" if have is None else "above your declared level"
-        flags.append(f'{name.title()} ({what}): "{said}"')
+        names = " or ".join(name.title() for name, _, _ in required)
+        what = (
+            "not declared"
+            if all(name not in known for name, _, _ in required)
+            else "above your declared level"
+        )
+        flags.append(f'{names} ({what}): "{required[0][2]}"')
     for kind, said in eligibility_requirements(job.description):
         if not confirms(profile.eligibility, kind):
             flags.append(f'{kind[0].upper()}{kind[1:]}: "{said}"')

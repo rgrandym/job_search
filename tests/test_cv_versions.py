@@ -25,7 +25,6 @@ from src.cv.models import (
     EvidencedReading,
     EvidencedReadings,
     FitReading,
-    FitReadout,
     JDAnalysis,
     MasterCV,
     MetRequirement,
@@ -73,7 +72,7 @@ def _reader(prompt: str) -> EvidencedReadings:
     """The role-skills line marks the strong version; every other CV reads weak."""
     out = []
     for _, text in CV_BLOCK.findall(prompt):
-        strong = "Relevant skills for this role" in text
+        strong = "Relevant skills for this role: PyTorch" in text
         ratings, met = (STRONG_RATINGS, [1, 2, 7]) if strong else (WEAK_RATINGS, [1])
         out.append(_evidenced(text, ratings, met, "clear fit" if strong else "generic"))
     return EvidencedReadings(readings=out)
@@ -257,7 +256,7 @@ def test_verdicts_and_setting_effects_use_fixed_margins(ws: Workspace, master_cv
     auto = _version(ws, master_cv, TailoringSettings())
     senior = _version(ws, master_cv, TailoringSettings(level="senior"), role_skills=["PyTorch"])
     both = _version(
-        ws, master_cv, TailoringSettings(level="junior", length="full"), role_skills=["Python"]
+        ws, master_cv, TailoringSettings(level="junior", length="full"), role_skills=["PyTorch"]
     )
     comparison = asyncio.run(cv_versions.compare(ws, JOB.id, []))
     by_id = {r.id: r for r in comparison.readings}
@@ -341,6 +340,62 @@ def test_search_score_is_the_exact_baseline_and_only_cv_dimensions_can_move_it()
     assert anchored_score(baseline, original, original.model_copy(update={"function": 1})) == 81
     blocked = baseline.model_copy(update={"score": 55, "cap_reason": "core requirement unmet: GMP"})
     assert anchored_score(blocked, original, improved) == 55
+
+
+def test_unmet_core_cap_lifts_only_for_a_cv_that_newly_shows_it_with_a_quote() -> None:
+    ratings = {"function": 3, "domain": 3, "seniority": 3, "leadership": 3, "sector": 3}
+    blocked = SearchFitBaseline(
+        score=55,
+        ratings={**ratings, "practicality": 3},
+        cap_reason="core requirement unmet: GMP manufacturing; Cell therapy",
+    )
+    requirements = ["GMP manufacturing", "Cell therapy", "Python"]
+    original = FitReading(**ratings, requirements_shown=[3])
+    shows = FitReading(
+        **ratings,
+        requirements_shown=[1, 2, 3],
+        requirement_quotes={"1": "Ran GMP batches", "2": "CAR-T process", "3": "Python"},
+    )
+    # The same levels uncapped: 77. The cap lifts for the CV that now shows both.
+    assert anchored_score(blocked, original, shows, requirements) == 77
+    one = shows.model_copy(update={"requirements_shown": [1, 3]})
+    assert anchored_score(blocked, original, one, requirements) == 55  # one still unmet
+    unquoted = shows.model_copy(update={"requirement_quotes": {}})
+    assert anchored_score(blocked, original, unquoted, requirements) == 55
+    already = original.model_copy(update={"requirements_shown": [1, 2, 3]})
+    assert anchored_score(blocked, already, shows, requirements) == 55  # nothing newly shown
+    assert anchored_score(blocked, original, shows) == 55  # requirements not read
+
+
+def test_core_requirements_the_search_found_unmet_are_read_first(master_cv: MasterCV) -> None:
+    tailored = apply_plan(master_cv, TailoringPlan(), JD)
+    blocked = SearchFitBaseline(
+        score=55,
+        ratings={**WEAK_RATINGS, "practicality": 2},
+        cap_reason="core requirement unmet: Python; Model serving",
+    )
+    assert requirements_for(tailored, JD, blocked) == ["Python", "Model serving", "MLOps"]
+
+
+def test_proposals_that_show_the_unmet_core_requirement_lift_the_projection(
+    master_cv: MasterCV,
+) -> None:
+    tailored = apply_plan(master_cv, TailoringPlan(), JD)
+    tailored.review_additions = [HANDOVER]  # quoted by the reader for requirement 2
+    blocked = SearchFitBaseline(
+        score=55,
+        ratings={**STRONG_RATINGS, "practicality": 3},
+        cap_reason="core requirement unmet: Python",
+    )
+    check = compare_fit(
+        master_cv, tailored, JD, "MLOps and Python", FakeLLM({EvidencedReadings: _swapped}),
+        blocked,
+    )  # fmt: skip
+    projection = check.if_confirmed
+    assert check.before == check.after == 55  # the factual draft does not show it
+    assert projection is not None and projection.confirmed == 55
+    # The proposal shows the core requirement: only the matcher's weak-leadership cap remains.
+    assert projection.projected == 65
 
 
 def test_capped_search_scores_move_as_the_matcher_would_move_them() -> None:
@@ -631,6 +686,17 @@ def _proposal_reader(prompt: str) -> EvidencedReadings:
     return EvidencedReadings(readings=out)
 
 
+def _swapped(prompt: str) -> EvidencedReadings:
+    """`_proposal_reader` with the proposal shown for requirement 1 (the core one)."""
+    out = _proposal_reader(prompt)
+    for reading in out.readings:
+        reading.requirements_met = [
+            MetRequirement(number=1 if m.number == 2 else 2, quote=m.quote)
+            for m in reading.requirements_met
+        ]
+    return out
+
+
 def test_pending_proposals_are_scored_separately_as_if_confirmed(master_cv: MasterCV) -> None:
     tailored = apply_plan(master_cv, TailoringPlan(), JD)
     tailored.review_additions = [HANDOVER]
@@ -654,8 +720,7 @@ def test_pending_proposals_are_scored_separately_as_if_confirmed(master_cv: Mast
 def test_without_pending_proposals_there_is_no_projection(master_cv: MasterCV) -> None:
     tailored = apply_plan(master_cv, TailoringPlan(), JD)
     tailored.review_additions = [HANDOVER.model_copy(update={"status": "deleted"})]
-    plain = FitReading(**WEAK_RATINGS)
-    llm = FakeLLM({FitReadout: FitReadout(first=plain, second=plain)})
+    llm = FakeLLM({EvidencedReadings: _reader})
     assert compare_fit(master_cv, tailored, JD, "MLOps and Python", llm).if_confirmed is None
 
 

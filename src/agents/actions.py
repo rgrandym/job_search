@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Any, Literal
 
@@ -11,7 +12,15 @@ from src.agents.registry import tool
 from src.agents.runtime import AgentContext
 from src.cv import master_cv_manager as mgr
 from src.jobs.models import SearchQuery
-from src.services import cv_service, labels, saved, search_service, tailored_documents, tracker
+from src.services import (
+    cv_service,
+    labels,
+    one_job,
+    saved,
+    search_service,
+    tailored_documents,
+    tracker,
+)
 from src.services.search_service import AreaThresholds, SearchRequest, widen_note
 
 
@@ -119,11 +128,28 @@ class JobIdsArgs(BaseModel):
     job_ids: list[str] = Field(description="Exact ids from find_jobs or search results")
 
 
+@tool("find_one_job", "Look for one named posting without a profile search.", one_job.OneJobQuery)
+async def find_one_job(args: one_job.OneJobQuery, ctx: AgentContext) -> dict[str, Any]:
+    found = await asyncio.to_thread(one_job.find, ctx.ws, args)
+    return found.model_dump(mode="json")
+
+
 @tool("save_jobs", "Save jobs from the current search for later.", JobIdsArgs)
 async def save_jobs(args: JobIdsArgs, ctx: AgentContext) -> dict[str, Any]:
     items = saved.save(ctx.ws, args.job_ids)
     await ctx.emit("saved_updated", {"count": len(items)})
     return {"saved": [item.result.job.id for item in items]}
+
+
+@tool(
+    "import_job",
+    "Save an outside job posting for CV tailoring or a cover letter.",
+    saved.OutsideJob,
+)
+async def import_job(args: saved.OutsideJob, ctx: AgentContext) -> dict[str, Any]:
+    item = saved.import_job(ctx.ws, args)
+    await ctx.emit("saved_updated", {"count": 1})
+    return {"job_id": item.result.job.id, "title": item.result.job.title}
 
 
 @tool("remove_saved_jobs", "Remove jobs from Saved; tracker history remains.", JobIdsArgs)

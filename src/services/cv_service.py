@@ -660,6 +660,11 @@ async def tailor_to_job(
     result = result if result is not None else ws.result(job.id)
     guidance = matcher_guidance(result.verdict if result is not None else None)
     profile = stored_profile(ws, result.family if result is not None else None)
+    search_fit = search_fit_baseline(result, ws.active_cv_id)
+
+    def check(draft: TailoredCV) -> TailoredCV:  # the reading the revision works from
+        return _fit_check(master_cv, draft, jd, text, llm, search_fit)
+
     tailored = await asyncio.to_thread(
         tailor,
         master_cv,
@@ -675,10 +680,8 @@ async def tailor_to_job(
         audience,
         mode == "standard",
         mode,
+        check,
     )
-    progress.step("Comparing how well each CV shows your fit for this job")
-    search_fit = search_fit_baseline(result, ws.active_cv_id)
-    tailored = await asyncio.to_thread(_fit_check, master_cv, tailored, jd, text, llm, search_fit)
     progress.step("Writing the Word file in your CV's design")
     path = _new_output_path(ws, _file_stem(master_cv, job))
     tailored, template = _write_tailored(tailored, master_cv, original, path, template)
@@ -998,6 +1001,7 @@ def matcher_guidance(verdict: JobVerdict | None) -> str:
         ("reasons", verdict.reasons),
         ("transferable", verdict.transferable),
         ("gaps", verdict.gaps),
+        ("core requirements unmet (they cap the fit score)", verdict.essential_unmet),
     ):
         if items:
             lines.append(f"{label}: " + "; ".join(items))

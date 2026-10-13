@@ -188,6 +188,21 @@ export interface JobPosting {
   source: string;
 }
 
+export interface OneJobQuery {
+  title: string;
+  company: string;
+  job_id: string;
+  keywords: string;
+  description: string;
+  posted_at: string | null;
+  url: string;
+}
+
+export interface OneJobResults {
+  jobs: JobPosting[];
+  errors: Record<string, string>;
+}
+
 export interface ScoreBreakdown {
   title: number;
   skills: number;
@@ -615,6 +630,9 @@ export interface ProjectedFit {
   keywords_projected: number;
   /** Job terms only the proposals name: what an ATS or recruiter search would now find. */
   keywords_added: string[];
+  /** ATS match (keywords and requirements shown) of the draft as it is, and with proposals. */
+  ats_confirmed?: number;
+  ats_projected?: number;
   impression: string;
 }
 
@@ -634,7 +652,19 @@ export interface FitComparison {
   impression_before: string;
   impression_after: string;
   worse: string[];
+  /** ATS match: the share of job keywords and requirements shown, 0-100. */
+  ats_before?: number;
+  ats_after?: number;
+  requirements_missing?: string[];
   if_confirmed?: ProjectedFit | null;
+}
+
+/** A job keyword used for what a CV bullet shows in its own words (checked by code). */
+export interface TermBridge {
+  term: string;
+  source_id: string;
+  quote: string;
+  requirement: string;
 }
 
 export type Audience = "auto" | "industry" | "academic";
@@ -746,6 +776,9 @@ export interface TailorReport {
   role_skills?: string[];
   skills_to_confirm?: { skill: string; background_quote: string; reason: string }[];
   review_additions?: ReviewAddition[];
+  term_bridges?: TermBridge[];
+  /** What the score-driven revision did, if it ran. */
+  revision?: string;
   academic?: boolean;
   fit_check?: FitComparison | null;
   rejected: number;

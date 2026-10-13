@@ -344,7 +344,7 @@ async def compare(
         ws, job_id, documents, items[0].id.removeprefix("original:")
     )
     lead = next((d for d in documents if not d.imported), documents[0])
-    requirements = requirements_for(lead.tailored, lead.jd)
+    requirements = requirements_for(lead.tailored, lead.jd, search_fit)
     keywords = ats_keywords(lead.jd)
     progress.step(f"Reading {len(items)} CVs side by side for this job")
     llm = ws.structured("cv", usage_sink, "CV version comparison")

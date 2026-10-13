@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bookmark, CalendarDays, ChevronDown, ExternalLink, FileText, Loader2, Mail, Scale, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "../lib/api";
+import { isAdjacentPossibility } from "../lib/resultGroups";
 import type { Rejection } from "../lib/api";
 import type { FitDimensions, JobStatus, JobVerdict, MatchResult, OutcomeStage, UserLabel } from "../lib/types";
 import { cn, money, scoreColor } from "../lib/utils";
@@ -375,6 +376,7 @@ export function JobCard({
   removeAtTop = false,
   removing = false,
   labelable = true,
+  notScreened = false,
 }: {
   result: MatchResult;
   canTailor: boolean;
@@ -394,6 +396,8 @@ export function JobCard({
   onRecheck?: (description?: string) => void;
   /** Show "Your call" (only for jobs of the current search, which the label snapshots). */
   labelable?: boolean;
+  /** Smart search left this posting outside the screening shortlist. */
+  notScreened?: boolean;
 }) {
   const { job, verdict, score } = result;
   const [open, setOpen] = useState(false);
@@ -470,7 +474,7 @@ export function JobCard({
   const salaryNote = salary && job.salary_maybe_estimated ? " (may be estimated)" : "";
 
   return (
-    <article className={cn("card min-w-0 p-3.5 [overflow-wrap:anywhere]", selected && "border-accent")}>
+    <article data-job-id={job.id} className={cn("card min-w-0 p-3.5 [overflow-wrap:anywhere]", selected && "border-accent")}>
       <div className="flex gap-3">
         {onSelect && (
           <input
@@ -512,6 +516,12 @@ export function JobCard({
               </span>
             )}
             {verdict && <span className="chip shrink-0 text-muted">{PRIORITY_LABEL[verdict.priority]}</span>}
+            {isAdjacentPossibility(result) && (
+              <span className="chip shrink-0 text-accent" title="Transferable experience makes this worth reviewing; check unmet requirements and dealbreakers">
+                Adjacent possibility
+              </span>
+            )}
+            {notScreened && <span className="chip shrink-0 text-warn">Not screened</span>}
             {alignment && (
               <span className={cn("chip shrink-0", alignment[1])} title={verdict?.alignment_note || undefined}>
                 {alignment[0]}
@@ -764,7 +774,7 @@ export function JobCard({
               {savedDraft.label} · {new Date(savedDraft.created_at).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}
             </span>
           )}
-          <FitCheckSummary check={report.fit_check} />
+          <FitCheckSummary check={report.fit_check} capReason={report.fit_check?.search_anchored && report.fit_check.before === verdict?.fit_score ? verdict?.cap_reason : null} />
           {report.fit_check?.if_confirmed && (
             <IfConfirmed
               projection={report.fit_check.if_confirmed}
@@ -781,10 +791,19 @@ export function JobCard({
             Report <ChevronDown size={12} className={cn("transition-transform", reportOpen && "rotate-180")} />
           </button>
           {reportOpen && <>
-          {report.fit_check && <FitCheckDetails check={report.fit_check} />}
+          {report.fit_check && <FitCheckDetails check={report.fit_check} capReason={report.fit_check.search_anchored && report.fit_check.before === verdict?.fit_score ? verdict?.cap_reason : null} />}
           <PositioningDetails positioning={report.positioning} requirements={report.requirements} />
           {!!report.role_skills?.length && (
             <p className="basis-full text-[11px] text-faint">Added under your summary: Relevant skills for this role: {report.role_skills.join(" · ")}</p>
+          )}
+          {report.revision && <p className="basis-full text-[11px] text-muted">{report.revision}</p>}
+          {!!report.term_bridges?.length && (
+            <div className="basis-full text-[11px] text-muted" title="The job's own words for work your CV shows in other words. Code checked each quoted line; check that each one says the same thing.">
+              <p className="font-medium">Job terms used for your own wording (check each one):</p>
+              {report.term_bridges.map((b) => (
+                <p key={`${b.term}:${b.source_id}`} className="text-faint">· {b.term} ← “{b.quote}”</p>
+              ))}
+            </div>
           )}
           {!!report.skills_to_confirm?.length && (
             <div className="basis-full rounded border border-warn/40 p-2 text-[11px] text-warn">
