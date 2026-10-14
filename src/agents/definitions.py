@@ -50,6 +50,7 @@ ASSISTANT = register_agent(
             "list_documents",
             "edit_tailored_cv",
             "review_cv_addition",
+            "review_cv_compression",
             "compare_cv_versions",
             "edit_cover_letter",
             "build_profile",

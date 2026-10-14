@@ -180,7 +180,9 @@ and reordered unless the length choice or assess_trim allows trimming)
    each version's verdict and each setting's effect by fixed margins, ranks them and saves it)
 ─▶ docx_original.write_like_original (a copy of the CV's Word design, also for a PDF CV's Word
 version, + "Relevant skills for this role" line; academic: sections moved whole into academic
-order; templates only when chosen)
+order; optimised: red proposals where they belong and red compressed versions below their
+lines, which only the user applies (tailored_documents.review_compression); templates only
+when chosen)
 ─▶ output/cvs/<Name>_<Company>.docx ─▶ ats.check_docx (read-back)
                                                   └─▶ tracker: remember the CV; only the user marks Applied
 job ─▶ cover_letter.draft_letter (LLM; master template: introduction "applying for X because

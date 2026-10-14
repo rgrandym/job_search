@@ -19,17 +19,17 @@ that way is put back. Every decision is recorded in `TailoredCV.changes`.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Literal
 
 from src.core import progress
 from src.core.llm_provider import LLMProvider
-from src.cv.claims import escalation, overclaim
+from src.cv.ats_score import Text, score_cv
+from src.cv.claims import escalation, jargon, overclaim, third_person
 from src.cv.models import (
     CLAIMABLE,
     AdditionCandidate,
@@ -42,6 +42,8 @@ from src.cv.models import (
     Positioning,
     RequirementEvidence,
     ReviewAddition,
+    Screening,
+    ScreeningScore,
     SkillGroup,
     SkillSuggestions,
     SkillToConfirm,
@@ -50,6 +52,16 @@ from src.cv.models import (
     TailoringPlan,
     TermBridge,
     TrimAssessment,
+)
+from src.cv.proposals import (
+    MAX_ROLE_SKILLS,
+    AdditionContext,
+    as_candidate,
+    check_additions,
+    check_compressions,
+    rank_additions,
+    rewordings,
+    with_proposals,
 )
 from src.cv.terms import BRIDGE_MATCHES, verified_bridges, with_bridges
 from src.tools.search_tools import (
@@ -79,6 +91,38 @@ credential, regulated manufacturing, managerial authority, years or specialist p
 experience. Return an empty list if no specific technique is plausible. Do not repeat skills \
 the CV already names."""
 
+# The CV is the user's own document (user's decision 2026-10-14): it speaks as they would.
+VOICE = """Write every line as the candidate writing their own CV, in the first person: \
+bullets in the CV's implied first person (action verb first, no pronoun: "Developed ..."); \
+summary and other sentences in the first person ("I ...", "my ...") unless the CV's own \
+summary leaves the pronoun out ("Molecular biologist with ..."), then in that style. Never the \
+third person: not their name, "the candidate", "he", "she", "his" or "her"."""
+
+PROPOSAL_KINDS = """Proposal kinds, each placed where a reader expects it:
+- rewording (the main way to bring the job's terms into the CV): `anchor_id` is an existing \
+bullet; `text` is that whole bullet rewritten in the posting's terms for the same work (e.g. \
+"managed research grants" for a bullet on running funded projects), keeping every number and \
+fact of the line. Use it wherever the candidate's history very probably covers a job term or \
+requirement in other words. `background_quote` copies exact words from that bullet.
+- enrichment (preferred for experienced CVs): `anchor_id` is an existing bullet; `text` is only \
+the words to add inside it, naming the technique, standard, partner or setting that work very \
+probably involved (e.g. "using qPCR and flow cytometry, to ICH Q2"). `background_quote` copies \
+exact words from that bullet.
+- experience: a new bullet for the role where the work happened (`role_id`, and `anchor_id`: \
+the related bullet it follows), action-first, with its setting and partners, describing the \
+contribution that role makes plausible (supported, contributed to, prepared) unless its own \
+bullets show the candidate led such work. `background_quote` copies exact words from that \
+role (its bullets, title or employer) or from <other_cvs>.
+- metric: `anchor_id` is a bullet central to this job that has no number although one would \
+normally exist; `text` is the short question for it (e.g. "how many assays?"). Never a number.
+- skill: as the posting names it, in `skill_group`, the CV's own skills category it belongs \
+in. `background_quote` copies exact words from anywhere in the source CV or <other_cvs>.
+- summary: at most one sentence, in the summary's voice, only when a key requirement is \
+shown by proposals alone.
+- headline: at most one, the job's title or the candidate's function in the job's words, when \
+the confirmed CV does not support one of its words; never a level above any title held."""
+
+
 OPTIMISED_ADDITIONS_SYSTEM = f"""You are the hiring manager for this role, advised by a \
 senior recruiter. The candidate's confirmed CV has already been tailored to this job. Read it as \
 you would before deciding whom to interview, then propose, for the candidate to confirm or \
@@ -98,32 +142,36 @@ would make you reject comes first. `<match_assessment>` and `<gaps>` give the ga
 comparable setting (what they did, with whom, under which constraints, to which standard). A \
 keyword alone settles nothing.
 
-Then infer, from each role's documented work, what someone doing that work would routinely have \
-done: the methods, documents, quality or regulatory tasks, hand-offs and partners that normally \
-accompany it in that industry. Propose an item only when such a link exists and it would settle \
-one of your doubts, ordered by how much it would change your decision to interview, up to \
-eight. A skill counts only when the job depends on it as a capability; an essential the CV does \
-not show (a recruiter's knock-out) is such a doubt.
+Then infer what each role very probably involved that its bullets do not say. Experienced \
+professionals routinely leave out the techniques, documents, standards, partners and \
+hand-offs behind their results. Infer from a role's documented work, its title, the employer \
+and its sector, how long it lasted, the candidate's education, projects and publications, \
+<profile> and <other_cvs>: what someone in that role at that employer would very probably have \
+done. Propose an item only when such a link exists and it would settle one of your doubts or \
+name a missing job term the candidate very probably has, ordered by how much it would change \
+your decision to interview, up to twenty, at most five per role. A skill counts only when the \
+job depends on it as a capability; an essential the CV does not show (a recruiter's \
+knock-out) is such a doubt.
 
-Write each proposal as CV wording ready to confirm. An experience: one bullet for the existing \
-role where the work happened (`role_id`, the most recent plausible role first), action-first, \
-with its setting and partners, describing the kind of contribution that role makes plausible \
-(supported, contributed to, prepared) unless its own bullets show the candidate led such work. \
-A skill: as the posting names it. Use the posting's terms where they describe the work \
-accurately, so the line is also found by ATS search and a recruiter's scan \
-(`<missing_job_terms>`); never trade accuracy for a keyword. `background_quote` copies exact \
-words from that role's bullets (for a skill, from anywhere in the source CV) that make it \
-plausible; `job_quote` copies exact posting words; `reason` names the doubt it settles, why it \
-is likely for this profile and what the candidate must check. Never add numbers, outcomes, \
-employers, dates, credentials, authority or team sizes, and do not infer GMP, regulatory or \
-managerial experience from academic work alone. Skip anything the confirmed CV already shows, \
-and anything a person with this background would be unlikely to have done: the candidate \
-decides, and implausible questions waste their time. Return an empty list when nothing \
-credible remains."""
+{PROPOSAL_KINDS}
+
+Use the posting's terms where they describe the work accurately, so the line is also found by \
+ATS search and a recruiter's scan (`<missing_job_terms>`); never trade accuracy for a keyword, \
+and use each term once. `job_quote` copies exact posting words; `reason` names the doubt it \
+settles, why it is likely for this profile and what the candidate must check. Never add \
+numbers, outcomes, employers, dates, credentials, authority or team sizes, and do not infer \
+GMP, regulatory or managerial experience from academic work alone. Plain, current wording \
+without corporate jargon. {VOICE} Skip anything the confirmed CV already shows, anything in \
+<already_proposed> or <declined>, and anything a person with this background would be \
+unlikely to have done: the candidate decides, and implausible questions waste their time. \
+Return an empty list when nothing credible remains."""
 
 ANALYZE_SYSTEM = f"""You analyse job descriptions the way an experienced recruiter does. Extract:
-- hard_skills: concrete technologies, tools, methods, domains (canonical names, e.g. "Python", \
-"Kubernetes", "A/B testing").
+- hard_skills: concrete technologies, tools, methods, domains and qualifications, each written \
+word for word as the posting writes it (e.g. "Python", "grant management", "KPIs", "PhD"), \
+because screening software searches for the posting's own words. One term per item: never \
+join two terms ("X and Y management") or add a label in brackets. Include every such term \
+the posting names, usually 10 to 25.
 - soft_skills: interpersonal or organisational competencies.
 - must_have vs nice_to_have: use the JD's own wording ("required", "essential", "preferred", \
 "desirable", "bonus"). Weigh repeated or pivotal requirements; ignore isolated buzzwords.
@@ -169,9 +217,16 @@ contain. You may rephrase, reorder clauses and use the job's terminology for the
 a result only when the source records one; otherwise describe the outcome in words.
 4. Use the job's wording for a requirement only in a bullet you listed as its evidence. \
 Keep every fact, detail and number of the source bullet: never shorten away information.
-5. Restrained, natural language: a strong accurate verb, the contribution, its context, the \
-result. No first person, superlatives, keyword stuffing or generic claims ('expert', \
-'proven leader').
+5. Restrained, natural, current language a recruiter reads in seconds: a plain accurate \
+verb, the contribution, its context, the result, in one sentence of about 30 words or fewer \
+where the source allows, in the CV's implied first person. No superlatives, keyword \
+stuffing, generic claims \
+('expert', 'proven leader') or corporate jargon ('passionate', 'results-driven', 'leveraged', \
+'utilised', 'robust', 'seamless', 'fostering', 'pivotal', 'synergy'); no trailing \
+'..., ensuring X' or '..., driving Y' clauses and no chains of dashes. Use each job keyword \
+where it fits, not over and over: repeating a term adds nothing for screening software and \
+reads as stuffing to a person.
+{VOICE}
 6. Keep everything. The CV's own headline, titles, dates, section headings and publications \
 stay as they are. Every bullet stays: `bullet_order` lists each role's bullet ids with the \
 most relevant first, and the rest follow. Rewrite only bullets that gain from the job's \
@@ -181,18 +236,26 @@ not name it: it moves down, it stays.
 Also return:
 - `headline_options`: up to 4 alternative headlines for this job, for the user to choose \
 from (the CV keeps its own unless they do). Each names the candidate's own level and function \
-(never a level above any title held), a role the CV shows, and only skills the CV evidences.
-- `summary`: 3-4 sentences built only from facts in the CV, following the positioning: open \
-with the strongest evidence for this job, then the differentiators and relevant breadth \
-(leadership, hands-on practice, adjacent experience) that make the candidate stronger. \
-Compelling through specifics, never through adjectives. Do not reduce the candidate to the \
-job description or repeat a keyword list. If the CV's summary has several paragraphs \
-(separated by a blank line), return the same number, separated the same way, at about the \
-same length.
+(never a level above any title held), a role the CV shows, and only skills the CV evidences. \
+The job title is the most valuable phrase to match: make the first option the job's exact \
+title when the candidate's level and function fit it, optionally with the years of \
+experience given in <career> or one evidenced specialism.
+- `summary`: three sentences built only from facts in the CV, following the positioning. \
+Sentence one: who the candidate is for this job (their function and level) and their years \
+of experience as given in <career>. Sentence two: the strongest achievement relevant to this \
+job, from one of the CV's bullets with its own result. Sentence three: what the candidate \
+brings to this team (the differentiators and relevant breadth: leadership, hands-on \
+practice, adjacent experience). Compelling through specifics, never through adjectives. \
+In the candidate's own voice, as above. Do not reduce the candidate to the job description \
+or repeat a keyword list. If the CV's \
+summary has several paragraphs (separated by a blank line), return the same number, separated \
+the same way, at about the same length.
 Keep any job-relevant skill or experience named in the source summary when it is the only \
 place the CV names it. Give the key requirements priority over incidental desirable terms.
-- `role_skills`: up to 8 of the CV's own skills most relevant to this job, most relevant \
-first, for one line under the summary.
+- `role_skills`: 10 to 12 of the CV's own skills most relevant to this job, most relevant \
+first, related skills next to each other, for one line under the summary. Use the job's own \
+wording where a term_bridge allows it. Only skills a bullet or project shows in use: a \
+recruiter distrusts a broad list with no work behind it.
 - `skills_to_confirm`: up to 5 techniques or routine tools named in this job but absent \
 from the CV, which the documented education and hands-on work make plausible but do not \
 prove. Copy the relevant CV words into `background_quote` and explain the link in `reason`. \
@@ -210,11 +273,23 @@ list that bullet as evidence and be `direct` (in optimised mode, `direct` or `tr
 Then use the keyword in that bullet's rewrite and in role_skills. Only the same thing under \
 another name: never a named tool, platform or acronym the bullet does not name, a \
 regulated or credential term, or management. Code checks every pairing.
-- In optimised mode only, `review_candidates`: up to eight pivotal missing experience or \
-skills to ask the candidate about. Each must quote exact words from the source CV and the \
-posting, identify the job need it would address, and name what the candidate must verify. \
-These are separate red questions, never factual CV text. Return an empty list when no \
-credible question remains. Do not duplicate what the CV already says.
+- In optimised mode only, `review_candidates`: up to twenty (at most five per role) \
+proposals of what the candidate very probably did but the CV does not say, for each open key \
+or essential requirement and each missing job keyword the background makes credible. Each \
+must quote exact words from the source CV (or <other_cvs>) and the posting, identify the job \
+need it would address, and name what the candidate must verify. These are separate red \
+questions, never factual CV text. Return an empty list when no credible question remains. Do \
+not duplicate what the CV already says.
+{PROPOSAL_KINDS}
+- In optimised mode only, `compressions`: shorter versions the candidate may choose instead of \
+their lines, so the CV scores high and reads quickly. `tighten`: one long bullet without the \
+details this job does not need. `merge_bullets`: two or more bullets of one role that describe \
+overlapping work, as one bullet. `merge_roles`: consecutive roles of the same kind (similar \
+title and level, e.g. several postdoctoral positions) as one entry with consolidated bullets; \
+code builds its heading with every institution and its dates. Keep the main idea of every \
+source line and every number, result and job term in them; add nothing they do not show; \
+list in `removed` the details left out. Propose only where it clearly helps; never \
+publications or education. The original lines stay; the candidate compares and decides.
 
 If a <trimming> block allows it, you may leave out of `bullet_order` bullets that would \
 overstate the candidate for this more junior role, keeping at least two per role. Without it, \
@@ -248,14 +323,72 @@ restructuring sections or changing the headline."""
 
 def analyze_jd(jd_text: str, llm: LLMProvider) -> JDAnalysis:
     """Extract structured requirements and ATS keywords from a JD."""
-    return llm.generate(system=ANALYZE_SYSTEM, prompt=jd_text, output_model=JDAnalysis)
+    jd = llm.generate(system=ANALYZE_SYSTEM, prompt=jd_text, output_model=JDAnalysis)
+    return literal_terms(jd, jd_text)
+
+
+def literal_terms(jd: JDAnalysis, jd_text: str) -> JDAnalysis:
+    """The analysis with its keywords in the posting's own words, as an ATS searches them: a
+    term the posting does not contain word for word is replaced by the parts of it that it
+    does ("Grant and funding management" -> "grant management" if written so; "Life sciences
+    research (PhD)" -> "PhD"), or dropped. Requirement sentences are left as they are."""
+
+    def literal(terms: list[str]) -> list[str]:
+        out: list[str] = []
+        for term in terms:
+            if len(term.split()) > MAX_KEYWORD_WORDS or mentions(jd_text, term):
+                out.append(term)
+                continue
+            out += [p for p in _term_parts(term) if mentions(jd_text, p)]
+        return list(dict.fromkeys(out))
+
+    return jd.model_copy(
+        update={
+            "hard_skills": literal(jd.hard_skills),
+            "must_have": literal(jd.must_have),
+            "soft_skills": literal(jd.soft_skills),
+        }
+    )
+
+
+def _term_parts(term: str) -> list[str]:
+    """The single terms a joined or labelled keyword stands for."""
+    inner = re.findall(r"\(([^)]*)\)", term)
+    outer = re.sub(r"\([^)]*\)", " ", term)
+    parts: list[str] = []
+    for piece in [outer, *inner]:
+        for chunk in re.split(r"\s*[,/;]\s*", piece):
+            chunk = " ".join(chunk.split())
+            shared = re.fullmatch(r"(\S+) (?:and|&) (\S+) (.+)", chunk)
+            if shared:  # "grant and funding management": both share "management"
+                a, b, rest = shared.groups()
+                parts += [f"{a} {rest}", f"{b} {rest}"]
+            parts += [c for c in re.split(r"\s+(?:and|&)\s+", chunk) if c]
+    return [
+        p
+        for p in dict.fromkeys(parts)
+        if p.casefold() != term.casefold() and (" " in p or _acronym(p))
+    ]
+
+
+def _acronym(word: str) -> bool:
+    """A one-word term worth searching for on its own: PhD, KPIs, GMP, R (not "grant")."""
+    return any(c.isupper() for c in word[1:]) or (word.isupper() and len(word) <= 6)
 
 
 def _context(master: MasterCV, jd: JDAnalysis, jd_text: str) -> str:
+    years = career_years(master)
+    career = (
+        f"\n\n<career>\nYears of professional experience, from the role dates: {years}. "
+        "This is the only number a summary or headline may add to the CV's own.\n</career>"
+        if years
+        else ""
+    )
     return (
         f"<job_description>\n{jd_text}\n</job_description>\n\n"
         f"<jd_analysis>\n{jd.model_dump_json(indent=2)}\n</jd_analysis>\n\n"
         f"<master_cv>\n{master.model_dump_json(indent=2, exclude={'preferences'})}\n</master_cv>"
+        + career
     )
 
 
@@ -263,7 +396,6 @@ LevelEmphasis = Literal["auto", "senior", "junior"]
 LengthChoice = Literal["auto", "full", "junior"]
 Audience = Literal["auto", "industry", "academic"]
 MAX_HEADLINE_OPTIONS = 4
-MAX_ROLE_SKILLS = 8
 YEARS_ASKED = re.compile(r"(\d{1,2})\s*\+?\s*(?:(?:-|to)\s*\d{1,2}\s*)?years?", re.IGNORECASE)
 
 
@@ -274,6 +406,18 @@ def _career_years(master: MasterCV) -> float:
     year, month = map(int, min(starts).split("-"))
     today = date.today()
     return (today.year - year) + (today.month - month) / 12
+
+
+def career_years(master: MasterCV) -> int:
+    """Whole years since the first role began: computed here, so a summary or headline may
+    state them without the model guessing."""
+    return int(_career_years(master))
+
+
+def _allowed_numbers(master: MasterCV) -> set[str]:
+    """Numbers a summary or headline may use: the CV's own, and its years of experience."""
+    years = career_years(master)
+    return extract_numbers(cv_to_text(master)) | ({str(years)} if years else set())
 
 
 def assess_trim(
@@ -372,11 +516,37 @@ def _preferences(emphasis: TailoringEmphasis, level: LevelEmphasis) -> str:
     return f"\n\n<tailoring_preferences>\n{focus} {tone}\n</tailoring_preferences>"
 
 
+OPTIMISED_DRAFT = (
+    "This is one job-specific CV, not a new career history. Its aim is the best version of this"
+    " profile for the job: an ATS match of grade A (80 or more: the posting's keywords present "
+    "and its requirements shown), read by ATS software and an AI or recruiter screen. The "
+    "candidate approves, edits or deletes every red proposal before applying, so be flexible "
+    "and complete: interpret their history from the CV, profile and other CVs, bring the job's "
+    "terms into their lines as red rewordings, and fill each gap their background makes "
+    "credible. Read the posting for the work the hire must deliver and the requirements that "
+    "decide an interview. Choose the source CV evidence that answers those needs, including "
+    "transferable work, and make it visible in the summary and the first bullets of the "
+    "relevant roles, in the job's own words wherever a term_bridge or the bullet supports them."
+    " Reword every bullet that gains from it; reorder the rest. Preserve the candidate's level,"
+    " scope, details and distinctive breadth. Map the decision-relevant requirements, "
+    "essentials first. Fill the gaps with review_candidates: for each key or essential "
+    "requirement that is adjacent, needs_confirmation or not_evidenced, and each job keyword "
+    "the CV does not show, infer what the candidate very probably did in a role and propose it "
+    "when the background makes it credible, with exact source and job quotes, for the candidate"
+    " to confirm or delete. Never add them to the factual summary, bullets, skills or headline."
+    " Core requirements unmet in the match_assessment decide this application: map each one "
+    "first, show any source evidence for it in the summary and the first bullets, and where the"
+    " CV gives a credible basis but no proof, make it a review_candidate for that requirement. "
+    "Propose compressions where overlapping or long lines slow a reader down."
+)
+
+
 @dataclass(frozen=True)
 class Steering:
     """Everything that steers a plan besides the CV and the job: the job_matcher's verdict
     (`guidance`), the stored profile, the user's choices, and what code decided (trimming,
-    level, academic)."""
+    level, academic). Optimised mode also reads the user's other CVs (`background`) and the
+    proposals they declined before (`declined`)."""
 
     guidance: str = ""
     profile: str = ""
@@ -386,6 +556,8 @@ class Steering:
     level_note: str = ""
     academic: bool = False
     optimised: bool = False
+    background: str = ""
+    declined: tuple[str, ...] = ()
 
     def prompt(self) -> str:
         out = ""
@@ -399,30 +571,26 @@ class Steering:
         if self.academic:
             out += f"\n\n<academic>\n{ACADEMIC}\n</academic>"
         if self.optimised:
-            out += (
-                "\n\n<optimised_draft>\nThis is one job-specific CV, not a new career history. "
-                "Its aim is the strongest screening result the facts allow, read by ATS "
-                "software and an AI or recruiter screen. Read the posting for the work the "
-                "hire must deliver and the requirements that decide an interview. Choose the "
-                "source CV evidence that answers those needs, including transferable work, "
-                "and make it visible in the summary and the first bullets of the relevant "
-                "roles, in the job's own words wherever a term_bridge or the bullet supports "
-                "them. Reword every bullet that gains from it; reorder the rest. Preserve the "
-                "candidate's level, scope, details and distinctive breadth. Map the "
-                "decision-relevant requirements, essentials first. Fill the gaps with "
-                "review_candidates: for each key or essential requirement that is adjacent, "
-                "needs_confirmation or not_evidenced, and each job keyword the CV does not "
-                "show, infer from the documented work of a role what that person would "
-                "realistically have done, and propose it when the background makes it "
-                "plausible, with exact source and job quotes, for the candidate to confirm "
-                "or delete. Never add them to the factual summary, bullets, skills or "
-                "headline. Core requirements unmet in the match_assessment decide this "
-                "application: map each one first, show any source evidence for it in the "
-                "summary and the first bullets, and where the CV gives a credible basis but "
-                "no proof, make it a review_candidate for that requirement."
-                "\n</optimised_draft>"
-            )
+            out += f"\n\n<optimised_draft>\n{OPTIMISED_DRAFT}\n</optimised_draft>"
+            out += self.inference()
         return out + (_trimming(self.trim) if self.trim else "")
+
+    def inference(self) -> str:
+        """The extra grounds and limits for optimised proposals."""
+        out = ""
+        if self.background:
+            out += (
+                "\n\n<other_cvs>\nThe candidate's other CV versions: grounds for inferring what "
+                "a role involved (quote them in background_quote), never facts for this CV."
+                f"\n{self.background}\n</other_cvs>"
+            )
+        if self.declined:
+            listed = "\n".join(f"- {d}" for d in self.declined)
+            out += (
+                "\n\n<declined>\nThe candidate has said they did not do these; never propose "
+                f"them or close variants.\n{listed}\n</declined>"
+            )
+        return out
 
 
 def propose_plan(
@@ -452,96 +620,90 @@ def propose_review_additions(
     jd_text: str,
     llm: LLMProvider,
     guidance: str = "",
+    *,
+    focus: Sequence[str] = (),
+    background: str = "",
+    declined: Sequence[str] = (),
 ) -> list[ReviewAddition]:
     """Ask targeted questions about what would settle a hiring manager's doubts (the job
-    matcher's gaps, essential or pivotal requirements not shown), worded so ATS search finds
-    them too; code checks both quoted anchors."""
-    gaps = sorted(
-        (
-            r
-            for r in tailored.requirements
-            if (r.importance == "key" or r.priority == "essential")
-            and r.match in {"adjacent", "needs_confirmation", "not_evidenced"}
-        ),
-        key=lambda r: (r.priority != "essential", r.importance != "key"),
-    )
+    matcher's gaps, essential or pivotal requirements not shown, or the requirements in
+    `focus`), worded so ATS search finds them too; code checks every quote and placement."""
+    raw = ask_additions(
+        master, tailored, jd, jd_text, llm, guidance, focus=focus, background=background,
+        declined=declined,
+    )  # fmt: skip
+    ctx = addition_context(master, tailored, jd_text, background, declined)
+    return check_additions([*map(as_candidate, tailored.review_additions), *raw], ctx)
+
+
+def ask_additions(
+    master: MasterCV,
+    tailored: TailoredCV,
+    jd: JDAnalysis,
+    jd_text: str,
+    llm: LLMProvider,
+    guidance: str = "",
+    *,
+    focus: Sequence[str] = (),
+    terms: Sequence[str] | None = None,
+    background: str = "",
+    declined: Sequence[str] = (),
+) -> list[AdditionCandidate]:
+    """One hiring-manager pass for proposals (untrusted until `check_additions`). `terms`:
+    the job terms still missing (default: the draft's missing keywords)."""
+    rows = {r.requirement: r for r in tailored.requirements}
+    if focus:
+        gaps = [
+            f"- {r.requirement} ({r.priority}, {r.importance}): {r.match}; {r.note}"
+            if (r := rows.get(f)) is not None
+            else f"- {f}: not read as shown"
+            for f in focus
+        ]
+    else:
+        gaps = [
+            f"- {r.requirement} ({r.priority}, {r.importance}): {r.match}; {r.note}"
+            for r in _open_gaps(tailored)
+        ]
+    proposed = "\n".join(f"- {a.kind}: {a.text}" for a in tailored.review_additions)
+    missing = list(terms) if terms is not None else tailored.missing_keywords
     assessment = f"\n\n<match_assessment>\n{guidance}\n</match_assessment>" if guidance else ""
+    steer = Steering(optimised=True, background=background, declined=tuple(declined))
     prompt = (
         _context(master, jd, jd_text)
         + assessment
         + "\n\n<gaps>\n"
-        + "\n".join(
-            f"- {r.requirement} ({r.priority}, {r.importance}): {r.match}; {r.note}" for r in gaps
-        )
+        + "\n".join(gaps)
         + "\n</gaps>"
-        + f"\n\n<missing_job_terms>\n{', '.join(tailored.missing_keywords)}\n</missing_job_terms>"
+        + f"\n\n<missing_job_terms>\n{', '.join(missing)}\n</missing_job_terms>"
         + f"\n\n<confirmed_draft>\n{printed_text(tailored)}\n</confirmed_draft>"
+        + (f"\n\n<already_proposed>\n{proposed}\n</already_proposed>" if proposed else "")
+        + steer.inference()
     )
     raw = llm.generate(
         system=OPTIMISED_ADDITIONS_SYSTEM, prompt=prompt, output_model=AdditionCandidates
     )
-    return _review_additions(raw.items, master, tailored, jd_text)
+    return raw.items
 
 
-def _review_additions(
-    proposed: list[AdditionCandidate], master: MasterCV, tailored: TailoredCV, jd_text: str
-) -> list[ReviewAddition]:
-    """A proposal is a question, but its CV and job anchors still have to be real."""
-    cv_plain = " ".join(re.findall(r"[\w]+", cv_to_text(master).casefold()))
-    job_plain = " ".join(re.findall(r"[\w]+", jd_text.casefold()))
-    shown = printed_text(tailored)
-    roles = {role.id: role for role in master.experience}
-    mapped = {r.requirement.casefold() for r in tailored.requirements}
-    seen: set[str] = set()
-    out: list[ReviewAddition] = []
-    for item in proposed:
-        text = item.text.strip()
-        key = normalize_skill(text)
-        background = " ".join(re.findall(r"[\w]+", item.background_quote.casefold()))
-        job = " ".join(re.findall(r"[\w]+", item.job_quote.casefold()))
-        if (
-            not text
-            or len(text) > 280
-            or key in seen
-            or mentions(shown, text)
-            or len(background.split()) < 2
-            or f" {background} " not in f" {cv_plain} "
-            or len(job.split()) < 2
-            or f" {job} " not in f" {job_plain} "
-            or not (item.requirement.casefold() in mapped or mentions(jd_text, item.requirement))
-            or not item.reason.strip()
-        ):
-            continue
-        if item.kind == "experience":
-            role = roles.get(item.role_id or "")
-            if role is None:
-                continue
-            role_plain = " ".join(
-                re.findall(
-                    r"[\w]+",
-                    " ".join(b.text for b in role.bullets).casefold(),
-                )
-            )
-            if f" {background} " not in f" {role_plain} ":
-                continue
-            if extract_numbers(text) - extract_numbers(role_plain):
-                continue
-        elif item.role_id is not None:
-            continue
-        seen.add(key)
-        identity = f"{item.kind}\0{item.role_id}\0{text}"
-        out.append(
-            ReviewAddition.model_validate(
-                {
-                    **item.model_dump(),
-                    "text": text,
-                    "id": hashlib.sha256(identity.encode()).hexdigest()[:12],
-                }
-            )
-        )
-        if len(out) == 8:
-            break
-    return out
+def addition_context(
+    master: MasterCV,
+    tailored: TailoredCV,
+    jd_text: str,
+    background: str = "",
+    declined: Sequence[str] = (),
+) -> AdditionContext:
+    """What a draft's proposals are checked against."""
+    return AdditionContext(
+        master=master,
+        cv_text=cv_to_text(master),
+        printed=printed_text(tailored),
+        jd_text=jd_text,
+        requirements=frozenset(r.requirement.casefold() for r in tailored.requirements),
+        allowed_numbers=frozenset(_allowed_numbers(master)),
+        background=background,
+        declined=tuple(declined),
+        keywords=frozenset(tailored.matched_keywords + tailored.missing_keywords),
+    )
 
 
 def critique_cv(
@@ -631,6 +793,7 @@ def apply_plan(
     cv = master.model_copy(deep=True)
     requirements = check_requirements(plan.requirements, master, jd)
     changes = _apply_rewrites(cv, master, plan, jd, requirements)
+    changes = _limit_repetition(cv, master, changes, plan.order_by_role(), keywords)
     before_order = {e.id: list(e.bullets) for e in cv.experience}
     _apply_bullet_order(cv, plan.order_by_role(), trim is not None and trim.allowed)
     cv.skills = _prioritise_skills(cv.skills, plan.skills_priority)
@@ -661,8 +824,67 @@ def apply_plan(
         role_skills=role_skills,
         skills_to_confirm=_skills_to_confirm(plan.skills_to_confirm, master, jd),
         term_bridges=bridges,
+        length_notes=length_notes(cv) if mode == "standard" else [],
+        compressions=(
+            check_compressions(plan.compressions, master, keywords, _skill_vocab(master, jd))
+            if mode == "optimised"
+            else []
+        ),
         academic=jd.academic,
     )
+
+
+LONG_BULLET_WORDS = 35  # about two lines: a recruiter's eye skips longer bullets
+OVERLAP = 0.6  # share of shared words at which two bullets of one role repeat the same work
+OLD_ROLE_YEARS = 10
+OLD_ROLE_BULLETS = 4
+
+
+def length_notes(cv: MasterCV, today: date | None = None) -> list[str]:
+    """Advice only (standard mode keeps every line, user's decision 2026-10-14): bullets over
+    about two lines, bullets in one role that repeat the same work, and long roles that ended
+    over ten years ago. Code finds them; the user decides."""
+    today = today or date.today()
+    notes: list[str] = []
+    for role in cv.experience:
+        name = f"{role.title}, {role.company}"
+        long = [b for b in role.bullets if len(b.text.split()) > LONG_BULLET_WORDS]
+        if long:
+            notes.append(
+                f"{name}: {len(long)} bullet(s) over {LONG_BULLET_WORDS} words could be tightened"
+            )
+        notes += [
+            f"{name}: two bullets describe overlapping work and could be merged: "
+            f"“{_start(a.text)}” and “{_start(b.text)}”"
+            for a, b in overlapping(role.bullets)
+        ]
+        ended = int(role.end[:4]) if role.end else today.year
+        if today.year - ended > OLD_ROLE_YEARS and len(role.bullets) > OLD_ROLE_BULLETS:
+            notes.append(
+                f"{name}: ended over {OLD_ROLE_YEARS} years ago with {len(role.bullets)} "
+                "bullets; 2 or 3 may be enough"
+            )
+    return notes
+
+
+def overlapping(bullets: list[Bullet]) -> list[tuple[Bullet, Bullet]]:
+    """Pairs of bullets that share most of their content words (the same work told twice)."""
+    words = [(b, _content_words(b.text)) for b in bullets]
+    return [
+        (a, b)
+        for n, (a, wa) in enumerate(words)
+        for b, wb in words[n + 1 :]
+        if wa and wb and len(wa & wb) >= OVERLAP * min(len(wa), len(wb))
+    ]
+
+
+def _content_words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z][a-z0-9-]{3,}", text.casefold())}
+
+
+def _start(text: str) -> str:
+    words = text.split()
+    return " ".join(words[:8]) + ("…" if len(words) > 8 else "")
 
 
 def revise_tailored(
@@ -707,10 +929,6 @@ def revise_tailored(
     )
 
 
-HIGH_FIT = 85  # an original read this strongly needs no score-driven revision
-CLEAR_GAIN = 5  # fit points that count as clearly better (the fit check's noise margin)
-CLEAR_ATS_GAIN = 10  # ATS match points that, with a requirement gained, count as clearly better
-
 Check = Callable[[TailoredCV], TailoredCV]
 
 
@@ -729,6 +947,9 @@ def tailor(
     suggest_unverified: bool = False,
     mode: Literal["standard", "optimised"] = "standard",
     check: Check | None = None,
+    *,
+    background: str = "",
+    declined: Sequence[str] = (),
 ) -> TailoredCV:
     """End-to-end: JD text + Master CV -> guarded TailoredCV. With `review`, a second reader
     critiques the result and, if it finds issues, one revised plan replaces the first (both
@@ -736,7 +957,10 @@ def tailor(
     `profile`: the stored profile as prompt text. `audience` "auto" writes for an academic
     post when the analysis says the job is one. `check` attaches the before/after fit check;
     a draft that does not clearly read better than the original is revised once from that
-    reading and the better of the two is kept (`_improve`)."""
+    reading and the better of the two is kept (`_improve`). Optimised mode then aims its red
+    proposals at the requirements and job terms still not shown (`_toward_target`);
+    `background` (the user's other CVs) grounds them and `declined` lists what the user said
+    they did not do."""
     if jd is None:
         progress.step("Analysing the job description")
         jd = analyze_jd(jd_text, llm)
@@ -752,6 +976,8 @@ def tailor(
         level_note(master, jd),
         jd.academic,
         mode == "optimised",
+        background,
+        tuple(declined),
     )
     progress.step("Mapping the job's requirements to your evidence and planning the CV")
     plan = propose_plan(master, jd, jd_text, llm, steer)
@@ -764,7 +990,14 @@ def tailor(
         plan, out = _reviewed(draft, plan, out, review)
         if suggest_unverified and not out.skills_to_confirm:
             out = _with_suggestions(draft, out)
-    return out if check is None else _improve(draft, plan, out, check)
+    if check is None:
+        return draft.screened(out)
+    out = _improve(draft, plan, out)
+    if mode == "optimised":
+        out = _toward_target(draft, out)
+    progress.step("Reading how clearly each CV shows your fit (AI screen)")
+    out = check(out)
+    return _ranked(draft, out) if mode == "optimised" else draft.screened(out)
 
 
 @dataclass(frozen=True)
@@ -781,6 +1014,9 @@ class _Draft:
 
     def apply(self, plan: TailoringPlan) -> TailoredCV:
         return apply_plan(self.master, plan, self.jd, self.trim, self.mode)
+
+    def screened(self, out: TailoredCV) -> TailoredCV:
+        return out.model_copy(update={"screening": screen(self.master, out, self.jd, self.jd_text)})
 
 
 def _reviewed(
@@ -828,126 +1064,220 @@ def _optimised(
         if kept and sum(not c.accepted for c in corrected.changes) < len(rejected):
             plan, out = revised, corrected
     progress.step("Checking suggestions against the CV and posting")
-    return plan, _proposals(d, plan.review_candidates, out)
+    reworded = rewordings(out.changes, out.requirements)
+    return plan, _proposals(d, [*reworded, *plan.review_candidates], out)
 
 
 def _proposals(d: _Draft, proposed: list[AdditionCandidate], out: TailoredCV) -> TailoredCV:
-    additions = _review_additions(proposed, d.master, out, d.jd_text)
-    if not additions and (_open_gaps(out) or out.missing_keywords):
+    """The plan's proposals, checked; when open key gaps or missing job terms remain that no
+    proposal addresses, one hiring-manager pass proposes for them too."""
+    ctx = addition_context(d.master, out, d.jd_text, d.steer.background, d.steer.declined)
+    additions = check_additions(proposed, ctx)
+    covered = {a.requirement.casefold() for a in additions}
+    focus = [r.requirement for r in _open_gaps(out) if r.requirement.casefold() not in covered]
+    terms = [k for k in out.missing_keywords if not any(mentions(a.text, k) for a in additions)]
+    if focus or terms:
         progress.step("Inferring what your roles very probably involved, to close the gaps")
-        guidance = d.steer.guidance
         try:
-            additions = propose_review_additions(d.master, out, d.jd, d.jd_text, d.llm, guidance)
+            more = ask_additions(
+                d.master, out.model_copy(update={"review_additions": additions}), d.jd,
+                d.jd_text, d.llm, d.steer.guidance, focus=focus,
+                background=d.steer.background, declined=d.steer.declined,
+            )  # fmt: skip
+            additions = check_additions([*proposed, *more], ctx)
         except Exception as exc:  # noqa: BLE001 - proposals are optional; the CV stands
             note = f"Gap proposals could not run: {exc}"
             out = out.model_copy(update={"document_notes": [*out.document_notes, note]})
     return out.model_copy(update={"skills_to_confirm": [], "review_additions": additions})
 
 
+TARGET_ATS = 80  # the screening score tailoring aims at: grade A
+MAX_TARGET_PASSES = 2
+
+
+def screen(master: MasterCV, tailored: TailoredCV, jd: JDAnalysis, jd_text: str) -> Screening:
+    """The deterministic screening score (`cv/ats_score.py`) of the original CV, the tailored
+    CV as printed and, with pending proposals, the CV with every one confirmed."""
+    keywords = ats_keywords(jd)
+
+    def scored(text: str, cv: MasterCV) -> ScreeningScore:
+        titles = "\n".join([cv.basics.headline or "", *(e.title for e in cv.experience)])
+        return score_cv(text, titles, jd, jd_text, keywords)
+
+    proposed = with_proposals(tailored)
+    return Screening(
+        before=scored(cv_to_text(master, tags=False), master),
+        after=scored(printed_text(tailored), tailored.cv),
+        if_confirmed=scored(printed_text(proposed), proposed.cv) if proposed else None,
+    )
+
+
+def _scores(tailored: TailoredCV) -> tuple[int, int]:
+    """(screening score of the draft, with every proposal confirmed)."""
+    sc = tailored.screening
+    if sc is None:
+        return (-1, -1)
+    return (sc.after.score, (sc.if_confirmed or sc.after).score)
+
+
+def _better(d: _Draft, first: TailoredCV, second: TailoredCV) -> bool:
+    """Optimised mode is judged with its proposals confirmed first; standard by the draft."""
+    a, b = _scores(first), _scores(second)
+    return b[::-1] > a[::-1] if d.mode == "optimised" else b > a
+
+
+def _improve(d: _Draft, plan: TailoringPlan, out: TailoredCV) -> TailoredCV:
+    """Score the draft (code, no model); under grade A, revise once from what the score
+    found missing and keep whichever draft scores better."""
+    first = d.screened(out)
+    if _scores(first)[1 if d.mode == "optimised" else 0] >= TARGET_ATS:
+        return first
+    progress.step("Revising where the screening score found the case could be stronger")
+    try:
+        revised = revise_for_reader(d, plan, reader_feedback(first, d.jd, d.mode))
+    except Exception as exc:  # noqa: BLE001 - the first draft stands
+        return first.model_copy(update={"revision": f"The revision could not run: {exc}"})
+    second = d.apply(revised)
+    if d.mode == "optimised":
+        earlier = [as_candidate(a) for a in first.review_additions]
+        second = _proposals(d, [*revised.review_candidates, *earlier], second)
+    else:
+        kept = {"skills_to_confirm": first.skills_to_confirm, "critique": first.critique}
+        second = second.model_copy(update=kept)
+    second = d.screened(second)
+    shown = f"screening score {_scores(first)[0]} → {_scores(second)[0]}"
+    if d.mode == "optimised":
+        shown += f", if confirmed {_scores(first)[1]} → {_scores(second)[1]}"
+    if _better(d, first, second):
+        return second.model_copy(update={"revision": f"Revised once ({shown}); kept."})
+    note = f"Revised once ({shown}); the first draft scored as well or better and is kept."
+    return first.model_copy(update={"revision": note})
+
+
+def _toward_target(d: _Draft, out: TailoredCV) -> TailoredCV:
+    """Optimised mode: while the screening score with every proposal confirmed stays under
+    `TARGET_ATS` (grade A), up to `MAX_TARGET_PASSES` more passes propose for the job terms,
+    title and requirements still missing; a pass is kept only when it scores better. Code
+    scores each pass: no model reads it."""
+    notes: list[str] = []
+    for _ in range(MAX_TARGET_PASSES):
+        if out.screening is None or _scores(out)[1] >= TARGET_ATS:
+            break
+        better = _one_more_pass(d, out)
+        if better is None:
+            break
+        notes.append(f"if confirmed {_scores(out)[1]} → {_scores(better)[1]}")
+        out = better
+    if notes:
+        joined = "; ".join(notes)
+        revision = f"{out.revision} Passes toward grade A: {joined}.".strip()
+        out = out.model_copy(update={"revision": revision})
+    return out
+
+
+def _one_more_pass(d: _Draft, out: TailoredCV) -> TailoredCV | None:
+    sc = out.screening
+    if sc is None:
+        return None
+    projected = sc.if_confirmed or sc.after
+    terms = [c.term for c in projected.keywords if not c.found]
+    kept = [a for a in out.review_additions if a.status == "pending"]
+    covered = {a.requirement.casefold() for a in kept}
+    focus = [r.requirement for r in _open_gaps(out) if r.requirement.casefold() not in covered]
+    if projected.title and projected.title_match < 1:
+        focus.append(f"The job title, {projected.title!r}, as the headline")
+    if not terms and not focus:
+        return None
+    progress.step("Proposing more of what your roles very probably involved, toward grade A")
+    ctx = addition_context(d.master, out, d.jd_text, d.steer.background, d.steer.declined)
+    try:
+        more = ask_additions(
+            d.master, out, d.jd, d.jd_text, d.llm, d.steer.guidance, focus=focus, terms=terms,
+            background=d.steer.background, declined=d.steer.declined,
+        )  # fmt: skip
+    except Exception as exc:  # noqa: BLE001 - the draft and its proposals stand
+        out.document_notes.append(f"A pass toward grade A could not run: {exc}")
+        return None
+    additions = check_additions([*map(as_candidate, kept), *more], ctx)
+    if [a.id for a in additions] == [a.id for a in kept]:
+        return None
+    second = d.screened(out.model_copy(update={"review_additions": additions}))
+    return second if _scores(second)[1] > _scores(out)[1] else None
+
+
+def _ranked(d: _Draft, out: TailoredCV) -> TailoredCV:
+    """Proposals ordered by what the reader credits them with; those that change nothing are
+    dropped, and the screening score is taken again."""
+    projection = out.fit_check.if_confirmed if out.fit_check else None
+    ranked = rank_additions(out.review_additions, projection, out.missing_keywords)
+    return d.screened(out.model_copy(update={"review_additions": ranked}))
+
+
 def _open_gaps(out: TailoredCV) -> list[RequirementEvidence]:
-    return [
+    """Key or essential requirements the draft does not show directly: essentials first."""
+    gaps = [
         r
         for r in out.requirements
         if (r.importance == "key" or r.priority == "essential")
         and r.match in {"adjacent", "needs_confirmation", "not_evidenced"}
     ]
+    return sorted(gaps, key=lambda r: (r.priority != "essential", r.importance != "key"))
 
 
-def _needs_revision(tailored: TailoredCV) -> bool:
-    """Revise unless the draft clearly reads better than the original (or the original
-    already reads very strongly, or there is no reading)."""
-    fc = tailored.fit_check
-    if fc is None or fc.before >= HIGH_FIT:
-        return False
-    if fc.after - fc.before >= CLEAR_GAIN:
-        return False
-    gained = fc.requirements_after > fc.requirements_before
-    return not (gained and fc.ats_after - fc.ats_before >= CLEAR_ATS_GAIN)
+KEYWORDS_ENOUGH = 0.8  # standard mode: past this coverage, more keywords only read as stuffing
 
 
-def _reading(tailored: TailoredCV) -> tuple[int, int, int]:
-    fc = tailored.fit_check
-    return (fc.after, fc.ats_after, fc.requirements_after) if fc else (-1, -1, -1)
-
-
-def _improve(d: _Draft, plan: TailoringPlan, out: TailoredCV, check: Check) -> TailoredCV:
-    """Read the draft beside the original; if it is not clearly better, revise once from what
-    the reader missed and keep whichever draft reads better."""
-    progress.step("Comparing how well each CV shows your fit for this job")
-    first = check(out)
-    if not _needs_revision(first):
-        return first
-    progress.step("Revising where the reading found the case could be stronger")
-    feedback = reader_feedback(first, d.jd)
-    try:
-        revised = revise_for_reader(d, plan, feedback)
-    except Exception as exc:  # noqa: BLE001 - the first draft stands
-        note = f"The score-driven revision could not run: {exc}"
-        return first.model_copy(update={"revision": note})
-    second = d.apply(revised)
-    if d.mode == "optimised":
-        second = _proposals(d, [*revised.review_candidates, *first.review_additions], second)
-    else:
-        kept = {"skills_to_confirm": first.skills_to_confirm, "critique": first.critique}
-        second = second.model_copy(update=kept)
-    progress.step("Reading the revised draft")
-    second = check(second)
-    a, b = first.fit_check, second.fit_check
-    shown = f"fit {a.after} → {b.after}, ATS match {a.ats_after} → {b.ats_after}" if a and b else ""
-    if _reading(second) > _reading(first):
-        note = f"Revised once after a blind reading ({shown}); the revision reads better."
-        return second.model_copy(update={"revision": note})
-    note = f"Revised once after a blind reading ({shown}); the first draft read as well or "
-    return first.model_copy(update={"revision": note + "better and is kept."})
-
-
-def reader_feedback(tailored: TailoredCV, jd: JDAnalysis) -> str:
-    """What the blind reading of a draft found missing, for one revision."""
-    fc = tailored.fit_check
-    if fc is None:
+def reader_feedback(
+    tailored: TailoredCV, jd: JDAnalysis, mode: Literal["standard", "optimised"] = "standard"
+) -> str:
+    """What the screening score found missing, for one revision: job keywords not printed
+    (in standard mode only until `KEYWORDS_ENOUGH` are: the right keywords, not more), the job
+    title, and the key requirements the CV evidences, to lead with."""
+    sc = tailored.screening
+    if sc is None:
         return ""
+    after = sc.after
     lines = [
-        f"Fit read for this job: original {fc.before}, draft {fc.after}; ATS match original "
-        f"{fc.ats_before}, draft {fc.ats_after} (requirements shown {fc.requirements_after} "
-        f"of {fc.requirements_total})."
+        f"Screening score: original {sc.before.score}, draft {after.score} (grade "
+        f"{after.grade}); the aim is 80 (grade A)."
     ]
-    rows = {r.requirement: r for r in tailored.requirements}
-    for requirement in fc.requirements_missing:
-        row = rows.get(requirement)
-        if row is not None and row.match in CLAIMABLE and row.evidence:
-            where = ", ".join(row.evidence)
+    if after.title and after.title_match < 1:
+        lines.append(
+            f"- The job title {after.title!r} is not in the CV: make it the first headline "
+            "option when the candidate's level and function fit it."
+        )
+    for row in _open_gaps(tailored) + [
+        r for r in tailored.requirements if r.importance == "key" and r.match in CLAIMABLE
+    ]:
+        if row.match in CLAIMABLE and row.evidence:
             lines.append(
-                f"- Not read as shown: {requirement}. The CV evidences it ({row.match}: "
-                f"{where}): say so plainly in the summary and lead those bullets with it."
+                f"- Make visible: {row.requirement} ({row.match}: {', '.join(row.evidence)}): "
+                "say so plainly in the summary and lead those bullets with it."
             )
-        else:
-            lines.append(f"- Not read as shown: {requirement} (no CV evidence mapped).")
-    printed = printed_text(tailored)
-    missing = [k for k in ats_keywords(jd) if not mentions(printed, k)]
-    if missing:
+    missing = [c.term for c in after.keywords if not c.found]
+    shown = 1 - len(missing) / len(after.keywords) if after.keywords else 1.0
+    if missing and not (mode == "standard" and shown >= KEYWORDS_ENOUGH):
         lines.append(
             "- Job keywords the printed CV does not contain: " + ", ".join(missing) + ". Where "
             "a bullet shows one in other words, add a term_bridge and use the keyword."
         )
-    if fc.impression_after:
-        lines.append(f"- What the top of the draft conveys: {fc.impression_after}")
-    if fc.worse:
-        lines.append("- Reads worse than the original on: " + "; ".join(fc.worse))
-    return "\n".join(lines)
+    return "\n".join(dict.fromkeys(lines))
 
 
 def revise_for_reader(d: _Draft, plan: TailoringPlan, feedback: str) -> TailoringPlan:
-    """One revised plan from a blind reading (untrusted until `apply_plan`)."""
+    """One revised plan from what the screening score found missing (untrusted until
+    `apply_plan`)."""
     prompt = (
         _context(d.master, d.jd, d.jd_text)
         + d.steer.prompt()
         + f"\n\n<previous_plan>\n{plan.model_dump_json()}\n</previous_plan>"
         + f"\n\n<reading>\n{feedback}\n</reading>"
-        + "\n\nA blind screen read this draft beside the original CV and did not find it "
-        "clearly stronger. Return one revised plan that makes the requirements and job "
-        "keywords listed in <reading> visible wherever the CV's facts support them: in the "
-        "summary, role_skills, term_bridges and the first bullets of the roles that "
-        "evidence them. Keep rewrites that already work. The hard rules still apply."
+        + "\n\nThe draft does not yet reach grade A on the screening score. Return one revised "
+        "plan that makes the requirements, job title and job keywords listed in <reading> "
+        "visible wherever the CV's facts support them: in the summary, role_skills, "
+        "headline_options, term_bridges and the first bullets of the roles that evidence "
+        "them; in optimised mode, propose the rest as review_candidates. Keep rewrites that "
+        "already work. The hard rules still apply."
     )
     return d.llm.generate(system=PLAN_SYSTEM, prompt=prompt, output_model=TailoringPlan)
 
@@ -1000,10 +1330,21 @@ def _checked_positioning(positioning: Positioning | None, master: MasterCV) -> P
 
 
 def _role_skills(proposed: list[str], master: MasterCV) -> list[str]:
-    """The 'Relevant skills for this role' line: only skills the CV itself names."""
-    text = cv_to_text(master)
+    """The 'Relevant skills for this role' line: only skills a bullet or project shows in use
+    (a broad list with no work behind it reads as stuffing)."""
+    text = _work_text(master)
     kept = [s.strip() for s in proposed if s.strip() and mentions(text, s.strip())]
     return list(dict.fromkeys(kept))[:MAX_ROLE_SKILLS]
+
+
+def _work_text(master: MasterCV, tags: bool = True) -> str:
+    """Where the CV shows its skills in use: bullets (`tags`: with their skill tags) and
+    projects."""
+    parts = [
+        f"{b.text} {' '.join(b.skills) if tags else ''}" for b in master.bullet_index().values()
+    ]
+    parts += [f"{p.name} {p.description} {' '.join(p.skills)}" for p in master.projects]
+    return "\n".join(parts)
 
 
 def _job_terms_on_top(
@@ -1016,7 +1357,8 @@ def _job_terms_on_top(
     printed = cv_to_text(cv, tags=False)
     is_keyword = [s for s in skills if any(mentions(s, k) or mentions(k, s) for k in keywords)]
     bridged = [b.term for b in bridges if not mentions(printed, b.term)]
-    lower = [k for k in keywords if mentions(printed, k) and not mentions(top, k)]
+    work = _work_text(cv, tags=False)
+    lower = [k for k in keywords if mentions(work, k) and not mentions(top, k)]
     others = [s for s in skills if s not in is_keyword]
     ranked = [*is_keyword, *bridged, *lower, *others]
     return list(dict.fromkeys(t for t in ranked if t.strip()))[:MAX_ROLE_SKILLS]
@@ -1125,6 +1467,49 @@ def _apply_rewrites(
     return changes
 
 
+MAX_TERM_BULLETS = 2  # bullets a rewrite may bring one job term into (user's decision 2026-10-14)
+
+
+def _limit_repetition(
+    cv: MasterCV,
+    master: MasterCV,
+    changes: list[ChangeRecord],
+    order: dict[str, list[str]],
+    keywords: list[str],
+) -> list[ChangeRecord]:
+    """Repeating a job term adds nothing for screening software, which only checks that it is
+    there, and reads as stuffing to a person. A term rewrites bring into more than
+    `MAX_TERM_BULLETS` bullets stays only in the most relevant ones; the other rewrites are
+    undone (the original line is kept) and recorded."""
+    source = master.bullet_index()
+    bullets = cv.bullet_index()
+    # most relevant first: recent roles first, the plan's order within each role
+    roles = {r.id: n for n, r in enumerate(cv.experience)}
+    rank = {
+        b: (roles.get(role_id, len(roles)), n)
+        for role_id, ids in order.items()
+        for n, b in enumerate(ids)
+    }
+    undone: dict[str, str] = {}
+    for term in keywords:
+        using = [b for b in bullets.values() if b.id not in undone and mentions(b.text, term)]
+        added = [b for b in using if b.id in source and not mentions(source[b.id].text, term)]
+        excess = len(using) - MAX_TERM_BULLETS
+        last = (len(roles), 0)
+        for bullet in sorted(added, key=lambda b: rank.get(b.id, last), reverse=True):
+            if excess <= 0:
+                break
+            undone[bullet.id] = f"repeats the job term {term!r} (kept in the most relevant lines)"
+            bullet.text = source[bullet.id].text
+            excess -= 1
+    return [
+        c.model_copy(update={"accepted": False, "reason": undone[c.source_id]})
+        if c.accepted and c.source_id in undone
+        else c
+        for c in changes
+    ]
+
+
 def _record(source_id: str, original: str, tailored: str, reason: str | None) -> ChangeRecord:
     return ChangeRecord(
         source_id=source_id,
@@ -1147,7 +1532,9 @@ def _fabrication_reason(
     listed skills), not from elsewhere in the CV."""
     if not new.strip():
         return "empty rewrite"
-    if reason := overclaim(new) or escalation(source.text, new):
+    if reason := overclaim(new) or jargon(source.text, new) or escalation(source.text, new):
+        return reason
+    if reason := third_person(source.text, new, master.basics.name):
         return reason
     allowed_numbers = extract_numbers(source.text) | extract_numbers(" ".join(source.metrics))
     invented = extract_numbers(new) - allowed_numbers
@@ -1224,14 +1611,18 @@ def _apply_headline(
         s for s in extract_skills(headline, _skill_vocab(master, jd)) if not mentions(text, s)
     ]
     reason = None
-    if tone := overclaim(headline):
+    if tone := (
+        overclaim(headline)
+        or jargon(text, headline)
+        or third_person(master.basics.headline or "", headline, master.basics.name)
+    ):
         reason = tone
     elif seniority_level(headline) > top:
         level = seniority_name(seniority_level(headline))
         reason = f"claims a higher level ({level}) than any title held"
     elif unseen:
         reason = f"names a role the CV does not show: {', '.join(unseen)}"
-    elif skills or extract_numbers(headline) - extract_numbers(text):
+    elif skills or extract_numbers(headline) - _allowed_numbers(master):
         reason = "adds skills or numbers the CV does not evidence"
     if reason is None:
         cv.basics.headline = headline
@@ -1272,11 +1663,13 @@ def _apply_summary(
     if not summary or summary == master.basics.summary:
         return []
     text = cv_to_text(master)
-    invented = extract_numbers(summary) - extract_numbers(text)
+    invented = extract_numbers(summary) - _allowed_numbers(master)
     skills = [s for s in extract_skills(summary, _skill_vocab(master, jd)) if not mentions(text, s)]
     reason = None
-    if tone := overclaim(summary) or escalation(text, summary):
+    if tone := overclaim(summary) or jargon(text, summary) or escalation(text, summary):
         reason = tone
+    elif voice := third_person(master.basics.summary or "", summary, master.basics.name):
+        reason = voice
     elif invented:
         reason = f"introduces numbers not in the CV: {sorted(invented)}"
     elif skills:
@@ -1378,9 +1771,9 @@ def ats_keywords(jd: JDAnalysis) -> list[str]:
 
 def keyword_coverage(cv: MasterCV, jd: JDAnalysis) -> tuple[list[str], list[str]]:
     """Split the JD's ATS keywords (`ats_keywords`) into (present in CV, missing from CV)."""
-    text = cv_to_text(cv)
+    text = Text(cv_to_text(cv))
     keywords = ats_keywords(jd)
-    matched = [k for k in keywords if mentions(text, k)]
+    matched = [k for k in keywords if text.has(k)]  # as an ATS search matches them
     return matched, [k for k in keywords if k not in matched]
 
 

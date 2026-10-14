@@ -20,7 +20,7 @@ import re
 
 from src.core import progress
 from src.core.llm_provider import LLMProvider
-from src.cv.claims import escalation, overclaim
+from src.cv.claims import escalation, jargon, overclaim
 from src.cv.models import (
     ChangeRecord,
     CoverLetter,
@@ -184,6 +184,8 @@ def _paragraph_reason(
     if personal_claim and not ids:
         return "personal claim has no CV source_id"
     evidence = " ".join(sources[i] for i in ids)
+    if reason := jargon(evidence, text):
+        return reason
     if ids and (reason := escalation(evidence, text)):
         return reason
     allowed_jd_numbers = set() if personal_claim else extract_numbers(jd_text)

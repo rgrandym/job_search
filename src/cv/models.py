@@ -245,12 +245,31 @@ class SkillSuggestions(_Strict):
     items: list[SkillToConfirm] = Field(default_factory=list)
 
 
-class AdditionCandidate(_Strict):
-    """A possible omitted fact proposed by the writer, never a confirmed CV claim."""
+AdditionKind = Literal[
+    "skill", "experience", "enrichment", "rewording", "metric", "summary", "headline"
+]
 
-    kind: Literal["skill", "experience"]
-    text: str = Field(min_length=1, description="CV wording to review, without invented metrics")
+
+class AdditionCandidate(_Strict):
+    """A possible omitted fact proposed by the writer, never a confirmed CV claim. Kinds:
+    skill (into a skills category), experience (a new bullet after `anchor_id` in its role),
+    enrichment (words added inside the existing bullet `anchor_id`), metric (a question for a
+    number the bullet `anchor_id` lacks), rewording (the bullet `anchor_id` rewritten in the
+    job's terms), summary (one sentence), headline (one option)."""
+
+    kind: AdditionKind
+    text: str = Field(
+        min_length=1,
+        description="CV wording to review, without invented metrics. enrichment: only the "
+        "words to add to the bullet; metric: the question, e.g. 'how many samples?'",
+    )
     role_id: str | None = Field(None, description="Existing role for an experience proposal")
+    anchor_id: str | None = Field(
+        None, description="experience, enrichment, metric: the existing bullet it belongs to"
+    )
+    skill_group: str | None = Field(
+        None, description="skill: the CV's skills category it belongs in (as the CV names it)"
+    )
     requirement: str = Field(description="The pivotal job need this would address")
     background_quote: str = Field(description="Exact words in the source CV")
     job_quote: str = Field(description="Exact words in the posting")
@@ -276,6 +295,42 @@ class ReviewAddition(AdditionCandidate):
 
     id: str
     status: Literal["pending", "confirmed", "deleted"] = "pending"
+    original_text: str = Field(
+        "",
+        description="enrichment, metric: the bullet as it was (code-set; restored for "
+        "comparisons against the original CV)",
+    )
+
+
+class CompressionCandidate(_Strict):
+    """A shorter version of lines that overlap or carry detail this job does not need (LLM
+    output, optimised mode). Shown in red below the originals; only the user applies it."""
+
+    kind: Literal["tighten", "merge_bullets", "merge_roles"]
+    role_ids: list[str] = Field(
+        description="tighten, merge_bullets: the one role; merge_roles: the similar roles"
+    )
+    source_ids: list[str] = Field(
+        default_factory=list,
+        description="tighten: one bullet; merge_bullets: two or more bullets of the role; "
+        "merge_roles: leave empty (all of the roles' bullets)",
+    )
+    bullets: list[str] = Field(
+        description="The compressed wording: one bullet for tighten or merge_bullets; the "
+        "consolidated bullets for merge_roles, most relevant first"
+    )
+    removed: list[str] = Field(
+        default_factory=list, description="Details left out because this job does not need them"
+    )
+    reason: str = Field(description="Why this reads better for this job")
+
+
+class CompressionProposal(CompressionCandidate):
+    """A checked compression awaiting the user's decision."""
+
+    id: str
+    heading: str = Field("", description="merge_roles: the merged entry's heading (code-built)")
+    status: Literal["pending", "applied", "rejected"] = "pending"
 
 
 class TailoringPlan(_Strict):
@@ -318,6 +373,11 @@ class TailoringPlan(_Strict):
         default_factory=list,
         description="Job keywords a CV bullet shows in other words, each with that bullet's "
         "exact words; code checks them before the term may be used",
+    )
+    compressions: list[CompressionCandidate] = Field(
+        default_factory=list,
+        description="Optimised mode only: overlapping bullets merged, long bullets tightened, "
+        "or similar roles merged, for the user to compare and apply",
     )
 
     @field_validator("bullet_order", mode="before")
@@ -507,6 +567,45 @@ class ProjectedFit(_Strict):
     impression: str = ""
 
 
+class TermCheck(_Strict):
+    """One job term the screening score looks for."""
+
+    term: str
+    weight: int = Field(1, description="How often the posting uses it (1 to 3)")
+    found: bool
+
+
+class ScreeningScore(_Strict):
+    """A deterministic screening (ATS) score of one CV's printed text (`cv/ats_score.py`)."""
+
+    score: int = Field(ge=0, le=100)
+    grade: str = Field(description="A (80+), B (65+), C (50+), D")
+    keywords: list[TermCheck] = Field(default_factory=list)
+    title: str = ""
+    title_match: float = Field(0, ge=0, le=1)
+    education: list[TermCheck] = Field(default_factory=list)
+    soft_skills: list[TermCheck] = Field(default_factory=list)
+    points: dict[str, float] = Field(default_factory=dict, description="Points per part")
+
+
+class Screening(_Strict):
+    """The original, the tailored CV and (optimised) the CV with every proposal confirmed,
+    scored the same deterministic way."""
+
+    before: ScreeningScore
+    after: ScreeningScore
+    if_confirmed: ScreeningScore | None = None
+
+
+class OriginalReading(_Strict):
+    """The original CV read once for a job (median of several reads) with the requirements
+    it was read against: every draft of that job is compared with this same baseline."""
+
+    text_key: str = Field(description="Hash of the original CV's text as read")
+    requirements: list[str] = Field(default_factory=list)
+    reading: FitReading
+
+
 class FitComparison(_Strict):
     """How clearly the tailored CV shows the fit, against the CV it was made from. The
     candidate's actual fit is the same (same facts); this measures what a reader sees."""
@@ -532,6 +631,9 @@ class FitComparison(_Strict):
     )
     if_confirmed: ProjectedFit | None = Field(
         None, description="Optimised draft: the same reading with its pending proposals in place"
+    )
+    baseline: OriginalReading | None = Field(
+        None, description="The original's reading this comparison used (kept per job)"
     )
 
 
@@ -578,11 +680,23 @@ class TailoredCV(_Strict):
         description="Unverified job techniques shown in red, outside the confirmed CV facts",
     )
     review_additions: list[ReviewAddition] = Field(default_factory=list)
+    compressions: list[CompressionProposal] = Field(
+        default_factory=list,
+        description="Optimised mode: shorter versions shown in red below the originals",
+    )
     term_bridges: list[TermBridge] = Field(
         default_factory=list,
         description="Job keywords used for what a CV bullet shows in its own words (checked)",
     )
     revision: str = Field("", description="What the score-driven revision did, if it ran")
+    screening: Screening | None = Field(
+        None, description="Deterministic screening (ATS) score before, after and if confirmed"
+    )
+    length_notes: list[str] = Field(
+        default_factory=list,
+        description="Standard mode: advice on lines that could be merged or tightened; never "
+        "applied by the app (the user edits them if they agree)",
+    )
     academic: bool = Field(False, description="Written for an academic post")
     fit_check: FitComparison | None = None
 

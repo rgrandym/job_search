@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import secrets
 from datetime import UTC, datetime
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Literal
 
@@ -22,11 +23,15 @@ from src.cv.models import (
     TailoredDocument,
     TailoringSettings,
 )
-from src.cv.tailor import keyword_coverage, revise_tailored
+from src.cv.proposals import MAX_ROLE_SKILLS, apply_compression, enriched
+from src.cv.tailor import keyword_coverage, literal_terms, revise_tailored, screen
 from src.jobs.models import JobPosting
+from src.services import declined
 from src.services.workspace import Workspace
+from src.tools.search_tools import extract_numbers
 
 DOCUMENT_ID = re.compile(r"[a-f0-9]{24}")
+SAME_LINE = 0.8  # a source CV line this similar to the draft's line is the same line
 
 
 ORIGINAL = "original"  # template name: a copy of the CV's own Word file
@@ -198,6 +203,7 @@ def _write_revision(
             revised.academic,
             revised.skills_to_confirm,
             revised.review_additions,
+            revised.compressions,
         )
     else:
         export_docx(
@@ -247,16 +253,16 @@ def review_addition(
     addition_id: str,
     decision: Literal["confirm", "delete"],
     text: str | None = None,
+    reason: str = "",
 ) -> TailoredDocument:
-    """Accept a user-confirmed fact into the CV the draft came from, or remove the question;
-    either way the draft's own Word file is rewritten."""
+    """Accept a user-confirmed fact into the CV the draft came from, or remove the question
+    (remembered for that CV, with the user's `reason`, so it is not proposed again); either
+    way the draft's own Word file is rewritten."""
     document = load(ws, document_id)
     addition = next((a for a in document.tailored.review_additions if a.id == addition_id), None)
     if addition is None or addition.status != "pending":
         raise ValueError("Pending review addition was not found")
-    wording = (text if text is not None else addition.text).strip()
-    if decision == "confirm" and (not wording or len(wording) > 400):
-        raise ValueError("Enter a concise, accurate skill or experience before confirming")
+    wording = _wording(addition, text) if decision == "confirm" else addition.text
     source = document.source_cv.model_copy(deep=True)
     revised = document.tailored.model_copy(deep=True)
     if decision == "confirm":
@@ -265,12 +271,9 @@ def review_addition(
         # the fact goes into the CV this draft came from, whichever CV is selected now
         with cv_service.working_on(ws, document.cv_id) as current:
             _confirm(ws, addition, wording, current, source, revised)
-        revised.fit_check = None  # the reviewed addition changes the evidence being scored
-        matched, missing = keyword_coverage(revised.cv, document.jd)
-        revised.matched_keywords = matched
-        revised.missing_keywords = missing
-        total = len(matched) + len(missing)
-        revised.keyword_coverage = len(matched) / total if total else 1.0
+        _refresh(revised, document)
+    else:
+        declined.record(ws, document.cv_id, addition, reason)
     revised.review_additions = [
         a.model_copy(
             update={"status": "confirmed" if decision == "confirm" else "deleted", "text": wording}
@@ -282,6 +285,35 @@ def review_addition(
     return _write_revision(ws, document, revised, source_cv=source)
 
 
+def _wording(addition: ReviewAddition, text: str | None) -> str:
+    """The confirmed wording: the user's edit, else the proposal as worded (for added words,
+    the bullet with them). A number question needs the line with its number."""
+    if addition.kind == "enrichment" and text is None:
+        wording = enriched(addition.original_text, addition.text)
+    else:
+        wording = (text if text is not None else addition.text).strip()
+    if not wording or len(wording) > 400:
+        raise ValueError("Enter a concise, accurate skill or experience before confirming")
+    if addition.kind == "metric" and not (
+        extract_numbers(wording) - extract_numbers(addition.original_text)
+    ):
+        raise ValueError("Write the line with its number before confirming")
+    return wording
+
+
+def _refresh(revised: TailoredCV, document: TailoredDocument) -> None:
+    """The draft's evidence changed: its keyword coverage and screening score again, and no
+    stale reading."""
+    jd = document.jd
+    revised.fit_check = None
+    revised.screening = screen(as_tailored(document), revised, jd, document.job_description)
+    matched, missing = keyword_coverage(revised.cv, jd)
+    revised.matched_keywords = matched
+    revised.missing_keywords = missing
+    total = len(matched) + len(missing)
+    revised.keyword_coverage = len(matched) / total if total else 1.0
+
+
 def _confirm(
     ws: Workspace,
     addition: ReviewAddition,
@@ -291,39 +323,161 @@ def _confirm(
     revised: TailoredCV,
 ) -> None:
     """Add the confirmed fact to the source CV (`current`, saved with its Word file), to the
-    draft's copy of it and to the draft."""
-    from src.cv.edits import CVEdit, apply_edits
-    from src.services import cv_document, cv_service
+    draft's copy of it and to the draft. A summary sentence or headline is this draft's
+    presentation only: it changes the draft, not the source CV."""
+    from src.services import cv_service
 
+    if addition.kind == "summary":
+        revised.cv.basics.summary = f"{revised.cv.basics.summary or ''} {wording}".strip()
+        return
+    if addition.kind == "headline":
+        revised.cv.basics.headline = wording
+        return
+    if addition.kind == "rewording":  # the job's terms for this draft; the source keeps its own
+        bullet = revised.cv.bullet_index().get(addition.anchor_id or "")
+        if bullet is None:
+            raise ValueError("The line is no longer in this draft")
+        bullet.text = wording
+        return
     if addition.kind == "experience":
-        role_id = addition.role_id or ""
-        if not any(r.id == role_id for r in current.experience):
-            raise ValueError("The source role is no longer in the CV this draft came from")
-        updated = apply_edits(current, [CVEdit(action="add_bullet", role_id=role_id, text=wording)])
-        created = next(
-            b for b in updated.bullet_index().values() if b.id not in current.bullet_index()
-        )
-        for cv in (source, revised.cv):
-            role = next((r for r in cv.experience if r.id == role_id), None)
-            if role is None:
-                raise ValueError("The proposed role is no longer in this draft")
-            role.bullets.append(created.model_copy(deep=True))
-        synced = cv_document.sync_bullets(ws, current, updated)
-        if synced.not_written:
-            raise ValueError("Could not place the confirmed experience in the source Word CV")
+        updated = _confirm_experience(ws, addition, wording, current, source, revised)
+    elif addition.kind in {"enrichment", "metric"}:
+        updated = _confirm_rewording(ws, addition, wording, current, source, revised)
     else:
-        if any(wording.casefold() == s.casefold() for s in current.all_skills()):
-            raise ValueError("This skill is already in the source CV")
-        updated = current.model_copy(deep=True)
-        for cv in (updated, source, revised.cv):
-            group = next((g for g in cv.skills if g.category == "Additional"), None)
-            if group is None:
-                cv.skills.append(SkillGroup(category="Additional", items=[wording]))
-            elif wording not in group.items:
-                group.items.append(wording)
-        cv_document.sync_confirmed_skill(ws, wording)
-        revised.role_skills = list(dict.fromkeys([*revised.role_skills, wording]))[:8]
+        updated = _confirm_skill(ws, addition, wording, current, source, revised)
     cv_service.save_selected_cv(ws, updated)
+
+
+def _confirm_experience(
+    ws: Workspace,
+    addition: ReviewAddition,
+    wording: str,
+    current: MasterCV,
+    source: MasterCV,
+    revised: TailoredCV,
+) -> MasterCV:
+    from src.cv.edits import CVEdit, apply_edits
+    from src.services import cv_document
+
+    role_id = addition.role_id or ""
+    if not any(r.id == role_id for r in current.experience):
+        raise ValueError("The source role is no longer in the CV this draft came from")
+    after = addition.anchor_id if addition.anchor_id in current.bullet_index() else None
+    edit = CVEdit(action="add_bullet", role_id=role_id, text=wording, after=after)
+    updated = apply_edits(current, [edit])
+    created = next(b for b in updated.bullet_index().values() if b.id not in current.bullet_index())
+    for cv in (source, revised.cv):
+        role = next((r for r in cv.experience if r.id == role_id), None)
+        if role is None:
+            raise ValueError("The proposed role is no longer in this draft")
+        index = next((i for i, b in enumerate(role.bullets) if b.id == addition.anchor_id), None)
+        position = len(role.bullets) if index is None else index + 1
+        role.bullets.insert(position, created.model_copy(deep=True))
+    synced = cv_document.sync_bullets(ws, current, updated)
+    if synced.not_written:
+        raise ValueError("Could not place the confirmed experience in the source Word CV")
+    return updated
+
+
+def _confirm_rewording(
+    ws: Workspace,
+    addition: ReviewAddition,
+    wording: str,
+    current: MasterCV,
+    source: MasterCV,
+    revised: TailoredCV,
+) -> MasterCV:
+    """Words or a number confirmed for an existing bullet: the bullet is reworded."""
+    from src.cv.edits import CVEdit, apply_edits
+    from src.services import cv_document
+
+    target = _same_bullet(current, addition.anchor_id or "", addition.original_text)
+    if target is None:
+        raise ValueError("The line is no longer in the CV this draft came from")
+    updated = apply_edits(current, [CVEdit(action="edit_bullet", bullet_id=target, text=wording)])
+    for cv in (source, revised.cv):
+        bullet = cv.bullet_index().get(addition.anchor_id or "")
+        if bullet is not None:
+            bullet.text = wording
+    synced = cv_document.sync_bullets(ws, current, updated)
+    if synced.not_written:
+        raise ValueError("Could not reword the line in the source Word CV")
+    return updated
+
+
+def _same_bullet(cv: MasterCV, bullet_id: str, text: str) -> str | None:
+    """The bullet in `cv` that a draft's bullet came from: the same id, else the same line."""
+    if bullet_id in cv.bullet_index():
+        return bullet_id
+    scored = [
+        (SequenceMatcher(None, b.text.casefold(), text.casefold()).ratio(), b.id)
+        for b in cv.bullet_index().values()
+    ]
+    best = max(scored, default=(0.0, None))
+    return best[1] if best[0] >= SAME_LINE else None
+
+
+def _confirm_skill(
+    ws: Workspace,
+    addition: ReviewAddition,
+    wording: str,
+    current: MasterCV,
+    source: MasterCV,
+    revised: TailoredCV,
+) -> MasterCV:
+    from src.services import cv_document
+
+    if any(wording.casefold() == s.casefold() for s in current.all_skills()):
+        raise ValueError("This skill is already in the source CV")
+    updated = current.model_copy(deep=True)
+    for cv in (updated, source, revised.cv):
+        category = addition.skill_group or "Additional"
+        if not any(g.category == category for g in cv.skills):
+            category = "Additional"
+        group = next((g for g in cv.skills if g.category == category), None)
+        if group is None:
+            cv.skills.append(SkillGroup(category=category, items=[wording]))
+        elif wording not in group.items:
+            group.items.append(wording)
+    cv_document.sync_confirmed_skill(ws, wording)
+    revised.role_skills = list(dict.fromkeys([*revised.role_skills, wording]))[:MAX_ROLE_SKILLS]
+    return updated
+
+
+def review_compression(
+    ws: Workspace,
+    document_id: str,
+    compression_id: str,
+    decision: Literal["apply", "reject"],
+) -> TailoredDocument:
+    """The user's choice on a compressed version: applied, it replaces its lines in this
+    draft (never in the source CV); rejected, the red version goes. Either way the draft's
+    own Word file is rewritten. The app never applies one by itself."""
+    document = load(ws, document_id)
+    item = next((c for c in document.tailored.compressions if c.id == compression_id), None)
+    if item is None or item.status != "pending":
+        raise ValueError("Pending compressed version was not found")
+    revised = document.tailored.model_copy(deep=True)
+    if decision == "apply":
+        revised.cv = apply_compression(revised.cv, item)
+        _refresh(revised, document)
+    status = "applied" if decision == "apply" else "rejected"
+    revised.compressions = [
+        c.model_copy(update={"status": status}) if c.id == compression_id else c
+        for c in revised.compressions
+    ]
+    return _write_revision(ws, document, revised)
+
+
+def with_screening(document: TailoredDocument) -> TailoredCV:
+    """The draft with its screening score: as saved, or for a draft saved before the score
+    existed, computed now (code only, no model; the same every time)."""
+    tailored = document.tailored
+    if tailored.screening is not None or document.imported or not document.job_description:
+        return tailored
+    jd = literal_terms(document.jd, document.job_description)
+    screening = screen(as_tailored(document), tailored, jd, document.job_description)
+    return tailored.model_copy(update={"screening": screening})
 
 
 def as_tailored(document: TailoredDocument) -> MasterCV:
@@ -331,15 +485,18 @@ def as_tailored(document: TailoredDocument) -> MasterCV:
     were added to it. This is the CV the search scored, so comparisons keep it as the original."""
     cv = document.source_cv.model_copy(deep=True)
     for item in document.tailored.review_additions:
-        if item.status != "confirmed":
+        if item.status != "confirmed" or item.kind in {"summary", "headline", "rewording"}:
             continue
         if item.kind == "experience":
             for role in cv.experience:
                 if role.id == item.role_id:
                     role.bullets = [b for b in role.bullets if b.text != item.text]
+        elif item.kind in {"enrichment", "metric"}:
+            bullet = cv.bullet_index().get(item.anchor_id or "")
+            if bullet is not None and item.original_text:
+                bullet.text = item.original_text
         else:
             for group in cv.skills:
-                if group.category == "Additional":
-                    group.items = [s for s in group.items if s != item.text]
-            cv.skills = [g for g in cv.skills if g.items or g.category != "Additional"]
+                group.items = [s for s in group.items if s != item.text]
+            cv.skills = [g for g in cv.skills if g.items]
     return cv

@@ -14,7 +14,9 @@ Turns a factual **Master CV** into job-specific, ATS-optimised CVs and exports t
 | `src/cv/master_cv_manager.py` | load / save / validate / import / merge-patch the Master CV |
 | `src/cv/tailor.py` | JD analysis → tailoring plan (LLM: requirement map, positioning, wording) → guarded application (deterministic); standard mode has a review and at most one revision, optimised mode revises only rejected wording |
 | `src/cv/fit_check.py` | Before/after: the original and the tailored CV read for the job (`compare_fit`); several versions side by side (`score_versions`) |
-| `src/cv/claims.py` | Shared wording checks: stock superlatives, added ownership or scope (`escalation`) |
+| `src/cv/claims.py` | Shared wording checks: stock superlatives, added corporate jargon (`jargon`), added third person (`third_person`), added ownership or scope (`escalation`) |
+| `src/cv/proposals.py` | Optimised mode's red layer: checks for proposals (`check_additions`) and compressed versions (`check_compressions`, `apply_compression`) |
+| `src/services/declined.py` | Red proposals the user deleted, remembered per CV and never proposed again |
 | `src/cv/cover_letter.py` | Cover-letter draft (LLM) → guarded paragraphs (deterministic) → hiring-manager review → one guarded redraft |
 | `src/services/tailored_documents.py` | Saved tailored drafts, guarded edits and Word versions |
 | `src/services/cv_versions.py` | A job's tailored versions compared with one original from the CV library (the Master or selected CV, or one the user picks; never a deleted CV), ranked and saved |
@@ -115,7 +117,8 @@ These hold for every tailored CV (user's decision; mandatory):
    version exists (`TailoredCV.document_notes` says which).
 2. **The CV keeps its own headline; publications are never edited.** One line is added under
    the summary, in its formatting: "Relevant skills for this role: a · b · c" (`role_skills`,
-   up to 8, only skills the CV itself names; user's decision 2026-10-10). For an
+   10 to 12, related ones together, only skills a bullet or project shows in use; user's
+   decisions 2026-10-10 and 2026-10-14). For an
    **academic** post (`audience`: "academic", or "auto" when the analysis says the job is one)
    whole sections move into the academic order (profile, education, experience,
    publications, grants, awards, talks, teaching, service, skills, ...;
@@ -158,26 +161,67 @@ These hold for every tailored CV (user's decision; mandatory):
 
 ## 3a. Rewrite bullets as STAR accomplishments, without hallucinating
 
-**Optimised draft mode (`mode="optimised"`).** The same guarded plan leads with the few
-pivotal job capabilities and strongest evidenced outcomes, and answers with confirmed facts the
-doubts a hiring manager would have (setting, level, ownership, recency). In that same model
-call, `review_candidates` proposes up to five plausible omissions, ordered by how much they
-would change the interview decision, inferred from what each role's documented work routinely
-involves: an experience
-bullet attached to an existing role where its background quote appears (setting and partners,
-the contribution the role makes plausible), or a skill the job depends on. Wording uses the
-posting's terms where accurate, but never trades accuracy for a keyword; each `reason` names
-the doubt it settles. Every proposal also quotes the
-posting, carries the relevant requirement and a reason, and is checked against both texts.
-The factual guards can trigger one focused model revision of rejected wording. For each key
-or essential requirement the CV does not directly show and each missing job keyword, the
-writer infers what the role's documented work realistically involved and proposes it in red;
-when none of its proposals for open gaps survives the checks, one hiring-manager pass
-(`propose_review_additions`) proposes them. Each request saves one Word version.
-It remains separate from `TailoredCV.cv` and prints in red with `[CONFIRM ... BEFORE USE]`.
-The user reviews each in the app: delete, or edit and explicitly confirm. Confirmation adds
-the corrected fact to the selected source CV and rewrites the draft's Word file; pending text
-never contributes to the draft's own score, keyword coverage, or cover letters. The fit
+**Optimised draft mode (`mode="optimised"`, user's decision 2026-10-14).** Its goal is a
+screening score as close to the top as the profile credibly allows; the user approves every
+red line before applying. The same guarded plan leads with the few pivotal job capabilities
+and strongest evidenced outcomes, and answers with confirmed facts the doubts a hiring manager
+would have (setting, level, ownership, recency). In that same model call, `review_candidates`
+proposes what the candidate very probably did but the CV does not say (experienced
+professionals routinely leave out techniques, documents, standards and partners), ordered by
+how much it would change the interview decision. Inference may draw on a role's bullets,
+title, employer and sector, its length, the education, the stored profile and the user's
+other parsed CVs (`<other_cvs>`, `cv_service.library_background`; never parsed for this).
+Kinds, each placed where a reader expects it (`proposals.check_additions`):
+- `rewording` (the main way to bring the job's terms in): an existing bullet rewritten in the
+  posting's terms for the same work, in red on the line below it ("[CONFIRM REWORDED LINE
+  BEFORE USE: replaces the line above]"); it keeps every number of the line. A factual rewrite
+  rejected for a job skill or term the line does not name, or for more ownership or reach,
+  becomes one (`proposals.rewordings`); one that adds or drops numbers never does. Confirming
+  replaces the line in that draft only; the source CV keeps its own wording.
+- `enrichment`: words added inside an existing bullet (`anchor_id`), in red at its end
+  (" [CONFIRM: using qPCR and flow cytometry]"); the background quote is from that bullet.
+- `experience`: a new bullet, in red after the bullet it relates to (`anchor_id`), in its role;
+  the quote is from that role (bullets, title, employer) or the other CVs.
+- `metric`: a question for a number a key bullet lacks (" [CONFIRM: how many assays?]");
+  confirming needs the line with its real number; never a figure from the model.
+- `skill`: in red at the end of its own skills category line (`skill_group`), else under the
+  profile.
+- `summary` (at most one sentence) and `headline` (at most one; never above the level held).
+At most 20 proposals, at most 5 per role, at most 5 number questions. Code checks both quotes,
+the anchor, that no number the source lacks and no jargon is added, and drops anything the
+user deleted before for this CV (`services/declined.py`; similar wording counts as the same).
+Wording uses the posting's terms where accurate, once, never trading accuracy for a keyword;
+each `reason` names the doubt it settles and what the user must check.
+The factual guards can trigger one focused model revision of rejected wording. When open key
+or essential requirements or missing job keywords remain that no proposal addresses, one
+hiring-manager pass (`ask_additions`) proposes for them. While the screening score with every
+proposal confirmed stays under grade A (`TARGET_ATS` = 80), up to `MAX_TARGET_PASSES` = 2
+more passes aim at the job terms, title and requirements still missing; code scores each and
+keeps it only when it scores better (`_toward_target`); the model reads the draft once, after. Proposals the reader credits with nothing (and that
+name no missing job term) are dropped once the reader credited some proposal; the rest are
+ranked by what they gain (`rank_additions`). Each request saves one Word version.
+Proposals remain separate from `TailoredCV.cv` and print in red with `[CONFIRM ...]`.
+The user reviews each in the app: delete (optionally with a reason, remembered), or edit and
+explicitly confirm. Confirmation adds the corrected fact to the selected source CV (added
+words and numbers reword that bullet there; a summary sentence or headline changes this draft
+only) and rewrites the draft's Word file; pending text never contributes to the draft's own
+score, keyword coverage (the ATS read-back strips red lines and red words inside a line), or
+cover letters.
+
+**Compressed versions (optimised mode, user's decision 2026-10-14).** The plan may also
+return `compressions`: `tighten` (one long bullet without details this job does not need),
+`merge_bullets` (two or more overlapping bullets of one role as one) or `merge_roles` (similar
+consecutive roles, same level and a shared title word, e.g. several postdocs, as one entry).
+Code (`proposals.check_compressions`) keeps one only if every number and job term of its
+sources stays, nothing they do not show is added (numbers, skills, ownership, jargon), a
+tightened line is shorter and a merged entry has fewer bullets; it builds a merged entry's
+heading itself, keeping every institution with its own dates ("Postdoctoral Research Fellow,
+University A (Jan 2010 – Jun 2014); Institute B (Jul 2014 – Aug 2017)"). A compression is
+written in red below the lines it would replace, which stay as they are: the app never
+removes them. The user compares and chooses: "Use the shorter version"
+(`tailored_documents.review_compression`, apply) replaces them in that draft only (a merged
+entry in the Word file in its own formatting, the roles' entries removed); "Keep my lines"
+removes the red version. The source CV is never changed. The fit
 check (and the version comparison) reads the draft again with every pending proposal in place,
 in the same blind pass, and reports it apart as hypothetical (`FitComparison.if_confirmed`,
 `VersionReading.if_confirmed`: `fit_check.with_proposals`, `project`, `with_keywords`): the
@@ -245,6 +289,18 @@ Omitting bullets only under rule 4 above.
 - Using the job's own wording for a requirement (soft skills, short must-haves that are not
   hard skills) in a bullet the requirement map does not list as evidence for it
   (`_wording_reason`). This keeps reframing for an adjacent function tied to the line.
+- Adding corporate jargon the source does not use (`claims.jargon`: "passionate",
+  "results-driven", "leveraged", "utilised", "robust", "seamless", "fostering", "pivotal",
+  "synergy", ...). Plain, current wording: one sentence of about 30 words where the source
+  allows, no trailing "..., ensuring X" clauses.
+- Writing about the candidate in the third person (`claims.third_person`, user's decision
+  2026-10-14): the CV speaks as the user, with bullets in the implied first person and the summary
+  with "I" (or without a pronoun when the CV's own summary has none). "The candidate", "she",
+  "his" or the user's name, when the source line does not use them, are rejected.
+- Bringing one job term into more than two bullets (`_limit_repetition`, user's decision
+  2026-10-14): screening software only checks that a term is there, and a person reads
+  repetition as stuffing. The rewrites beyond the two most relevant lines are undone and
+  recorded.
 
 Rejected rewrites keep the original bullet. Every decision is logged in `TailoredCV.changes`
 (`accepted`, `reason`). **Report rejected rewrites and `missing_keywords` to the user.** A
@@ -255,9 +311,12 @@ Also produced, and guarded the same way (recorded in `changes` as `summary`):
 - Headline suggestions (rule 2), and a user's own headline edit to a saved draft, are rejected
   if they claim a seniority above any title held, a role the CV does not show (role words of the
   title part, before a comma, "|" or dash), or skills or numbers the CV lacks.
-- `summary` (3–4 substantive sentences): lead with evidence relevant to the job, then retain
-  distinctive relevant breadth from the Master CV, such as leadership, hands-on practice or
-  adjacent experience. Numbers and skills must exist somewhere in the CV. The tailoring request
+- `summary` (three sentences; user's decision 2026-10-14): who the candidate is for this job
+  with their years of experience (computed by code from the role dates,
+  `tailor.career_years`: the only number a summary or headline may add), the strongest
+  relevant achievement from a bullet, and what they bring to this team (distinctive relevant
+  breadth: leadership, hands-on practice, adjacent experience). Other numbers and skills must
+  exist somewhere in the CV. A summary with several paragraphs keeps their number. The tailoring request
   may emphasise leadership or hands-on work and use a more senior or junior presentation;
   these choices never change the candidate's evidenced level or permit new claims.
 - `bullet_order`: a list of `{experience_id, bullet_ids}` for every role (a list, because
@@ -281,14 +340,18 @@ changes. The relevant-skills line leads with the job's keywords: the plan's keyw
 paired term no printed line names, then keywords the CV names only further down
 (`_job_terms_on_top`). Pairings are listed in the report for the user to check.
 
-**Score-driven revision** (`tailor(..., check=...)`, both modes; `cv_service` passes the fit
-check). After the draft is written, the fit check reads it beside the original. Unless it
-clearly reads better (fit +5, or a requirement gained with ATS match +10) or the original
-already reads 85+, `reader_feedback` lists what the reading missed (requirements not shown
-with the evidence the map cites, job keywords not printed, the top-of-CV impression, what
-reads worse) and `revise_for_reader` makes one revised plan, applied under the same guards
-and read again; the draft that reads better (fit, then ATS match, then requirements) is kept
-and `TailoredCV.revision` says what happened.
+**Length advice** (standard mode, user's decision 2026-10-14): `tailor.length_notes` lists
+bullets over 35 words, bullets of one role that describe overlapping work, and roles that
+ended over 10 years ago with more than 4 bullets (`TailoredCV.length_notes`, shown under the
+job). Advice only: nothing is changed; the user edits the lines if they agree.
+
+**Score-driven revision** (`tailor(..., check=...)`, both modes; `cv_service` passes the
+check). The draft is scored (screening score, code); under grade A, `reader_feedback` lists
+what the score found missing (job keywords not printed, in standard mode only while fewer
+than 80% are, `KEYWORDS_ENOUGH`: the right keywords, not more; the job title; the key
+requirements the CV evidences) and `revise_for_reader` makes one revised plan, applied under
+the same guards and scored again; the better-scoring draft is kept and `TailoredCV.revision`
+says what happened. The model's reading (`check`) runs once, at the end.
 
 **Review and revision** (`tailor(..., review=True)`, the default): a second, fresh reader
 (`critique_cv`, `CVCritique`), as hiring manager and recruiter, lists JD requirements a Master
@@ -330,9 +393,23 @@ keywords, so the UI can compare like with like; neither value changes the job ma
 
 ## 3b. Before/after fit check (runs on every tailored CV)
 
-`FitComparison.ats_before/ats_after` (and `ProjectedFit.ats_confirmed/ats_projected`) is the
-ATS match: the mean of keyword coverage and the share of requirements a checked reading found
-shown (`fit_check.ats_match`), shown beside the fit score.
+**Screening score** (`TailoredCV.screening`, `cv/ats_score.py`, `tailor.screen`; user's
+decision 2026-10-14). Deterministic: code scores the printed text, so the same CV and job
+always give the same number; no model is involved. Built the way ATS match rates are
+(employers' own systems are not public): job keywords in the posting's own words
+(`tailor.literal_terms`), each weighted by how often the posting uses it (1 to 3): 65 points;
+the job title (before any comma or dash) in the CV: 15 (the share of its words in the
+headline and role titles at half value otherwise); degrees the posting names: 10; its soft
+skills: 10. A part the posting does not ask for is left out and the rest scaled to 100.
+Terms match as an ATS search does (`ats_score.Text.has`): case, plural or singular, hyphens
+and slashes ignored ("post-doctoral" = "postdoctoral"). Grades: A 80+, B 65+, C 50+, D.
+It is scored for the original, the tailored CV and (optimised) the CV with every red
+proposal confirmed, with the keywords found and still missing; it is shown first and is what
+tailoring aims at. It is scored again when a proposal is confirmed or a compressed version
+applied. `FitComparison` (the model's reading: requirements shown and the search-anchored fit)
+is shown second as the AI screen. A tailoring's reading is one call (`TAILOR_READS` = 1),
+made once at the end; the original is read once per job and kept with its requirements
+(`OriginalReading`, `data/fit_baselines.json`, `cv_service.load_baseline`).
 
 `fit_check.compare_fit(source, tailored, jd, jd_text, llm) -> FitComparison`, run by
 `cv_service.tailor_to_job` after the revision (user's decision 2026-10-10: always on). Code
@@ -503,4 +580,9 @@ tailored export and returned as `TailoredCV.ats`): reads the file's text as a pa
 and reports contact details not readable as plain text, keyword coverage of the exported
 text (case-insensitive), an estimated page count (500 words a page; reported, never a warning:
 the user prefers a full-length CV), tables, and contact details
-placed in the page header.
+placed in the page header. Layout warnings (`ats.layout_warnings`, user's decision 2026-10-14;
+warnings only, the design stays the user's): two or more columns (parsers read straight
+across), contact details in the footer, text boxes and images (their text is not read), roles
+with no year next to them (systems count years of experience from the dates), no standard
+Experience or Education heading, and unusual fonts. The fit score is shown with an A–D grade
+and labelled as the app's estimate, not an employer's number.

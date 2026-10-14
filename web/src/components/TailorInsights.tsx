@@ -1,4 +1,4 @@
-import type { FitComparison, MatchClass, Positioning, ProjectedFit, RequirementEvidence } from "../lib/types";
+import type { FitComparison, MatchClass, Positioning, ProjectedFit, RequirementEvidence, Screening, ScreeningScore } from "../lib/types";
 import { cn } from "../lib/utils";
 
 const DIMENSION_LABEL: Record<string, string> = {
@@ -19,6 +19,12 @@ const MATCH_LABEL: Record<MatchClass, [string, string]> = {
 
 const pct = (v: number) => `${Math.round(v * 100)}%`;
 
+/** The score as an A–D grade, the way some screening systems (Workday HiredScore) grade
+ * applicants. The app's own estimate, not any employer's number. */
+export function grade(score: number): string {
+  return score >= 80 ? "A" : score >= 65 ? "B" : score >= 50 ? "C" : "D";
+}
+
 function Change({ before, after, text }: { before: number; after: number; text?: string }) {
   const tone = after > before ? "text-good" : after < before ? "text-warn" : "text-muted";
   return <span className={tone}>{text ?? `${before} → ${after}`}</span>;
@@ -26,26 +32,59 @@ function Change({ before, after, text }: { before: number; after: number; text?:
 
 /** One line under the job: how much better the tailored CV shows the fit. */
 export function FitCheckSummary({ check, capReason }: { check: FitComparison | null | undefined; capReason?: string | null }) {
-  if (!check) return <span className="text-faint">Before/after fit check not available for this draft</span>;
+  if (!check) return <span className="text-faint">AI screen reading not available for this draft</span>;
   return (
-    <span className="text-muted" title="Both CVs read for this job by a recruiter model that does not know which is which. Your actual fit is the same (same facts); this measures how clearly each CV shows it.">
-      {check.search_anchored ? "Search fit, adjusted for CV evidence" : "CV evidence shown"}: <Change before={check.before} after={check.after} text={`${check.before} → ${check.after}`} />/100
+    <span className="text-muted" title="AI screen: a model reads the original and this CV for the job without knowing which is which. It changes a little from one reading to another; the screening score above is the deterministic one.">
+      AI screen:
       {check.requirements_total > 0 && (
         <>
-          {" · requirements shown "}
+          {" requirements shown "}
           <Change before={check.requirements_before} after={check.requirements_after} text={`${check.requirements_before} → ${check.requirements_after} of ${check.requirements_total}`} />
+          {" ·"}
         </>
       )}
-      {check.ats_before != null && check.ats_after != null && (
-        <span title="ATS match: the share of the job's keywords the CV contains and of its requirements a checked reading found shown, as screening software scores it">
-          {" · ATS match "}
-          <Change before={check.ats_before} after={check.ats_after} text={`${check.ats_before} → ${check.ats_after}`} />
-        </span>
-      )}
+      <span title="The search score, moved only when the reader rates function, domain, seniority, leadership or sector a whole step differently. Wording rarely changes these; new confirmed experience can.">
+        {" fit for the role "}
+        <Change before={check.before} after={check.after} text={`${check.before} → ${check.after}`} />
+      </span>
       {capReason && check.after === check.before && (
         <span className="text-warn"> · search score limit still applies</span>
       )}
     </span>
+  );
+}
+
+const PART_LABEL: Record<string, string> = {
+  keywords: "job keywords",
+  title: "job title",
+  education: "degree",
+  soft_skills: "soft skills",
+};
+
+/** The deterministic screening (ATS) score: original → tailored → with every red proposal
+ * confirmed, and what it found and missed. */
+export function ScreeningSummary({ screening }: { screening: Screening | null | undefined }) {
+  if (!screening) return <span className="text-faint">Screening score not available for this draft (tailor again)</span>;
+  const { before, after, if_confirmed: confirmed } = screening;
+  const best = confirmed ?? after;
+  const missing = best.keywords.filter((k) => !k.found).map((k) => k.term);
+  const found = (s: ScreeningScore) => `${s.keywords.filter((k) => k.found).length}/${s.keywords.length}`;
+  return (
+    <div className="basis-full space-y-0.5 text-[12px]" title="Deterministic: computed by code from the CV's text, so the same CV and job always give the same score. Built like ATS match rates (keywords in the posting's own words, weighted by how often it uses them; the job title; degrees; soft skills); employers' own systems are not public. Grade A is 80 or more.">
+      <p>
+        <span className="font-medium">Screening score (ATS): </span>
+        <span className="text-muted">original </span><b>{before.score}</b> <span className="text-muted">({before.grade})</span>
+        {" → tailored "}<Change before={before.score} after={after.score} text={`${after.score} (${after.grade})`} />
+        {confirmed && <>{" → if you confirm the red proposals "}<Change before={after.score} after={confirmed.score} text={`${confirmed.score} (${confirmed.grade})`} /></>}
+      </p>
+      <p className="text-[11px] text-muted">
+        Keywords found {found(before)} → {found(after)}{confirmed ? ` → ${found(confirmed)}` : ""}
+        {after.title && ` · job title "${after.title}": ${after.title_match >= 1 ? "in the CV" : after.title_match > 0 ? "partly" : "missing"}`}
+        {after.education.length > 0 && ` · degree ${after.education.every((e) => e.found) ? "found" : "missing"}`}
+        {` · points: ${Object.entries(best.points).map(([k, v]) => `${PART_LABEL[k] ?? k} ${Math.round(v)}`).join(", ")}`}
+      </p>
+      {missing.length > 0 && <p className="text-[11px] text-faint">Still missing{confirmed ? " even with the proposals" : ""}: {missing.join(", ")}</p>}
+    </div>
   );
 }
 
@@ -59,13 +98,15 @@ export function IfConfirmed({ projection, labels }: { projection: ProjectedFit; 
     <div className="basis-full space-y-0.5 rounded border border-warn/40 p-2 text-[11px]" title="The same blind reader read this draft as it is and with every pending proposal in place, in one pass. The proposals are not confirmed facts.">
       <p className="text-muted">
         <span className="font-medium text-warn">If you confirm the {p.proposals} red proposal{p.proposals === 1 ? "" : "s"} (hypothetical): </span>
-        <Change before={p.confirmed} after={p.projected} text={`${p.confirmed} → ${p.projected}`} />/100
         {p.ats_confirmed != null && p.ats_projected != null && (
-          <>
-            {" · ATS match "}
-            <Change before={p.ats_confirmed} after={p.ats_projected} text={`${p.ats_confirmed} → ${p.ats_projected}`} />
-          </>
+          <span className="font-medium">
+            {"screening match (ATS) "}
+            <Change before={p.ats_confirmed} after={p.ats_projected} text={`${p.ats_confirmed} → ${p.ats_projected}`} />/100
+            {" "}<Change before={p.ats_confirmed} after={p.ats_projected} text={`grade ${grade(p.ats_confirmed)} → ${grade(p.ats_projected)}`} />
+          </span>
         )}
+        {" · fit for the role "}
+        <Change before={p.confirmed} after={p.projected} text={`${p.confirmed} → ${p.projected}`} />
         {p.requirements_total > 0 && (
           <>
             {" · requirements shown "}

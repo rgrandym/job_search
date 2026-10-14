@@ -322,6 +322,7 @@ class CVAdditionDecision(BaseModel):
     addition_id: str
     decision: Literal["confirm", "delete"]
     text: str | None = Field(None, description="Corrected wording when confirming a true fact")
+    reason: str = Field("", description="Deleting: the user's reason, remembered for this CV")
 
 
 @tool(
@@ -333,7 +334,7 @@ async def review_cv_addition(args: CVAdditionDecision, ctx: AgentContext) -> dic
     from src.services import tailored_documents
 
     document = tailored_documents.review_addition(
-        ctx.ws, args.document_id, args.addition_id, args.decision, args.text
+        ctx.ws, args.document_id, args.addition_id, args.decision, args.text, args.reason
     )
     await ctx.emit("documents_updated", {"job_id": document.job_id})
     return {
@@ -341,6 +342,28 @@ async def review_cv_addition(args: CVAdditionDecision, ctx: AgentContext) -> dic
         "reviewed": document.reviewed,
         "download_url": f"/api/files/cvs/{document.filename}",
     }
+
+
+class CVCompressionDecision(BaseModel):
+    document_id: str
+    compression_id: str
+    decision: Literal["apply", "reject"]
+
+
+@tool(
+    "review_cv_compression",
+    "Apply a red compressed version of a tailored CV's lines (only on the user's explicit "
+    "instruction; it replaces the original lines in that draft) or reject it.",
+    CVCompressionDecision,
+)
+async def review_cv_compression(args: CVCompressionDecision, ctx: AgentContext) -> dict[str, Any]:
+    from src.services import tailored_documents
+
+    document = tailored_documents.review_compression(
+        ctx.ws, args.document_id, args.compression_id, args.decision
+    )
+    await ctx.emit("documents_updated", {"job_id": document.job_id})
+    return {"document_id": document.id, "download_url": f"/api/files/cvs/{document.filename}"}
 
 
 @tool("edit_tailored_cv", "Revise a tailored CV draft with source-fact guards.", TailoredEdit)

@@ -957,10 +957,13 @@ def _tailor_report(tailored: TailoredCV, document_id: str | None, url: str) -> d
         "role_skills": tailored.role_skills,
         "skills_to_confirm": tailored.skills_to_confirm,
         "review_additions": tailored.review_additions,
+        "compressions": tailored.compressions,
+        "length_notes": tailored.length_notes,
         "term_bridges": tailored.term_bridges,
         "revision": tailored.revision,
         "academic": tailored.academic,
         "fit_check": tailored.fit_check,
+        "screening": tailored.screening,
         "rejected": sum(not c.accepted for c in tailored.changes),
         "rejections": [
             {"source_id": c.source_id, "reason": c.reason}
@@ -986,7 +989,8 @@ def _tailored_view(
         if (cvs_dir / document.filename).exists()
         else get_workspace().output_dir / document.filename
     )
-    report = None if document.imported else _tailor_report(document.tailored, document.id, url)
+    tailored = tailored_documents.with_screening(document)
+    report = None if document.imported else _tailor_report(tailored, document.id, url)
     return {
         "id": document.id,
         "job_id": document.job_id,
@@ -1110,6 +1114,7 @@ def edit_tailored_cv(document_id: str, edits: TailoredCVEdits) -> dict[str, Any]
 class ReviewAdditionRequest(BaseModel):
     decision: Literal["confirm", "delete"]
     text: str | None = None
+    reason: str = ""
 
 
 @app.put("/api/tailored-cvs/{document_id}/additions/{addition_id}")
@@ -1118,7 +1123,24 @@ def review_cv_addition(
 ) -> dict[str, Any]:
     try:
         document = tailored_documents.review_addition(
-            get_workspace(), document_id, addition_id, body.decision, body.text
+            get_workspace(), document_id, addition_id, body.decision, body.text, body.reason
+        )
+        return _tailored_view(document)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+class ReviewCompressionRequest(BaseModel):
+    decision: Literal["apply", "reject"]
+
+
+@app.put("/api/tailored-cvs/{document_id}/compressions/{compression_id}")
+def review_cv_compression(
+    document_id: str, compression_id: str, body: ReviewCompressionRequest
+) -> dict[str, Any]:
+    try:
+        document = tailored_documents.review_compression(
+            get_workspace(), document_id, compression_id, body.decision
         )
         return _tailored_view(document)
     except ValueError as exc:

@@ -569,16 +569,38 @@ export interface TailoredCVView {
   report: TailorReport | null;
 }
 
+/** A red proposal of an optimised CV (backend `ReviewAddition`). enrichment: words added inside
+ * the bullet `anchor_id`; rewording: that bullet in the job's terms; metric: a question for that bullet's number; experience: a new
+ * bullet after it; skill: into `skill_group`; summary: one sentence; headline: one option. */
 export interface ReviewAddition {
   id: string;
-  kind: "skill" | "experience";
+  kind: "skill" | "experience" | "enrichment" | "rewording" | "metric" | "summary" | "headline";
   text: string;
   role_id: string | null;
+  anchor_id?: string | null;
+  skill_group?: string | null;
   requirement: string;
   background_quote: string;
   job_quote: string;
   reason: string;
   status: "pending" | "confirmed" | "deleted";
+  /** enrichment, metric: the bullet as it was. */
+  original_text?: string;
+}
+
+/** A shorter version of lines, shown in red below them; only the user applies it (backend
+ * `CompressionProposal`). */
+export interface CompressionProposal {
+  id: string;
+  kind: "tighten" | "merge_bullets" | "merge_roles";
+  role_ids: string[];
+  source_ids: string[];
+  bullets: string[];
+  removed: string[];
+  reason: string;
+  /** merge_roles: the merged entry's heading, every institution with its dates. */
+  heading: string;
+  status: "pending" | "applied" | "rejected";
 }
 
 export type MatchClass = "direct" | "transferable" | "adjacent" | "needs_confirmation" | "not_evidenced";
@@ -757,6 +779,32 @@ export interface VersionComparison {
 }
 
 /** What tailoring did, shown under the job: coverage, keywords, headlines, rejections. */
+/** One job term the deterministic screening score looks for (backend `TermCheck`). */
+export interface TermCheck {
+  term: string;
+  weight: number;
+  found: boolean;
+}
+
+/** A deterministic screening (ATS) score of one CV's text (backend `ScreeningScore`). */
+export interface ScreeningScore {
+  score: number;
+  grade: string;
+  keywords: TermCheck[];
+  title: string;
+  title_match: number;
+  education: TermCheck[];
+  soft_skills: TermCheck[];
+  points: Record<string, number>;
+}
+
+/** The original, the tailored CV and, with red proposals, the CV with all confirmed. */
+export interface Screening {
+  before: ScreeningScore;
+  after: ScreeningScore;
+  if_confirmed: ScreeningScore | null;
+}
+
 export interface TailorReport {
   document_id: string;
   headline: string | null;
@@ -776,11 +824,15 @@ export interface TailorReport {
   role_skills?: string[];
   skills_to_confirm?: { skill: string; background_quote: string; reason: string }[];
   review_additions?: ReviewAddition[];
+  compressions?: CompressionProposal[];
+  /** Standard mode: lines that could be merged or tightened (advice; nothing is changed). */
+  length_notes?: string[];
   term_bridges?: TermBridge[];
   /** What the score-driven revision did, if it ran. */
   revision?: string;
   academic?: boolean;
   fit_check?: FitComparison | null;
+  screening?: Screening | null;
   rejected: number;
   rejections: { source_id: string; reason: string | null }[];
 }

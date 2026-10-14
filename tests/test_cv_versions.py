@@ -702,7 +702,7 @@ def test_pending_proposals_are_scored_separately_as_if_confirmed(master_cv: Mast
     tailored.review_additions = [HANDOVER]
     llm = FakeLLM({EvidencedReadings: _proposal_reader})
     check = compare_fit(master_cv, tailored, JD, "MLOps and Python", llm)
-    assert len(llm.calls) == 1
+    assert len(llm.calls) == 1  # a tailoring's check is one read
     assert HANDOVER.text not in printed_text(tailored)  # the factual draft is unchanged
     assert check.after == check.before and check.requirements_after == 1
     projection = check.if_confirmed

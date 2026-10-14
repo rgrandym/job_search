@@ -29,6 +29,7 @@ from src.cv.models import (
     CoverLetter,
     JDAnalysis,
     MasterCV,
+    OriginalReading,
     SearchFitBaseline,
     TailoredCV,
     TailoredDocument,
@@ -43,11 +44,12 @@ from src.cv.tailor import (
     analyze_jd,
     apply_plan,
     cv_to_text,
+    literal_terms,
     tailor,
 )
 from src.jobs.models import JobPosting, JobVerdict, MatchResult
 from src.jobs.profile_memory import profile_brief
-from src.services import document_files, tailored_documents, tracker
+from src.services import declined, document_files, tailored_documents, tracker
 from src.services.intent import delete_intent, get_intent
 from src.services.workspace import Workspace
 
@@ -686,9 +688,22 @@ async def tailor_to_job(
     profile = stored_profile(ws, result.family if result is not None else None)
     search_fit = search_fit_baseline(result, ws.active_cv_id)
 
-    def check(draft: TailoredCV) -> TailoredCV:  # the reading the revision works from
-        return _fit_check(master_cv, draft, jd, text, llm, search_fit)
+    held = {job.id: load_baseline(ws, job.id)}  # one reading of the original per job
 
+    def check(draft: TailoredCV) -> TailoredCV:  # the reading the revision works from
+        out = _fit_check(master_cv, draft, jd, text, llm, search_fit, held[job.id])
+        baseline = out.fit_check.baseline if out.fit_check else None
+        if baseline is not None and baseline != held[job.id]:
+            held[job.id] = baseline
+            save_baseline(ws, job.id, baseline)
+        return out
+
+    grounds: dict[str, Any] = {}  # optimised only: the user's other CVs, declined proposals
+    if mode == "optimised":
+        grounds = {
+            "background": library_background(ws, ws.active_cv_id),
+            "declined": declined.texts(ws, ws.active_cv_id),
+        }
     tailored = await asyncio.to_thread(
         tailor,
         master_cv,
@@ -705,6 +720,7 @@ async def tailor_to_job(
         mode == "standard",
         mode,
         check,
+        **grounds,
     )
     progress.step("Writing the Word file in your CV's design")
     path = _new_output_path(ws, _file_stem(master_cv, job))
@@ -737,6 +753,22 @@ async def tailor_to_job(
     ws.tailored[job.id] = tailored
     tracker.remember_document_job(ws, job, cv_file=path.name)
     return tailored, path
+
+
+MAX_BACKGROUND = 15_000  # characters of the user's other CVs given to the optimiser
+
+
+def library_background(ws: Workspace, cv_id: str | None) -> str:
+    """The user's other CVs already parsed in the library (never parses one): grounds the
+    optimiser may quote when inferring what a role involved. Not facts for the tailored CV."""
+    parts: list[str] = []
+    for asset in list_cvs(ws):
+        if asset.id == cv_id or not asset.parsed:
+            continue
+        cv = _parsed_cv(ws, asset.id)
+        if cv is not None:
+            parts.append(f"--- {asset.filename} ---\n{cv_to_text(cv, tags=False)}")
+    return "\n\n".join(parts)[:MAX_BACKGROUND]
 
 
 def search_fit_baseline(result: MatchResult | None, cv_id: str | None) -> SearchFitBaseline | None:
@@ -775,15 +807,43 @@ def _fit_check(
     text: str,
     llm: LLMProvider,
     search_fit: SearchFitBaseline | None = None,
+    original: OriginalReading | None = None,
 ) -> TailoredCV:
     """The before/after reading; a failed check never costs the user the tailored CV."""
     try:
-        return tailored.model_copy(
-            update={"fit_check": compare_fit(source, tailored, jd, text, llm, search_fit)}
-        )
+        fit = compare_fit(source, tailored, jd, text, llm, search_fit, original)
+        return tailored.model_copy(update={"fit_check": fit})
     except Exception as exc:  # noqa: BLE001 - the CV is written whatever the check's fate
         note = f"The before/after fit check could not run: {exc}"
         return tailored.model_copy(update={"document_notes": [*tailored.document_notes, note]})
+
+
+def _baselines_path(ws: Workspace) -> Path:
+    return ws.settings.data_dir / "fit_baselines.json"
+
+
+def load_baseline(ws: Workspace, job_id: str) -> OriginalReading | None:
+    """The original CV's reading kept for this job, if any (`fit_check.compare_fit` checks
+    that it is still the same CV text)."""
+    path = _baselines_path(ws)
+    try:
+        raw = json.loads(path.read_text("utf-8")) if path.is_file() else {}
+        return OriginalReading.model_validate(raw[job_id]) if job_id in raw else None
+    except (ValueError, TypeError):
+        return None  # an unreadable file only means the original is read again
+
+
+def save_baseline(ws: Workspace, job_id: str, baseline: OriginalReading) -> None:
+    path = _baselines_path(ws)
+    try:
+        raw = json.loads(path.read_text("utf-8")) if path.is_file() else {}
+    except ValueError:
+        raw = {}
+    raw[job_id] = baseline.model_dump(mode="json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(raw), "utf-8")
+    temporary.replace(path)
 
 
 def stored_profile(ws: Workspace, family: str | None = None) -> str:
@@ -880,6 +940,7 @@ def _write_tailored(
             tailored.academic,
             tailored.skills_to_confirm,
             tailored.review_additions,
+            tailored.compressions,
         )
         notes.insert(0, f"Written in the design of {original.name}")
     elif template == tailored_documents.ORIGINAL:
@@ -1037,7 +1098,7 @@ async def _analysis(ws: Workspace, text: str, llm: LLMProvider) -> JDAnalysis:
     key = hashlib.sha256(text.encode()).hexdigest()
     if key not in ws.jd_analyses:
         ws.jd_analyses[key] = await asyncio.to_thread(analyze_jd, text, llm)
-    return ws.jd_analyses[key]
+    return literal_terms(ws.jd_analyses[key], text)  # also for analyses made before
 
 
 def _job_text(job: JobPosting) -> str:

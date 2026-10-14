@@ -108,32 +108,42 @@ def _checker(*readings: FitComparison) -> tuple[list[TailoredCV], object]:
     return seen, check
 
 
-def test_a_draft_not_clearly_better_is_revised_once_and_the_better_kept(
-    master_cv: MasterCV,
-) -> None:
-    llm = FakeLLM({TailoringPlan: lambda _p: _plan()})
-    seen, check = _checker(_reading(55, 55), _reading(55, 66, (40, 70)))
-    out = tailor(master_cv, "job", llm, jd=JD, review=False, check=check)  # type: ignore[arg-type]
-    assert len(seen) == 2 and len(llm.calls) == 2
-    assert "<reading>" in llm.calls[1][0] and REQUIREMENT in llm.calls[1][0]
-    assert out.fit_check is not None and out.fit_check.after == 66
-    assert "the revision reads better" in out.revision
+JOB_TEXT = f"Senior ML Engineer. Python, {TERM} and AWS SageMaker for millions of users."
 
 
-def test_the_first_draft_is_kept_when_the_revision_reads_no_better(master_cv: MasterCV) -> None:
-    llm = FakeLLM({TailoringPlan: lambda _p: _plan()})
-    _, check = _checker(_reading(55, 57), _reading(55, 54))
-    out = tailor(master_cv, "job", llm, jd=JD, review=False, check=check)  # type: ignore[arg-type]
-    assert out.fit_check is not None and out.fit_check.after == 57
-    assert "first draft read as well or better" in out.revision
+def _revising(first: TailoringPlan, second: TailoringPlan) -> FakeLLM:
+    """The first plan, then (asked with a <reading>) the revised one."""
+    return FakeLLM({TailoringPlan: lambda p: second if "<reading>" in p else first})
 
 
-def test_no_revision_when_clearly_better_or_already_very_high(master_cv: MasterCV) -> None:
-    for reading in (_reading(60, 66), _reading(90, 90)):
-        llm = FakeLLM({TailoringPlan: lambda _p: _plan()})
-        seen, check = _checker(reading)
-        out = tailor(master_cv, "job", llm, jd=JD, review=False, check=check)  # type: ignore[arg-type]
-        assert len(seen) == 1 and len(llm.calls) == 1 and out.revision == ""
+def test_a_draft_under_grade_a_is_revised_once_and_the_better_kept(master_cv: MasterCV) -> None:
+    llm = _revising(TailoringPlan(), _plan())
+    seen, check = _checker(_reading(55, 55))
+    out = tailor(master_cv, JOB_TEXT, llm, jd=JD, review=False, check=check)  # type: ignore[arg-type]
+    assert len(seen) == 1 and len(llm.calls) == 2  # one AI reading, at the end
+    assert "<reading>" in llm.calls[1][0] and TERM in llm.calls[1][0]
+    assert out.screening is not None and TERM in out.matched_keywords
+    assert out.screening.after.score > out.screening.before.score
+    assert out.revision.startswith("Revised once (screening score") and "kept." in out.revision
+
+
+def test_the_first_draft_is_kept_when_the_revision_scores_no_better(master_cv: MasterCV) -> None:
+    llm = _revising(_plan(), TailoringPlan())
+    _, check = _checker(_reading(55, 57))
+    out = tailor(master_cv, JOB_TEXT, llm, jd=JD, review=False, check=check)  # type: ignore[arg-type]
+    assert TERM in out.matched_keywords
+    assert "first draft scored as well or better" in out.revision
+
+
+def test_no_revision_once_the_screening_score_is_grade_a(master_cv: MasterCV) -> None:
+    jd = JDAnalysis(job_title="Senior Machine Learning Engineer", hard_skills=["Python"])
+    llm = FakeLLM({TailoringPlan: lambda _p: TailoringPlan()})
+    seen, check = _checker(_reading(60, 60))
+    out = tailor(
+        master_cv, "Senior Machine Learning Engineer, Python", llm, jd=jd, review=False, check=check
+    )  # type: ignore[arg-type]
+    assert out.screening is not None and out.screening.after.grade == "A"
+    assert len(seen) == 1 and len(llm.calls) == 1 and out.revision == ""
 
 
 def test_ats_match_weighs_keywords_and_requirements_shown() -> None:

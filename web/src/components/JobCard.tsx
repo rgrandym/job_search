@@ -11,7 +11,7 @@ import { CVVersionCompare } from "./CVVersionCompare";
 import { TaskError, TaskProgress, useTaskId } from "./TaskProgress";
 import { CVViewButton, LetterViewButton } from "./LetterDocument";
 import { TailoredCVPanel } from "./TailoredCVPanel";
-import { FitCheckDetails, FitCheckSummary, IfConfirmed, PositioningDetails } from "./TailorInsights";
+import { FitCheckDetails, FitCheckSummary, IfConfirmed, PositioningDetails, ScreeningSummary } from "./TailorInsights";
 
 const METRICS = [
   ["title", "Title & level"],
@@ -748,7 +748,7 @@ export function JobCard({
                 onClick={() => pickVersion(v.id)}
               >
                 {v.label}
-                {v.report?.fit_check && <span className="ml-1" style={{ color: scoreColor(v.report.fit_check.after) }}>{v.report.fit_check.after}</span>}
+                {v.report?.screening && <span className="ml-1" title="Screening score (ATS)" style={{ color: scoreColor(v.report.screening.after.score) }}>{v.report.screening.after.score}</span>}
               </button>
             );
           })}
@@ -774,6 +774,7 @@ export function JobCard({
               {savedDraft.label} · {new Date(savedDraft.created_at).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}
             </span>
           )}
+          <ScreeningSummary screening={report.screening} />
           <FitCheckSummary check={report.fit_check} capReason={report.fit_check?.search_anchored && report.fit_check.before === verdict?.fit_score ? verdict?.cap_reason : null} />
           {report.fit_check?.if_confirmed && (
             <IfConfirmed
@@ -797,6 +798,17 @@ export function JobCard({
             <p className="basis-full text-[11px] text-faint">Added under your summary: Relevant skills for this role: {report.role_skills.join(" · ")}</p>
           )}
           {report.revision && <p className="basis-full text-[11px] text-muted">{report.revision}</p>}
+          {!!report.length_notes?.length && (
+            <div className="basis-full text-[11px] text-muted" title="Advice only: nothing was removed. Edit the lines yourself if you agree.">
+              <p className="font-medium">Length advice (nothing changed):</p>
+              {report.length_notes.map((note) => <p key={note} className="text-faint">· {note}</p>)}
+            </div>
+          )}
+          {!!report.compressions?.some((c) => c.status === "pending") && (
+            <p className="basis-full text-[11px] text-warn">
+              {report.compressions.filter((c) => c.status === "pending").length} shorter version(s) in red below the lines they would replace: compare them under Review and edit CV.
+            </p>
+          )}
           {!!report.term_bridges?.length && (
             <div className="basis-full text-[11px] text-muted" title="The job's own words for work your CV shows in other words. Code checked each quoted line; check that each one says the same thing.">
               <p className="font-medium">Job terms used for your own wording (check each one):</p>

@@ -294,7 +294,8 @@ def test_requirement_sentences_are_not_reported_as_missing_keywords(master_cv: M
 def test_tailor_end_to_end(master_cv: MasterCV) -> None:
     plan = TailoringPlan(headline_options=["Senior Machine Learning Engineer | MLOps"])
     llm = FakeLLM({JDAnalysis: JD, TailoringPlan: plan, CVCritique: CVCritique()})
-    out = tailor(master_cv, "We need a Staff ML Engineer...", llm)
+    job = "We need a Staff ML Engineer: Python, PyTorch, Kubernetes, Spark and MLOps."
+    out = tailor(master_cv, job, llm)
     assert out.cv.basics.headline == master_cv.basics.headline  # the CV's own headline stays
     assert out.headline_options == ["Senior Machine Learning Engineer | MLOps"]
     assert out.trim is not None

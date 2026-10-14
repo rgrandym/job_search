@@ -34,7 +34,6 @@ from src.cv.fit_check import (
     requirements_for,
     score_versions,
     with_keywords,
-    with_proposals,
 )
 from src.cv.models import (
     DimensionChange,
@@ -45,6 +44,7 @@ from src.cv.models import (
     VersionComparison,
     VersionReading,
 )
+from src.cv.proposals import with_proposals
 from src.cv.tailor import ats_keywords, cv_to_text, printed_text
 from src.services import cv_service, tailored_documents
 from src.services.workspace import Workspace

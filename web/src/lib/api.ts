@@ -320,10 +320,15 @@ export const api = {
       json("POST", { asset_id: assetId, result })),
   editTailoredCV: (id: string, edits: { headline?: string; summary?: string; bullets?: Record<string, string> }) =>
     request<TailoredCVView>(`/api/tailored-cvs/${encodeURIComponent(id)}`, json("PUT", edits)),
-  reviewCVAddition: (id: string, additionId: string, decision: "confirm" | "delete", text?: string) =>
+  reviewCVAddition: (id: string, additionId: string, decision: "confirm" | "delete", text?: string, reason?: string) =>
     request<TailoredCVView>(
       `/api/tailored-cvs/${encodeURIComponent(id)}/additions/${encodeURIComponent(additionId)}`,
-      json("PUT", { decision, text }),
+      json("PUT", { decision, text, reason: reason ?? "" }),
+    ),
+  reviewCVCompression: (id: string, compressionId: string, decision: "apply" | "reject") =>
+    request<TailoredCVView>(
+      `/api/tailored-cvs/${encodeURIComponent(id)}/compressions/${encodeURIComponent(compressionId)}`,
+      json("PUT", { decision }),
     ),
   coverLetter: (jobId: string, template: string, result?: MatchResult, tailored_cv_id?: string, progressId?: string) =>
     request<{ id: string | null; download_url: string; paragraphs: number; flags: LetterFlag[]; notes: string[] }>(

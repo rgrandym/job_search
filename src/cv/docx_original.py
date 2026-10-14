@@ -15,11 +15,13 @@ placed exactly. Anything that cannot be placed safely is left as it is and repor
 
 from __future__ import annotations
 
+import copy
 import math
 import re
 import shutil
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -30,7 +32,15 @@ from docx.document import Document as DocxDocument
 from docx.shared import RGBColor
 from docx.text.paragraph import Paragraph
 
-from src.cv.models import Bullet, Experience, MasterCV, ReviewAddition, SkillGroup, SkillToConfirm
+from src.cv.models import (
+    Bullet,
+    CompressionProposal,
+    Experience,
+    MasterCV,
+    ReviewAddition,
+    SkillGroup,
+    SkillToConfirm,
+)
 from src.tools.docx_tools import (
     all_paragraphs,
     find_paragraph,
@@ -144,11 +154,12 @@ def _headers(paragraphs: list[Paragraph], cv: MasterCV) -> list[tuple[str, int]]
     return found
 
 
-def role_blocks(doc: DocxDocument, cv: MasterCV) -> dict[str, list[Paragraph]]:
-    """Each role's content lines: from its heading to the next role or section."""
+def role_ranges(doc: DocxDocument, cv: MasterCV) -> dict[str, list[Paragraph]]:
+    """Each role's whole entry: its heading line and everything up to the next role or
+    section (dates, places and content lines)."""
     paragraphs = all_paragraphs(doc)
     headers = _headers(paragraphs, cv)
-    blocks: dict[str, list[Paragraph]] = {}
+    ranges: dict[str, list[Paragraph]] = {}
     for number, (role_id, start) in enumerate(headers):
         stop = headers[number + 1][1] if number + 1 < len(headers) else len(paragraphs)
         level = _heading_level(paragraphs[start])
@@ -158,9 +169,16 @@ def role_blocks(doc: DocxDocument, cv: MasterCV) -> dict[str, list[Paragraph]]:
             if ends or _section_break(paragraphs[index]):
                 stop = index
                 break
-        lines = paragraphs[start + 1 : stop]
-        blocks[role_id] = [p for p in lines if len(p.text.strip()) >= MIN_LINE]
-    return blocks
+        ranges[role_id] = paragraphs[start:stop]
+    return ranges
+
+
+def role_blocks(doc: DocxDocument, cv: MasterCV) -> dict[str, list[Paragraph]]:
+    """Each role's content lines: from its heading to the next role or section."""
+    return {
+        role_id: [p for p in lines[1:] if len(p.text.strip()) >= MIN_LINE]
+        for role_id, lines in role_ranges(doc, cv).items()
+    }
 
 
 def _pair(bullets: list[Bullet], lines: list[Paragraph]) -> dict[str, Paragraph]:
@@ -254,12 +272,14 @@ def write_like_original(
     academic: bool = False,
     skills_to_confirm: Sequence[SkillToConfirm] = (),
     review_additions: Sequence[ReviewAddition] = (),
+    compressions: Sequence[CompressionProposal] = (),
 ) -> list[str]:
     """Save `tailored` as a copy of `original` (the Word file `source` was read from) at
     `out`; returns notes on anything kept as in the original. `headline_options` are written
     under the CV's own headline, in its formatting, for the user to keep or delete;
     `role_skills` as one line under the summary. `academic` puts the sections in the order
-    academic readers expect."""
+    academic readers expect. Pending review additions and compressions are written in red
+    beside the lines they concern; an applied merged entry replaces its roles."""
     doc = Document(str(original))
     claimed: list[Any] = []
     headline = find_paragraph(doc, source.basics.headline or "", 0.75)
@@ -267,6 +287,13 @@ def write_like_original(
     notes += _summary(doc, source.basics.summary, tailored.basics.summary, claimed)
     notes += _footers(doc, tailored.basics.name)
     blocks = role_blocks(doc, source)
+    ranges = role_ranges(doc, source)
+    lines = {
+        bullet_id: paragraph
+        for role in source.experience
+        for bullet_id, paragraph in _pair(role.bullets, blocks.get(role.id, [])).items()
+    }
+    skill_lines = _skill_lines(doc, source.skills)
     for role in source.experience:
         new = next((r for r in tailored.experience if r.id == role.id), None)
         if new is None:
@@ -281,7 +308,9 @@ def write_like_original(
     notes += _headline_options(headline, tailored.basics.headline, headline_options)
     notes += _role_skills_line(doc, role_skills)
     notes += _skills_to_confirm_line(doc, skills_to_confirm)
-    notes += _review_addition_lines(doc, blocks, review_additions)
+    places = Places(blocks, lines, skill_lines, headline)
+    notes += _review_addition_lines(doc, places, review_additions)
+    notes += _compression_lines(source, places, ranges, compressions)
     if academic:
         notes += academic_order(doc)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -384,42 +413,170 @@ def _skills_to_confirm_line(doc: DocxDocument, suggestions: Sequence[SkillToConf
     return [] if lines else ["Skills to confirm placed at the end (no profile section found)"]
 
 
+@dataclass(frozen=True)
+class Places:
+    """Where red lines go: each role's lines, each source bullet's line, each skills
+    category's line and the headline line (found before anything was rewritten)."""
+
+    blocks: dict[str, list[Paragraph]]
+    lines: dict[str, Paragraph]
+    skills: dict[str, Paragraph]
+    headline: Paragraph | None
+
+
+def _skill_lines(doc: DocxDocument, groups: Sequence[SkillGroup]) -> dict[str, Paragraph]:
+    claimed: list[Any] = []
+    out: dict[str, Paragraph] = {}
+    for group in groups:
+        if (paragraph := _list_paragraph(doc, group, claimed)) is not None:
+            out[group.category] = paragraph
+            claimed.append(paragraph._p)
+    return out
+
+
+def _alive(paragraph: Paragraph | None) -> Paragraph | None:
+    return paragraph if paragraph is not None and paragraph._p.getparent() is not None else None
+
+
+def _red(paragraph: Paragraph) -> Paragraph:
+    for run in paragraph.runs:
+        run.font.color.rgb = REVIEW_RED
+    return paragraph
+
+
+def _red_run(paragraph: Paragraph, text: str) -> None:
+    """Words added at the end of an existing line, in red (the line itself is unchanged)."""
+    run = paragraph.add_run(text)
+    run.font.color.rgb = REVIEW_RED
+
+
 def _review_addition_lines(
-    doc: DocxDocument,
-    blocks: dict[str, list[Paragraph]],
-    additions: Sequence[ReviewAddition],
+    doc: DocxDocument, places: Places, additions: Sequence[ReviewAddition]
 ) -> list[str]:
-    """Place pending suggestions beside the role or profile, visibly marked in red."""
+    """Place pending suggestions where a reader expects them, visibly marked in red: words
+    and number questions inside their bullet, a new bullet after the one it relates to, a
+    skill in its category, a summary sentence under the summary, a headline under the
+    headline."""
     notes: list[str] = []
-    anchors: dict[str, Paragraph] = {}
+    after: dict[str, Paragraph] = {}  # the last red line placed after an anchor
     for item in additions:
         if item.status != "pending":
             continue
-        label = (
-            "[CONFIRM EXPERIENCE BEFORE USE]"
-            if item.kind == "experience"
-            else "[CONFIRM SKILL BEFORE USE]"
-        )
-        text = f"{label} {item.text}"
-        if item.kind == "experience":
-            lines = blocks.get(item.role_id or "", [])
-            anchor = anchors.get(item.role_id or "") or next(
-                (line for line in reversed(lines) if line._p.getparent() is not None), None
-            )
-            if anchor is None:
-                paragraph = doc.add_paragraph(text)
+        if item.kind in {"enrichment", "metric"}:
+            line = _alive(places.lines.get(item.anchor_id or ""))
+            if line is None:
                 notes.append(f"Review suggestion for {item.role_id} placed at the end")
+                _red(doc.add_paragraph(f"[CONFIRM BEFORE USE] {item.text}"))
             else:
-                paragraph = insert_paragraph_after(anchor, text)
-                anchors[item.role_id or ""] = paragraph
+                _red_run(line, f" [CONFIRM: {item.text}]")
+        elif item.kind == "skill" and (line := _alive(places.skills.get(item.skill_group or ""))):
+            _red_run(line, f" · [CONFIRM: {item.text}]")
         else:
-            lines = profile_paragraphs(doc)
-            anchor = anchors.get("profile") or (lines[-1] if lines else None)
-            paragraph = insert_paragraph_after(anchor, text) if anchor else doc.add_paragraph(text)
-            anchors["profile"] = paragraph
-        for run in paragraph.runs:
-            run.font.color.rgb = REVIEW_RED
+            notes += _red_line(doc, places, after, item)
     return notes
+
+
+def _red_line(
+    doc: DocxDocument, places: Places, after: dict[str, Paragraph], item: ReviewAddition
+) -> list[str]:
+    """One red paragraph for a proposal, after its anchor (or the last red line there)."""
+    label = {
+        "experience": "[CONFIRM EXPERIENCE BEFORE USE]",
+        "rewording": "[CONFIRM REWORDED LINE BEFORE USE: replaces the line above]",
+        "summary": "[CONFIRM SUMMARY BEFORE USE]",
+        "headline": "[CONFIRM HEADLINE BEFORE USE]",
+    }.get(item.kind, "[CONFIRM SKILL BEFORE USE]")
+    text = f"{label} {item.text}"
+    if item.kind == "rewording":
+        key = f"line:{item.anchor_id}"
+        anchor = after.get(key) or _alive(places.lines.get(item.anchor_id or ""))
+    elif item.kind == "experience":
+        key = item.anchor_id or item.role_id or ""
+        role_lines = places.blocks.get(item.role_id or "", [])
+        anchor = (
+            after.get(key)
+            or _alive(places.lines.get(item.anchor_id or ""))
+            or next((line for line in reversed(role_lines) if _alive(line)), None)
+        )
+    elif item.kind == "headline":
+        key, anchor = "headline", after.get("headline") or _alive(places.headline)
+    else:
+        lines = profile_paragraphs(doc)
+        key, anchor = "profile", after.get("profile") or (lines[-1] if lines else None)
+    if anchor is None:
+        _red(doc.add_paragraph(text))
+        return [f"Review suggestion for {item.role_id or item.kind} placed at the end"]
+    after[key] = _red(insert_paragraph_after(anchor, text))
+    return []
+
+
+def _compression_lines(
+    source: MasterCV,
+    places: Places,
+    ranges: dict[str, list[Paragraph]],
+    compressions: Sequence[CompressionProposal],
+) -> list[str]:
+    """A pending compression in red below the lines it would replace (they stay as they
+    are); an applied merged entry in place of its roles. Applied bullet merges are already in
+    the draft's own lines."""
+    notes: list[str] = []
+    for item in compressions:
+        if item.status == "rejected" or (item.status == "applied" and item.kind != "merge_roles"):
+            continue
+        if item.kind == "merge_roles":
+            notes += _merged_entry(source, ranges, item)
+            continue
+        lines = [p for i in item.source_ids if (p := _alive(places.lines.get(i)))]
+        if not lines:
+            notes.append(f"Compressed version for {item.role_ids[0]} not placed (lines not found)")
+            continue
+        last = max(lines, key=_position)
+        n = len(item.source_ids)
+        label = f"[CONFIRM COMPRESSED VERSION BEFORE USE: replaces {n} line(s) above]"
+        _red(insert_paragraph_after(last, f"{label} {item.bullets[0]}"))
+    return notes
+
+
+def _merged_entry(
+    source: MasterCV, ranges: dict[str, list[Paragraph]], item: CompressionProposal
+) -> list[str]:
+    """The merged roles' entry after the last of them: in red while pending (the roles stay),
+    in their own formatting once the user applied it (the roles' entries are removed)."""
+    entries = [ranges[r] for r in item.role_ids if ranges.get(r)]
+    if len(entries) != len(item.role_ids):
+        return ["Merged entry not placed (a role was not found in the Word file)"]
+    every = [p for entry in entries for p in entry]
+    last = max(every, key=_position)
+    model = next((p for p in every if _listed(p)), None) or entries[0][-1]
+    pending = item.status == "pending"
+    label = f"[CONFIRM MERGED ENTRY BEFORE USE: replaces the {len(entries)} roles above] "
+    heading = _copy_after(entries[0][0], last, (label if pending else "") + item.heading)
+    anchor = heading
+    for text in item.bullets:
+        anchor = _copy_after(model, anchor, text)
+        if pending:
+            _red(anchor)
+    if pending:
+        _red(heading)
+    else:
+        for paragraph in every:
+            remove_paragraph(paragraph)
+    return []
+
+
+def _copy_after(model: Paragraph, anchor: Paragraph, text: str) -> Paragraph:
+    """A copy of `model` (its style, bullet and run formatting) holding `text`, placed after
+    `anchor`."""
+    new = copy.deepcopy(model._p)
+    anchor._p.addnext(new)
+    out = Paragraph(new, anchor._parent)
+    set_paragraph_text(out, text)
+    return out
+
+
+def _position(paragraph: Paragraph) -> int:
+    body = paragraph._p.getroottree().getroot()
+    return next(i for i, e in enumerate(body.iter()) if e is paragraph._p)
 
 
 def _section_kind(paragraph: Paragraph) -> str | None:
@@ -562,11 +719,12 @@ def _role(old: Experience, new: Experience, lines: list[Paragraph]) -> list[str]
     for bullet in new.bullets:
         if bullet.id in found and bullet.text != originals.get(bullet.id):
             set_paragraph_text(found[bullet.id], bullet.text)
-    movable = [p for p in lines if _listed(p) and any(p is q for q in found.values())]
-    order = [found[b.id] for b in new.bullets if b.id in found and _listed(found[b.id])]
     for bullet_id, paragraph in found.items():
-        if bullet_id not in kept and not _listed(paragraph):
-            remove_paragraph(paragraph)  # left out (trimming allowed); listed ones go below
+        if bullet_id not in kept:
+            remove_paragraph(paragraph)  # left out (trimming) or merged (applied by the user)
+    staying = [found[i] for i in found if i in kept]
+    movable = [p for p in lines if _listed(p) and any(p is q for q in staying)]
+    order = [found[b.id] for b in new.bullets if b.id in found and _listed(found[b.id])]
     if [id(p) for p in order] == [id(p) for p in movable]:
         return notes
     if movable and _contiguous(movable):

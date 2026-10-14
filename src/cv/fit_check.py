@@ -28,9 +28,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 from src.core.fit_rubric import FIT_WEIGHTS, capped_score, points_for
 from src.core.llm_provider import LLMProvider
+from src.cv.ats_score import term_found
 from src.cv.models import (
     AreaChange,
-    Bullet,
     DimensionChange,
     EvidencedReading,
     EvidencedReadings,
@@ -38,16 +38,16 @@ from src.cv.models import (
     FitReading,
     JDAnalysis,
     MasterCV,
+    OriginalReading,
     ProjectedFit,
     ProposalGain,
     ReviewAddition,
     SearchFitBaseline,
-    SkillGroup,
     TailoredCV,
     VersionReading,
 )
-from src.cv.tailor import MAX_ROLE_SKILLS, UNTRUSTED, ats_keywords, cv_to_text, printed_text
-from src.tools.search_tools import mentions
+from src.cv.proposals import with_proposals
+from src.cv.tailor import UNTRUSTED, ats_keywords, cv_to_text, printed_text
 
 WEIGHTS: dict[str, int] = {
     name: weight for name, weight in FIT_WEIGHTS.items() if name != "practicality"
@@ -55,7 +55,10 @@ WEIGHTS: dict[str, int] = {
 FIRST_PAGE_WORDS = 450  # what fits above the fold of page two on a typical CV
 MAX_REQUIREMENTS = 15
 MAX_VERSIONS = 6  # CVs read in one call; more and one reader's standard drifts
-READS = 3  # independent reads per comparison; the median rating and majority requirements count
+READS = (
+    3  # independent reads per version comparison; the median rating and majority requirements count
+)
+TAILOR_READS = 1  # a tailoring's own check: one read (cost and time); its baseline is kept per job
 NOISE_MARGIN = 5  # score points: less than one rating step on a 20-weight dimension
 UNQUOTED_CAP = 1  # a rating above this needs a line found in the CV
 CORE_UNMET = "core requirement unmet:"  # the search verdict's cap_reason prefix (screener)
@@ -147,7 +150,7 @@ def ats_match(keywords: float, shown: int, total: int) -> int:
 def _coverage(text: str, keywords: list[str]) -> float:
     if not keywords:
         return 1.0
-    return sum(mentions(text, k) for k in keywords) / len(keywords)
+    return sum(term_found(text, k) for k in keywords) / len(keywords)
 
 
 def _first_page(text: str) -> str:
@@ -210,24 +213,57 @@ def compare_fit(
     jd_text: str,
     llm: LLMProvider,
     search_fit: SearchFitBaseline | None = None,
+    original: OriginalReading | None = None,
 ) -> FitComparison:
-    """Read the original and the tailored CV for this job and compare what each shows. An
-    optimised draft with pending proposals is read a third time with them in place, in one
-    checked call, so `if_confirmed` shows only what they add. The explicit version comparison
-    still uses three independent reads."""
+    """Read the original and the tailored CV for this job and compare what each shows, side
+    by side in one call (`TAILOR_READS`). `original`: the original's reading kept for this job
+    (same text):
+    reused with its requirements, so every draft of the job is set against the same baseline;
+    otherwise it is read now and returned in `baseline`. An optimised draft with pending
+    proposals is read a third time with them in place, so `if_confirmed` shows only what they
+    add."""
     before_text = cv_to_text(source, tags=False)
     after_text = printed_text(tailored)
     keywords = ats_keywords(jd)
-    requirements = requirements_for(tailored, jd, search_fit)
-    proposed = with_proposals(tailored)
-    projection: ProjectedFit | None = None
-    if proposed is None:
-        before, after = _read_once([before_text, after_text], requirements, jd_text, llm, 0)
+    key = text_key(before_text)
+    if original is None or original.text_key != key:
+        original = None
+        requirements = requirements_for(tailored, jd, search_fit)
     else:
-        texts = [before_text, after_text, printed_text(proposed)]
-        before, after, projected = _read_once(texts, requirements, jd_text, llm, 0)
-        projection = project(before, after, projected, _pending(tailored), requirements, search_fit)
+        requirements = original.requirements
+    proposed = with_proposals(tailored)
+    texts = [before_text, after_text] + ([printed_text(proposed)] if proposed else [])
+    known: list[FitReading | None] = [original.reading if original else None]
+    known += [None] * (len(texts) - 1)
+    readings = read_versions(texts, requirements, jd_text, llm, known, TAILOR_READS)
+    before, after = readings[0], readings[1]
+    projection: ProjectedFit | None = None
+    if proposed is not None:
+        projection = project(
+            before, after, readings[2], _pending(tailored), requirements, search_fit
+        )
         projection = with_keywords(projection, keywords, after_text, texts[2])
+    baseline = original or OriginalReading(text_key=key, requirements=requirements, reading=before)
+    return _comparison(
+        before, after, requirements, search_fit, keywords, texts, projection, baseline
+    )
+
+
+def text_key(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()[:24]
+
+
+def _comparison(
+    before: FitReading,
+    after: FitReading,
+    requirements: list[str],
+    search_fit: SearchFitBaseline | None,
+    keywords: list[str],
+    texts: list[str],
+    projection: ProjectedFit | None,
+    baseline: OriginalReading,
+) -> FitComparison:
+    before_text, after_text = texts[0], texts[1]
     dimensions = _dimensions(search_fit, before, after)
     worse = [f"{d.name}: {d.before} → {d.after}" for d in dimensions if d.after < d.before]
     shown_before, shown_after = _shown(before, len(requirements)), _shown(after, len(requirements))
@@ -240,7 +276,7 @@ def compare_fit(
         after=_scored(search_fit, before, after, requirements),
         search_anchored=search_fit is not None,
         dimensions=dimensions,
-        requirements_total=len(requirements),
+        requirements_total=total,
         requirements_before=shown_before,
         requirements_after=shown_after,
         keywords_before=kw_before,
@@ -256,6 +292,7 @@ def compare_fit(
         impression_after=after.impression,
         worse=worse,
         if_confirmed=projection,
+        baseline=baseline,
     )
 
 
@@ -300,29 +337,6 @@ def _pending(tailored: TailoredCV) -> list[ReviewAddition]:
     return [a for a in tailored.review_additions if a.status == "pending"]
 
 
-def with_proposals(tailored: TailoredCV) -> TailoredCV | None:
-    """The draft as it would read with every pending proposal confirmed as worded, placed
-    where confirming places it (`tailored_documents.review_addition`): an experience under
-    its role, a skill in "Additional" and the role-skills line. None without proposals."""
-    pending = _pending(tailored)
-    if not pending:
-        return None
-    out = tailored.model_copy(deep=True)
-    for n, item in enumerate(pending):
-        if item.kind == "experience":
-            role = next((r for r in out.cv.experience if r.id == item.role_id), None)
-            if role is not None:
-                role.bullets.append(Bullet(id=f"proposal-{n}", text=item.text))
-            continue
-        group = next((g for g in out.cv.skills if g.category == "Additional"), None)
-        if group is None:
-            out.cv.skills.append(SkillGroup(category="Additional", items=[item.text]))
-        elif item.text not in group.items:
-            group.items.append(item.text)
-        out.role_skills = list(dict.fromkeys([*out.role_skills, item.text]))[:MAX_ROLE_SKILLS]
-    return out
-
-
 def project(
     original: FitReading,
     confirmed: FitReading,
@@ -339,7 +353,7 @@ def project(
     gained: list[ProposalGain] = []
     for n in sorted(after - before):
         quote = projected.requirement_quotes.get(str(n), "")
-        source = next((a for a in pending if quote and quoted(quote, _plain(a.text))), None)
+        source = next((a for a in pending if quote and _credited(a, quote)), None)
         gained.append(
             ProposalGain(
                 requirement=requirements[n - 1],
@@ -362,6 +376,14 @@ def project(
         no_effect=[a.id for a in pending if a.id not in credited],
         impression=projected.impression,
     )
+
+
+def _credited(addition: ReviewAddition, quote: str) -> bool:
+    """The reader quoted this proposal's wording: the proposal itself, or for words added
+    inside a bullet, the bullet line holding them."""
+    if quoted(quote, _plain(addition.text)):
+        return True
+    return addition.kind == "enrichment" and quoted(addition.text, _plain(quote))
 
 
 def with_keywords(
@@ -498,8 +520,9 @@ def read_versions(
     jd_text: str,
     llm: LLMProvider,
     known: list[FitReading | None] | None = None,
+    reads: int = READS,
 ) -> list[FitReading]:
-    """Every CV read `READS` times side by side (in parallel, each in another order), checked
+    """Every CV read `reads` times side by side (in parallel, each in another order), checked
     against its own lines and reduced to the median. A `known` reading (this CV read before)
     is kept; the reader is called only when a CV has none, and still sees them all."""
     if not 1 <= len(texts) <= MAX_VERSIONS:
@@ -507,16 +530,16 @@ def read_versions(
     known = known or [None] * len(texts)
     if all(k is not None for k in known):
         return [k for k in known if k is not None]
-    runs = [(contextvars.copy_context(), run) for run in range(READS)]
-    with ThreadPoolExecutor(max_workers=READS) as pool:
-        reads = list(
+    runs = [(contextvars.copy_context(), run) for run in range(reads)]
+    with ThreadPoolExecutor(max_workers=reads) as pool:
+        results = list(
             pool.map(lambda r: r[0].run(_read_once, texts, requirements, jd_text, llm, r[1]), runs)
         )
-    return [k or consensus([read[i] for read in reads]) for i, k in enumerate(known)]
+    return [k or consensus([read[i] for read in results]) for i, k in enumerate(known)]
 
 
 def _found(text: str, keywords: list[str]) -> list[str]:
-    return [k for k in keywords if mentions(text, k)]
+    return [k for k in keywords if term_found(text, k)]
 
 
 def _measure(

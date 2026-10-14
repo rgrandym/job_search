@@ -2,7 +2,68 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Download, Loader2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
-import type { MatchResult, TailoredCVView } from "../lib/types";
+import type { MatchResult, ReviewAddition, TailoredCVView } from "../lib/types";
+
+/** The wording a confirmation starts from: for added words, the bullet with them; for a
+ * number question, the bullet itself (the user adds the number). */
+function startingText(item: ReviewAddition): string {
+  if (item.kind === "enrichment" && item.original_text) return `${item.original_text.trim().replace(/[.;]+$/, "")}, ${item.text.trim().replace(/\.$/, "")}.`;
+  if (item.kind === "metric" && item.original_text) return item.original_text;
+  return item.text;
+}
+
+function kindLabel(item: ReviewAddition, document: TailoredCVView): string {
+  const role = document.cv.experience.find((r) => r.id === item.role_id)?.title ?? item.role_id ?? "";
+  switch (item.kind) {
+    case "enrichment": return `Words for an existing line · ${role}`;
+    case "rewording": return `Your line in the job's terms (replaces it in this CV) · ${role}`;
+    case "metric": return `Number for an existing line (${item.text}) · ${role}`;
+    case "experience": return `Experience · ${role}`;
+    case "summary": return "Summary sentence";
+    case "headline": return "Headline";
+    default: return item.skill_group ? `Skill · ${item.skill_group}` : "Skill";
+  }
+}
+
+function Compressions({ document }: { document: TailoredCVView }) {
+  const qc = useQueryClient();
+  const pending = (document.report?.compressions ?? []).filter((c) => c.status === "pending");
+  const decide = useMutation({
+    meta: { syncLists: true },
+    mutationFn: ({ id, decision }: { id: string; decision: "apply" | "reject" }) => api.reviewCVCompression(document.id, id, decision),
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ["tailored-cvs"] }); void qc.invalidateQueries({ queryKey: ["cv-comparison", document.job_id] }); },
+  });
+  if (!pending.length) return null;
+  const bullets = Object.fromEntries(document.cv.experience.flatMap((r) => r.bullets.map((b) => [b.id, b.text])));
+  const roles = Object.fromEntries(document.cv.experience.map((r) => [r.id, `${r.title} · ${r.company}`]));
+  return (
+    <div className="space-y-2 rounded border border-border p-2">
+      <p className="font-medium">Shorter versions to compare</p>
+      <p className="text-muted">Each is in red in the Word file, below the lines it would replace. Your lines stay unless you choose the shorter version; every number and job term is kept.</p>
+      {pending.map((item) => (
+        <div key={item.id} className="space-y-1 rounded border border-border p-2">
+          <p className="font-medium">{item.kind === "merge_roles" ? `Merge ${item.role_ids.length} similar roles` : item.kind === "merge_bullets" ? `Merge ${item.source_ids.length} overlapping lines · ${roles[item.role_ids[0]] ?? ""}` : `Tighten a line · ${roles[item.role_ids[0]] ?? ""}`}</p>
+          <div className="space-y-0.5 text-muted">
+            {item.kind === "merge_roles"
+              ? item.role_ids.map((id) => <p key={id}>Now: {roles[id] ?? id}</p>)
+              : item.source_ids.map((id) => <p key={id}>Now: {bullets[id] ?? id}</p>)}
+          </div>
+          <div className="space-y-0.5 text-bad">
+            {item.heading && <p className="font-medium">{item.heading}</p>}
+            {item.bullets.map((text) => <p key={text}>{text}</p>)}
+          </div>
+          {item.removed.length > 0 && <p className="text-faint">Left out: {item.removed.join("; ")}</p>}
+          <p className="text-faint">Why: {item.reason}</p>
+          <div className="flex gap-2">
+            <button className="btn-primary py-1 text-[11px]" disabled={decide.isPending} onClick={() => decide.mutate({ id: item.id, decision: "apply" })}>Use the shorter version</button>
+            <button className="btn-ghost py-1 text-[11px]" disabled={decide.isPending} onClick={() => decide.mutate({ id: item.id, decision: "reject" })}>Keep my lines</button>
+          </div>
+        </div>
+      ))}
+      {decide.error && <p className="text-bad">{(decide.error as Error).message}</p>}
+    </div>
+  );
+}
 
 function Editor({ document, onSaved }: { document: TailoredCVView; onSaved: () => void }) {
   const qc = useQueryClient();
@@ -10,10 +71,14 @@ function Editor({ document, onSaved }: { document: TailoredCVView; onSaved: () =
   const [summary, setSummary] = useState(document.cv.basics.summary ?? "");
   const [bullets, setBullets] = useState<Record<string, string>>({});
   const [additionText, setAdditionText] = useState<Record<string, string>>({});
+  const [declineReason, setDeclineReason] = useState<Record<string, string>>({});
   const review = useMutation({
     meta: { syncLists: true },
-    mutationFn: ({ id, decision }: { id: string; decision: "confirm" | "delete" }) =>
-      api.reviewCVAddition(document.id, id, decision, additionText[id]),
+    mutationFn: ({ id, decision }: { id: string; decision: "confirm" | "delete" }) => {
+      const item = document.report?.review_additions?.find((a) => a.id === id);
+      const text = additionText[id] ?? (item && item.kind !== "skill" && item.kind !== "experience" ? startingText(item) : undefined);
+      return api.reviewCVAddition(document.id, id, decision, decision === "confirm" ? text : undefined, declineReason[id]);
+    },
     onSuccess: () => { void qc.invalidateQueries({ queryKey: ["tailored-cvs"] }); void qc.invalidateQueries({ queryKey: ["cv-comparison", document.job_id] }); },
   });
   const save = useMutation({
@@ -36,22 +101,29 @@ function Editor({ document, onSaved }: { document: TailoredCVView; onSaved: () =
       {!!document.report?.review_additions?.some((item) => item.status === "pending") && (
         <div className="space-y-2 rounded border border-warn/40 p-2">
           <p className="font-medium text-warn">Confirm or delete each red suggestion before using this CV</p>
-          <p className="text-muted">These are questions prompted by your background and the job, not verified claims. Edit wording to what you actually did before confirming. Confirmation also adds it to the selected source CV.</p>
+          <p className="text-muted">These are what your roles very probably involved but your CV does not say, inferred from your background for this job: not verified claims. Edit the wording to what you actually did before confirming. Confirmed experience, skills, words and numbers are also added to the selected source CV; a summary sentence or headline changes this draft only. A deleted suggestion is remembered for this CV and not proposed again.</p>
           {document.report.review_additions.filter((item) => item.status === "pending").map((item) => (
             <div key={item.id} className="space-y-1 rounded border border-border p-2">
-              <p className="font-medium text-warn">{item.kind === "skill" ? "Skill" : `Experience · ${document.cv.experience.find((r) => r.id === item.role_id)?.title ?? item.role_id}`}: {item.requirement}</p>
-              <textarea className="input w-full text-bad" rows={2} value={additionText[item.id] ?? item.text}
+              <p className="font-medium text-warn">{kindLabel(item, document)}: {item.requirement}</p>
+              {(item.kind === "enrichment" || item.kind === "metric" || item.kind === "rewording") && item.original_text && (
+                <p className="text-muted">Your line: {item.original_text}</p>
+              )}
+              <textarea className="input w-full text-bad" rows={2} value={additionText[item.id] ?? startingText(item)}
                 onChange={(event) => setAdditionText((previous) => ({ ...previous, [item.id]: event.target.value }))} />
+              {item.kind === "metric" && <p className="text-faint">Add the real number to the line above; never an estimate you could not back up at interview.</p>}
               <p className="text-faint">Why ask: {item.reason} · CV: “{item.background_quote}” · Job: “{item.job_quote}”</p>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <button className="btn-primary py-1 text-[11px]" disabled={review.isPending} onClick={() => review.mutate({ id: item.id, decision: "confirm" })}>Confirm edited fact</button>
                 <button className="btn-ghost py-1 text-[11px]" disabled={review.isPending} onClick={() => review.mutate({ id: item.id, decision: "delete" })}>Delete suggestion</button>
+                <input className="input min-w-0 flex-1 py-0.5 text-[11px]" placeholder="Why not (optional, remembered)" value={declineReason[item.id] ?? ""}
+                  onChange={(event) => setDeclineReason((previous) => ({ ...previous, [item.id]: event.target.value }))} />
               </div>
             </div>
           ))}
           {review.error && <p className="text-bad">{(review.error as Error).message}</p>}
         </div>
       )}
+      <Compressions document={document} />
       <label className="block">Headline
         <input className="input mt-1 w-full" value={headline} onChange={(e) => setHeadline(e.target.value)} />
       </label>
@@ -127,7 +199,8 @@ export function TailoredCVPanel({ jobId, result, hasCv, onLetter, letterPending 
   const selected = choice ?? documents.data?.[0]?.id ?? "";
   const document = documents.data?.find((item) => item.id === selected);
   useEffect(() => {
-    if (document?.report?.review_additions?.some((item) => item.status === "pending")) setEditing(true);
+    const report = document?.report;
+    if (report?.review_additions?.some((item) => item.status === "pending") || report?.compressions?.some((item) => item.status === "pending")) setEditing(true);
   }, [document?.id]); // eslint-disable-line react-hooks/exhaustive-deps -- open on selection, not after every edit
   return (
     <div className="mt-2 space-y-2 rounded-md bg-surface p-3 text-[12px]">

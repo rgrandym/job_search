@@ -364,9 +364,26 @@ is simply not created; start it again when you are ready.
 3. Click **Download .docx** and read every line before you send it.
    - The CV keeps your own headline. Up to four job-specific headline suggestions are written under it, for you to delete the ones you do not want. You can also pick one in the app, which saves a new version with only that headline.
    - Nothing is removed (unless you chose a trim). The most relevant lines lead each role and section, and the rest follow.
-   - One line is added under your summary: **Relevant skills for this role**, listing skills your CV already names.
+   - One line is added under your summary: **Relevant skills for this role**, listing 10 to 12 skills your CV shows you using in a role or project.
    - The app only rephrases and reorders what your CV already says. It never adds facts, numbers or skills you do not have, and never turns taking part into leading.
 4. Read the **Report** under the job. **Fit shown by the CV** compares your original and the tailored CV, both read for this job without knowing which is which (out of 100, and how many of the job's requirements each clearly shows). Your real fit is the same; this shows how much more clearly the new CV makes the case. **Positioning and requirements** shows how the CV presents you and each requirement: *direct*, *transfers*, *related*, *gap*, or *confirm?* (plausible but not on your CV). The report also shows the keyword coverage before and after, job keywords not found word for word, the review of the first draft, changes that were rejected and why, and any ATS warnings. A missing requirement should be handled truthfully, never by inventing a fact. If you do have that experience, add it to your CV first (see section 4).
+
+The report also lists **length advice**: bullets that run past two lines, bullets in one role that describe the same work, and older roles with many bullets. It is advice only: nothing is changed unless you edit the lines yourself.
+
+### Optimised mode: aim for the top score, step by step
+
+Experienced people often leave out techniques, standards and partners they really worked with. Optimised mode looks for them and proposes them in red, for you to confirm or delete before you apply.
+
+1. Choose **Optimised** and click **Tailor CV**.
+2. Open the Word file. Red text is a proposal, never a confirmed fact:
+   - **[CONFIRM REWORDED LINE ...]** below one of your lines: that line in the job's own terms, to use instead of it in this CV.
+   - **[CONFIRM: ...]** at the end of a line: words that line very probably left out, or a question asking for its number.
+   - **[CONFIRM EXPERIENCE BEFORE USE]**: a new line, placed after the line it relates to.
+   - **[CONFIRM: ...]** at the end of a skills list: a skill in the category it belongs to.
+   - **[CONFIRM COMPRESSED VERSION ...]** or **[CONFIRM MERGED ENTRY ...]**: a shorter version of the lines above it (for example, two similar postdocs as one entry that keeps both institutions and their dates). Your own lines stay until you choose otherwise.
+3. Under the job, click **Review and edit CV**. For each proposal, edit it to what you actually did and click **Confirm edited fact**, or **Delete suggestion**. You can say why; a deleted proposal is never suggested again for that CV. For a number, write the real figure into the line; never one you could not explain at interview.
+4. For each shorter version, compare it with your lines and click **Use the shorter version** or **Keep my lines**.
+5. The report leads with the **screening score (ATS)**: original → tailored → **if you confirm** all proposals, with a grade (A is 80 or more, the aim). It is computed the same way every time from the CV's text: the job's keywords in its own words (weighted by how often the posting uses them), the job title, degrees and soft skills, and it lists the keywords still missing. Employers' own systems are not public, so it is the app's estimate built the way ATS match rates are. The **AI screen** line below it (requirements shown, fit for the role) is a model's reading and can vary a little; rewording rarely moves the fit, new confirmed experience can.
 
 The report is kept with the tailored CV. When you come back later, reload the page or open the job in another tab, the card shows it again with the date it was tailored.
 

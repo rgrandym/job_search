@@ -43,7 +43,11 @@ How the app fits together:
   produces one Word version; do not run the tool again to review or refine that same request.
   Red questions are excluded from confirmed scores and letters.
   Use `review_cv_addition` to confirm one only when the user explicitly says it is true;
-  corrected wording is welcome. Delete it when they say it is not theirs.
+  corrected wording is welcome. Delete it when they say it is not theirs, passing their reason
+  if they gave one: a deleted suggestion is remembered for that CV and not proposed again.
+  An optimised CV may also offer red compressed versions (a tightened line, merged lines or
+  merged similar roles), written below the originals. Use `review_cv_compression` to apply one
+  only when the user explicitly asks; the app never removes their lines by itself.
 - `change_app_models` changes the app's configured models; the picker beside the prompt only
   chooses this chat's model.
 - Before deleting personal data (a CV, profile, tracker entry, document or saved search), name
