@@ -39,15 +39,18 @@ function Compressions({ document }: { document: TailoredCVView }) {
   return (
     <div className="space-y-2 rounded border border-border p-2">
       <p className="font-medium">Shorter versions to compare</p>
-      <p className="text-muted">Each is in red in the Word file, below the lines it would replace. Your lines stay unless you choose the shorter version; every number and job term is kept.</p>
+      <p className="text-muted">Each is in red in the Word file, below the lines it would replace. Your lines stay unless you choose the shorter version. A merge or tightened line keeps every number and job term; a shorter earlier role lists what it leaves out.</p>
       {pending.map((item) => (
         <div key={item.id} className="space-y-1 rounded border border-border p-2">
-          <p className="font-medium">{item.kind === "merge_roles" ? `Merge ${item.role_ids.length} similar roles` : item.kind === "merge_bullets" ? `Merge ${item.source_ids.length} overlapping lines · ${roles[item.role_ids[0]] ?? ""}` : `Tighten a line · ${roles[item.role_ids[0]] ?? ""}`}</p>
-          <div className="space-y-0.5 text-muted">
-            {item.kind === "merge_roles"
-              ? item.role_ids.map((id) => <p key={id}>Now: {roles[id] ?? id}</p>)
-              : item.source_ids.map((id) => <p key={id}>Now: {bullets[id] ?? id}</p>)}
-          </div>
+          <p className="font-medium">{item.kind === "merge_roles" ? `Merge ${item.role_ids.length} similar roles` : item.kind === "merge_bullets" ? `Merge ${item.source_ids.length} overlapping lines · ${roles[item.role_ids[0]] ?? ""}` : item.kind === "condense_role" ? `Shorter entry for an earlier role · ${roles[item.role_ids[0]] ?? ""}` : `Tighten a line · ${roles[item.role_ids[0]] ?? ""}`}</p>
+          {item.kind !== "condense_role" && (
+            <div className="space-y-0.5 text-muted">
+              {item.kind === "merge_roles"
+                ? item.role_ids.map((id) => <p key={id}>Now: {roles[id] ?? id}</p>)
+                : item.source_ids.map((id) => <p key={id}>Now: {bullets[id] ?? id}</p>)}
+            </div>
+          )}
+          {item.kind === "condense_role" && <p className="text-muted">Keeps only these lines:</p>}
           <div className="space-y-0.5 text-bad">
             {item.heading && <p className="font-medium">{item.heading}</p>}
             {item.bullets.map((text) => <p key={text}>{text}</p>)}
@@ -61,6 +64,29 @@ function Compressions({ document }: { document: TailoredCVView }) {
         </div>
       ))}
       {decide.error && <p className="text-bad">{(decide.error as Error).message}</p>}
+    </div>
+  );
+}
+
+/** The clean final version: every change in black, nothing pending (backend `finalise`). */
+function FinalVersion({ document }: { document: TailoredCVView }) {
+  const qc = useQueryClient();
+  const write = useMutation({
+    mutationFn: () => api.finalTailoredCV(document.id),
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ["tailored-cvs"] }); },
+  });
+  if (document.imported) return null;
+  return (
+    <div className="space-y-1 rounded border border-border p-2">
+      <p className="text-muted">The draft shows every change in red. When you are happy with it, write the clean version to send: all black, with nothing still pending.</p>
+      <div className="flex flex-wrap items-center gap-2">
+        <button className="btn-primary py-1 text-[12px]" disabled={write.isPending} onClick={() => write.mutate()}>
+          {write.isPending && <Loader2 size={12} className="animate-spin" />} Write final version
+        </button>
+        {document.final_url && <a className="text-accent hover:underline" href={document.final_url}><Download size={11} /> Download final version</a>}
+      </div>
+      {document.final_notes.map((note) => <p key={note} className="text-warn">{note}</p>)}
+      {write.error && <p className="text-bad">{(write.error as Error).message}</p>}
     </div>
   );
 }
@@ -104,14 +130,14 @@ function Editor({ document, onSaved }: { document: TailoredCVView; onSaved: () =
           <p className="text-muted">These are what your roles very probably involved but your CV does not say, inferred from your background for this job: not verified claims. Edit the wording to what you actually did before confirming. Confirmed experience, skills, words and numbers are also added to the selected source CV; a summary sentence or headline changes this draft only. A deleted suggestion is remembered for this CV and not proposed again.</p>
           {document.report.review_additions.filter((item) => item.status === "pending").map((item) => (
             <div key={item.id} className="space-y-1 rounded border border-border p-2">
-              <p className="font-medium text-warn">{kindLabel(item, document)}: {item.requirement}</p>
+              <p className="font-medium text-warn">{kindLabel(item, document)}: {item.requirement}{item.likelihood === "possible" && <span className="ml-1 text-faint">(possible: check carefully)</span>}</p>
               {(item.kind === "enrichment" || item.kind === "metric" || item.kind === "rewording") && item.original_text && (
                 <p className="text-muted">Your line: {item.original_text}</p>
               )}
               <textarea className="input w-full text-bad" rows={2} value={additionText[item.id] ?? startingText(item)}
                 onChange={(event) => setAdditionText((previous) => ({ ...previous, [item.id]: event.target.value }))} />
               {item.kind === "metric" && <p className="text-faint">Add the real number to the line above; never an estimate you could not back up at interview.</p>}
-              <p className="text-faint">Why ask: {item.reason} · CV: “{item.background_quote}” · Job: “{item.job_quote}”</p>
+              <p className="text-faint">Why ask: {item.reason}{item.basis ? ` · Typical because: ${item.basis}` : ""} · CV: “{item.background_quote}” · Job: “{item.job_quote}”</p>
               <div className="flex flex-wrap items-center gap-2">
                 <button className="btn-primary py-1 text-[11px]" disabled={review.isPending} onClick={() => review.mutate({ id: item.id, decision: "confirm" })}>Confirm edited fact</button>
                 <button className="btn-ghost py-1 text-[11px]" disabled={review.isPending} onClick={() => review.mutate({ id: item.id, decision: "delete" })}>Delete suggestion</button>
@@ -233,7 +259,7 @@ export function TailoredCVPanel({ jobId, result, hasCv, onLetter, letterPending 
           </select>
           {document ? (
             <div className="flex flex-wrap items-center gap-2">
-              <a className="text-accent hover:underline" href={document.download_url}><Download size={11} /> Download saved CV</a>
+              <a className="text-accent hover:underline" href={document.download_url}><Download size={11} /> Download draft (changes in red)</a>
               <button className="btn-ghost py-1 text-[12px]" onClick={() => setEditing(!editing)}>
                 {editing ? "Close editor" : "Review and edit CV"}
               </button>
@@ -247,6 +273,7 @@ export function TailoredCVPanel({ jobId, result, hasCv, onLetter, letterPending 
             </div>
           ) : <p className="text-muted">{hasCv ? "The letter will cite your selected CV. Older Word drafts can be selected in the CV library." : "No saved tailored CV is available for this job."}</p>}
           {editing && document && <Editor key={document.id + document.updated_at} document={document} onSaved={() => setEditing(false)} />}
+          {document && <FinalVersion document={document} />}
           <button className="btn-primary py-1 text-[12px]" disabled={letterPending || (!hasCv && !document) || (document != null && !document.reviewed)} onClick={() => onLetter(selected || undefined)}>
             {letterPending && <Loader2 size={12} className="animate-spin" />} Write cover letter from this CV
           </button>

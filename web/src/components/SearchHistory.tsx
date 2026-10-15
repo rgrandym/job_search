@@ -23,18 +23,29 @@ export function SearchHistory() {
     onError: () => void refresh(),
   });
   const remove = useMutation({
-    mutationFn: (id: string) => api.deleteHistory(id),
-    onSuccess: (_, id) => {
-      if (s.openedFrom?.id === id) s.set({ openedFrom: null });
-      if (s.lastSearchId === id) s.set({ lastSearchId: null });
-      void refresh();
+    mutationFn: ({ id }: { id: string; index: number }) => api.deleteHistory(id),
+    onSuccess: async (_, { id, index }) => {
+      const now = useSearch.getState();
+      const shown = !now.loading && (now.openedFrom?.id === id || now.outcome?.history_id === id);
+      const left = await qc.fetchQuery({ queryKey: ["history"], queryFn: api.history, staleTime: 0 });
+      if (!shown) {
+        if (now.lastSearchId === id) s.set({ lastSearchId: null });
+        return;
+      }
+      // The list on screen was deleted: show the one that took its place (or the one before),
+      // or nothing when no saved lists are left.
+      const next = left[Math.min(index, left.length - 1)];
+      if (next) open.mutate(next);
+      else s.set({ outcome: null, openedFrom: null, lastSearchId: null, log: [], error: null, selected: [] });
     },
   });
   const clear = useMutation({
     mutationFn: api.clearHistory,
     onSuccess: () => {
       setConfirmClear(false);
-      s.set({ openedFrom: null, lastSearchId: null });
+      // No saved lists are left: the results panel empties too (a running search keeps its own).
+      if (useSearch.getState().loading) s.set({ openedFrom: null, lastSearchId: null });
+      else s.set({ outcome: null, openedFrom: null, lastSearchId: null, log: [], error: null, selected: [] });
       void refresh();
     },
   });
@@ -66,7 +77,7 @@ export function SearchHistory() {
         <p className="text-[11px] text-faint">Your last 10 searches appear here, with their results.</p>
       ) : (
         <ul className="space-y-1">
-          {items.map((item) => (
+          {items.map((item, index) => (
             <li key={item.id} className="flex items-start gap-1">
               <button
                 type="button"
@@ -91,7 +102,7 @@ export function SearchHistory() {
                 title="Delete from history"
                 className="mt-1 text-faint hover:text-bad"
                 disabled={remove.isPending}
-                onClick={() => remove.mutate(item.id)}
+                onClick={() => remove.mutate({ id: item.id, index })}
               >
                 <Trash2 size={12} />
               </button>

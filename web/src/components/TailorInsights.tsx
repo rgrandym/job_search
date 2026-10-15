@@ -1,4 +1,4 @@
-import type { FitComparison, MatchClass, Positioning, ProjectedFit, RequirementEvidence, Screening, ScreeningScore } from "../lib/types";
+import type { FitComparison, MatchClass, Positioning, ProjectedFit, Readability, RequirementEvidence, Screening, ScreeningScore } from "../lib/types";
 import { cn } from "../lib/utils";
 
 const DIMENSION_LABEL: Record<string, string> = {
@@ -88,6 +88,23 @@ export function ScreeningSummary({ screening }: { screening: Screening | null | 
   );
 }
 
+/** How easily a person reads the CV: deterministic, original → tailored, with what to fix. */
+export function ReadabilitySummary({ readability }: { readability: Readability | null | undefined }) {
+  if (!readability) return null;
+  const { before, after } = readability;
+  return (
+    <div className="basis-full space-y-0.5 text-[12px]" title="Deterministic: computed by code. Short bullets, strong openings, active voice, varied openings, a short summary, and the job's keywords near the top, where a recruiter's skim lands. Grade A is 80 or more.">
+      <p>
+        <span className="font-medium">Readability: </span>
+        <span className="text-muted">original </span><b>{before.score}</b> <span className="text-muted">({before.grade})</span>
+        {" → tailored "}<Change before={before.score} after={after.score} text={`${after.score} (${after.grade})`} />
+        <span className="text-faint"> · {after.words} words, {after.bullets} bullets</span>
+      </p>
+      {after.notes.map((note) => <p key={note} className="text-[11px] text-faint">{note}</p>)}
+    </div>
+  );
+}
+
 /** An optimised draft's pending proposals: what confirming them would show, and which
  * proposal shows each newly met requirement. Hypothetical, never the draft's own score. */
 export function IfConfirmed({ projection, labels }: { projection: ProjectedFit; labels?: Record<string, string> }) {
@@ -158,7 +175,7 @@ export function FitCheckDetails({ check, capReason }: { check: FitComparison; ca
           On the first page <Change before={check.first_page_before} after={check.first_page_after} text={`${pct(check.first_page_before)} → ${pct(check.first_page_after)}`} />
         </span>
       </div>
-      {check.impression_after && <p className="text-faint">Top of the tailored CV: {check.impression_after}</p>}
+      {check.impression_after && <p className="text-faint">A recruiter's 6-second skim of the tailored CV: {check.impression_after}</p>}
       {check.impression_before && <p className="text-faint">Top of the original: {check.impression_before}</p>}
       {capReason && (
         <p className="text-warn">

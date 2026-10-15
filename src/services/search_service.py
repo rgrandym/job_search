@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import logging
+import threading
 import time
 import uuid
 from collections import Counter
@@ -54,6 +56,7 @@ from src.jobs.profile_memory import (
 from src.jobs.screener import VerdictCache, apply_verdicts, screen_jobs
 from src.jobs.sources.base import SourceError
 from src.jobs.sources.browser import BrowserFetcher
+from src.jobs.sources.companies import EmployerFeedReader
 from src.jobs.sources.gmail_alerts import GmailAlertSource, GmailAuth
 from src.jobs.sources.pages import PostingPages
 from src.jobs.sources.public_boards import LinkedInSource
@@ -278,6 +281,7 @@ async def _run_search(
     outcome.seconds = round(time.monotonic() - t0, 2)
     _take_log(outcome)
     outcome.history_id = history.record(ws, req, outcome).id
+    _learn_employers(ws, outcome.report)
     labels.attach_verdicts(ws, outcome.report, ws.last_models)  # labelled postings seen again
     history.log_family_yield(
         ws, outcome.history_id, _owner(ws, cv), outcome.families, outcome.report
@@ -673,6 +677,29 @@ async def _say(emit: Emit, stage: str, message: str, **extra: Any) -> None:
     if log is not None:
         log[1].append(f"{time.monotonic() - log[0]:7.1f}s  {message}")
     await emit("search_progress", {"stage": stage, "message": message, **extra})
+
+
+log = logging.getLogger(__name__)
+
+
+def _learn_employers(ws: Workspace, report: MatchReport) -> None:
+    """Queue the employers of matched job-board postings and look for their own job feeds in
+    the background (`company_discovery.learn_employers`), so the next search reads their jobs
+    in full from the source. Never delays this search's results."""
+    if ws.settings.learn_employers <= 0:
+        return
+    jobs = [r.job for r in [*report.matches, *report.to_check]]
+    if company_discovery.queue_employers(ws.settings, jobs) or jobs:
+        threading.Thread(
+            target=_quietly, args=(company_discovery.learn_employers, ws.settings), daemon=True
+        ).start()
+
+
+def _quietly(task: Callable[[Settings], object], settings: Settings) -> None:
+    try:
+        task(settings)
+    except Exception as exc:  # noqa: BLE001 - a background check never fails a search
+        log.warning("learning employers' job feeds failed: %s", exc)
 
 
 async def _ensure_company_boards(ws: Workspace, emit: Emit) -> None:
@@ -1246,6 +1273,19 @@ def list_profiles(ws: Workspace, cv: Any) -> list[StoredProfile]:
     ]
 
 
+def other_profiles(ws: Workspace, cv: Any) -> list[ProfileRecord]:
+    """The stored profiles of the user's other CVs: kept and listed whichever CV is selected
+    (user's decision 2026-10-15: only the user deletes a profile), each named by its CV."""
+    owner = _owner(ws, cv)
+    out: list[ProfileRecord] = []
+    for rec in ws.memory.all_records():
+        if rec.key.startswith(f"{owner}:"):
+            continue
+        name = rec.cv_name or (cv_service.cv_name(ws, rec.cv_id) if rec.cv_id else None)
+        out.append(rec.model_copy(update={"cv_name": name or "Another CV"}))
+    return out
+
+
 def _own_record(ws: Workspace, cv: Any, key: str) -> ProfileRecord:
     rec = ws.memory.record(key)
     if rec is None or not key.startswith(f"{_owner(ws, cv)}:"):
@@ -1294,9 +1334,10 @@ def edit_profile(ws: Workspace, cv: Any, key: str, summary: ProfileSummary) -> P
     return ws.memory.update(key, summary)
 
 
-def delete_profile(ws: Workspace, cv: Any, key: str) -> None:
-    _own_record(ws, cv, key)
-    ws.memory.delete(key)
+def delete_profile(ws: Workspace, key: str) -> None:
+    """Delete a stored profile of any CV: only ever on the user's request."""
+    if not ws.memory.delete(key):
+        raise ValueError("That profile was not found")
 
 
 SOURCE_LABELS = {
@@ -1510,6 +1551,7 @@ def _enrich(
     if linkedin is None:
         linkedin = LinkedInSource(settings=settings)
     chrome = BrowserFetcher(settings)
+    feeds = EmployerFeedReader(settings=settings)
     readers = [PostingPages(settings=settings), *([chrome] if chrome.available else [])]
     thin = [j for j in shortlist if len(j.description) <= ENRICH_BELOW]
     lanes = {
@@ -1519,8 +1561,10 @@ def _enrich(
     deadline = time.monotonic() + settings.enrich_budget_s
 
     def readers_for(job: JobPosting) -> list[Any]:
+        """The employer's own feed first (the full job, no board page opened), then the
+        posting's source, its page data and Chrome."""
         src = linkedin if job.id.startswith("linkedin:") else by_name.get(job.source)
-        return [src, *readers]
+        return [feeds, src, *readers]
 
     runs = [(contextvars.copy_context(), n, jobs) for n, jobs in lanes.items() if jobs]
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -1586,6 +1630,7 @@ def _read_one(
 
 
 READER_NAMES = {
+    "employer_feed": "the employer's job feed",
     "linkedin_search": "LinkedIn",
     "posting_pages": "page data",
     "browser": "Chrome",

@@ -12,7 +12,7 @@ from typing import Literal
 from docx import Document
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.cv.cover_letter import apply_letter
+from src.cv.cover_letter import apply_letter, score_letter
 from src.cv.docx_exporter import export_cover_letter
 from src.cv.models import (
     Basics,
@@ -271,6 +271,8 @@ def edit(ws: Workspace, document_id: str, edits: LetterEdits) -> SavedLetter:
             ]
         }
     )
+    if old.score is not None:  # scored again on the same job terms
+        letter = letter.model_copy(update={"score": score_letter(letter, old.score.terms)})
     path = _edit_path(ws, document)
     cv = document.source_cv or MasterCV(basics=Basics(name=document.candidate_name))
     written = path.with_name(f".{path.stem}.writing.docx")  # replaced whole, never half-written

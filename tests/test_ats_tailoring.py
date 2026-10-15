@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from docx import Document
+
+from src.cv.acronyms import known_pairs, pairs_in
+from src.cv.ats import layout_warnings
+from src.cv.ats_score import score_cv
 from src.cv.fit_check import ats_match
 from src.cv.models import (
     FitComparison,
@@ -119,7 +126,7 @@ def _revising(first: TailoringPlan, second: TailoringPlan) -> FakeLLM:
 def test_a_draft_under_grade_a_is_revised_once_and_the_better_kept(master_cv: MasterCV) -> None:
     llm = _revising(TailoringPlan(), _plan())
     seen, check = _checker(_reading(55, 55))
-    out = tailor(master_cv, JOB_TEXT, llm, jd=JD, review=False, check=check)  # type: ignore[arg-type]
+    out = tailor(master_cv, JOB_TEXT, llm, jd=JD, check=check)  # type: ignore[arg-type]
     assert len(seen) == 1 and len(llm.calls) == 2  # one AI reading, at the end
     assert "<reading>" in llm.calls[1][0] and TERM in llm.calls[1][0]
     assert out.screening is not None and TERM in out.matched_keywords
@@ -130,7 +137,7 @@ def test_a_draft_under_grade_a_is_revised_once_and_the_better_kept(master_cv: Ma
 def test_the_first_draft_is_kept_when_the_revision_scores_no_better(master_cv: MasterCV) -> None:
     llm = _revising(_plan(), TailoringPlan())
     _, check = _checker(_reading(55, 57))
-    out = tailor(master_cv, JOB_TEXT, llm, jd=JD, review=False, check=check)  # type: ignore[arg-type]
+    out = tailor(master_cv, JOB_TEXT, llm, jd=JD, check=check)  # type: ignore[arg-type]
     assert TERM in out.matched_keywords
     assert "first draft scored as well or better" in out.revision
 
@@ -139,9 +146,7 @@ def test_no_revision_once_the_screening_score_is_grade_a(master_cv: MasterCV) ->
     jd = JDAnalysis(job_title="Senior Machine Learning Engineer", hard_skills=["Python"])
     llm = FakeLLM({TailoringPlan: lambda _p: TailoringPlan()})
     seen, check = _checker(_reading(60, 60))
-    out = tailor(
-        master_cv, "Senior Machine Learning Engineer, Python", llm, jd=jd, review=False, check=check
-    )  # type: ignore[arg-type]
+    out = tailor(master_cv, "Senior Machine Learning Engineer, Python", llm, jd=jd, check=check)  # type: ignore[arg-type]
     assert out.screening is not None and out.screening.after.grade == "A"
     assert len(seen) == 1 and len(llm.calls) == 1 and out.revision == ""
 
@@ -150,3 +155,68 @@ def test_ats_match_weighs_keywords_and_requirements_shown() -> None:
     assert ats_match(0.5, 2, 4) == 50
     assert ats_match(1.0, 3, 4) == 88
     assert ats_match(0.4, 0, 0) == 40  # no requirements read: keywords alone
+
+
+# --- a term and its abbreviation (user's decision 2026-10-15) -------------------------------
+
+
+def test_abbreviations_pair_only_with_matching_initials() -> None:
+    text = (
+        "Experience with liquid chromatography–mass spectrometry (LC-MS) and Key Performance "
+        "Indicators (KPIs). Uses AWS (Amazon Web Services). Python (3.11). Doctor of "
+        "Philosophy (PhD)."
+    )
+    assert pairs_in(text) == [
+        ("liquid chromatography–mass spectrometry", "LC-MS"),
+        ("Key Performance Indicators", "KPIs"),
+        ("Amazon Web Services", "AWS"),
+    ]
+    assert ("machine learning", "ML") in known_pairs()
+
+
+def test_the_score_credits_the_form_the_posting_pairs_with_a_term() -> None:
+    jd = JDAnalysis(job_title="Scientist", hard_skills=["LC-MS", "machine learning"])
+    posting = "Scientist with liquid chromatography-mass spectrometry (LC-MS) and machine learning."
+    cv = "Ran liquid chromatography mass spectrometry assays; built ML models."
+    found = {c.term: c.found for c in score_cv(cv, "", jd, posting, jd.hard_skills).keywords}
+    # the posting pairs LC-MS with its long form; "ML" alone is not what it searches for
+    assert found == {"LC-MS": True, "machine learning": False}
+
+
+def test_a_missing_job_term_is_written_in_both_forms_once(master_cv: MasterCV) -> None:
+    cv = master_cv.model_copy(deep=True)
+    cv.experience[0].bullets[1].text = "Tracked KPIs weekly and prepared 10 ml buffer stocks."
+    jd = JDAnalysis(
+        job_title="Data Scientist",
+        hard_skills=[
+            "natural language processing",
+            "key performance indicators",
+            "machine learning",
+        ],
+    )
+    posting = "You will report key performance indicators (KPIs) and use NLP."
+    out = apply_plan(cv, TailoringPlan(), jd, jd_text=posting)
+    bullets = out.cv.bullet_index()
+    assert bullets["lexa-1"].text.startswith("Developed natural language processing (NLP) models")
+    assert bullets["nimbus-2"].text.startswith("Tracked key performance indicators (KPIs) weekly")
+    assert "10 ml buffer" in bullets["nimbus-2"].text  # millilitres are not "ML"
+    assert sum("natural language processing" in b.text for b in bullets.values()) == 1
+    assert {c.source_id for c in out.changes if c.accepted} >= {"lexa-1", "nimbus-2"}
+    assert "natural language processing" in out.matched_keywords
+    again = apply_plan(out.cv, TailoringPlan(), jd, jd_text=posting)
+    assert again.cv.bullet_index()["lexa-1"].text == bullets["lexa-1"].text  # once only
+
+
+def test_read_back_flags_dates_parsers_may_misread(master_cv: MasterCV, tmp_path: Path) -> None:
+    path = tmp_path / "cv.docx"
+    doc = Document()
+    for line in ["Experience", "Nimbus Analytics, Senior ML Engineer, 03/2021 to date",
+                 "Lexa Labs, ML Engineer, Sep 2017 – Feb 2021", "Education", "Skills"]:  # fmt: skip
+        doc.add_paragraph(line)
+    doc.save(str(path))
+    warnings = " | ".join(layout_warnings(path, master_cv))
+    assert "Dates a parser may misread: Nimbus Analytics (" in warnings
+    assert "Lexa Labs (" not in warnings and "No standard section heading" not in warnings
+    doc.paragraphs[-1].text = "Tools"
+    doc.save(str(path))
+    assert "heading for: skills" in " | ".join(layout_warnings(path, master_cv))

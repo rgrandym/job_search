@@ -13,6 +13,7 @@ from docx import Document
 from docx.document import Document as DocxDocument
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt, RGBColor
+from docx.text.paragraph import Paragraph
 from pydantic import BaseModel, Field
 
 from src.cv.models import CoverLetter, MasterCV, ReviewAddition, TailoredCV
@@ -31,6 +32,7 @@ DEFAULT_SECTIONS: list[Section] = [
     "certifications",
     "languages",
 ]
+REVIEW_RED = RGBColor(0xC0, 0x00, 0x00)  # a changed line in a draft; a questioned letter line
 _MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 
@@ -72,15 +74,22 @@ TEMPLATES: dict[str, DocxTemplate] = {
 }
 
 
-def export_docx(cv: MasterCV | TailoredCV, path: Path, template: str = "classic") -> Path:
-    """Write `cv` to `path` (.docx) using a named template from `TEMPLATES`."""
+def export_docx(
+    cv: MasterCV | TailoredCV, path: Path, template: str = "classic", final: bool = False
+) -> Path:
+    """Write `cv` to `path` (.docx) using a named template from `TEMPLATES`. A tailored
+    draft shows every rewritten or added line in red; `final` writes the clean version: no
+    red, no suggested headlines and nothing pending review."""
     if template not in TEMPLATES:
         raise ValueError(f"Unknown template {template!r}. Choose from {sorted(TEMPLATES)}")
     tpl = TEMPLATES[template]
-    master = cv.cv if isinstance(cv, TailoredCV) else cv
-    options = cv.headline_options if isinstance(cv, TailoredCV) else []
+    tailored = clean_copy(cv) if isinstance(cv, TailoredCV) and final else cv
+    draft = tailored if isinstance(tailored, TailoredCV) else None
+    master = draft.cv if draft else cv if isinstance(cv, MasterCV) else cv.cv
+    options = draft.headline_options if draft else []
+    changed = {c.source_id for c in draft.changes if c.accepted} if draft else set()
     sections = list(tpl.sections)
-    if isinstance(cv, TailoredCV) and cv.academic and "education" in sections:
+    if draft and draft.academic and "education" in sections:
         sections.remove("education")  # academic readers look for education first
         sections.insert(sections.index("summary") + 1 if "summary" in sections else 0, "education")
 
@@ -88,38 +97,54 @@ def export_docx(cv: MasterCV | TailoredCV, path: Path, template: str = "classic"
     dt.set_margins(doc, tpl.margins_in)
     dt.set_base_font(doc, tpl.font, tpl.body_pt)
     _header(doc, master, tpl, options)
-    renderers = {
-        "summary": _summary,
-        "experience": _experience,
-        "skills": _skills,
-        "projects": _projects,
-        "education": _education,
-        "certifications": _certifications,
-        "languages": _languages,
-    }
+    marked = list(doc.paragraphs[1 + bool(master.basics.headline) :][: len(options)])
     for section in sections:
-        if section == "experience" and isinstance(cv, TailoredCV):
-            _experience(doc, master, tpl, cv.review_additions)
+        before = len(doc.paragraphs)
+        if section == "experience" and draft:
+            _experience(doc, master, tpl, draft.review_additions)
+            texts = {b.text for b in master.bullet_index().values() if b.id in changed}
+            marked += [p for p in doc.paragraphs[before:] if p.text in texts]
         else:
-            renderers[section](doc, master, tpl)
-        if section == "summary" and isinstance(cv, TailoredCV) and cv.role_skills:
-            doc.add_paragraph(f"Relevant skills for this role: {' · '.join(cv.role_skills)}")
-        if section == "summary" and isinstance(cv, TailoredCV) and cv.skills_to_confirm:
-            paragraph = doc.add_paragraph()
-            run = paragraph.add_run(
-                "Skills to confirm before use (not yet claimed): "
-                + " · ".join(s.skill for s in cv.skills_to_confirm)
-            )
-            run.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
-        if section == "summary" and isinstance(cv, TailoredCV):
-            for item in cv.review_additions:
-                if item.status == "pending" and item.kind == "skill":
-                    run = doc.add_paragraph().add_run(f"[CONFIRM SKILL BEFORE USE] {item.text}")
-                    run.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
-
+            RENDERERS[section](doc, master, tpl)
+        if section == "summary" and "summary" in changed:
+            marked += doc.paragraphs[before + 1 :]
+        if section == "summary" and draft:
+            marked += _summary_extras(doc, draft)
+    for paragraph in [] if final else marked:
+        for run in paragraph.runs:
+            run.font.color.rgb = REVIEW_RED
     path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(path))
     return path
+
+
+def clean_copy(cv: TailoredCV) -> TailoredCV:
+    """The final version's content: no suggested headlines, nothing pending review."""
+    return cv.model_copy(
+        update={
+            "headline_options": [],
+            "skills_to_confirm": [],
+            "review_additions": [a for a in cv.review_additions if a.status != "pending"],
+            "changes": [],
+        }
+    )
+
+
+def _summary_extras(doc: DocxDocument, cv: TailoredCV) -> list[Paragraph]:
+    """The lines under the summary: the relevant-skills line (returned, to be marked as a
+    change) and, in red, what is still to confirm."""
+    marked = [doc.add_paragraph(f"• {text}") for text in cv.key_strengths]
+    if cv.role_skills:
+        line = f"Relevant skills for this role: {' · '.join(cv.role_skills)}"
+        marked.append(doc.add_paragraph(line))
+    pending = [f"[CONFIRM SKILL BEFORE USE] {a.text}" for a in cv.review_additions
+               if a.status == "pending" and a.kind == "skill"]  # fmt: skip
+    if cv.skills_to_confirm:
+        skills = " · ".join(s.skill for s in cv.skills_to_confirm)
+        pending.insert(0, f"Skills to confirm before use (not yet claimed): {skills}")
+    for text in pending:
+        doc.add_paragraph().add_run(text).font.color.rgb = REVIEW_RED
+    return marked
 
 
 def fmt_date(ym: str | None) -> str:
@@ -243,9 +268,6 @@ def _languages(doc: DocxDocument, cv: MasterCV, tpl: DocxTemplate) -> None:
         doc.add_paragraph(", ".join(cv.languages))
 
 
-REVIEW_RED = RGBColor(0xC0, 0x00, 0x00)  # a letter paragraph a check questions
-
-
 def export_cover_letter(
     letter: CoverLetter, cv: MasterCV, path: Path, template: str = "classic"
 ) -> Path:
@@ -274,3 +296,14 @@ def export_cover_letter(
     path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(path))
     return path
+
+
+RENDERERS = {
+    "summary": _summary,
+    "experience": _experience,
+    "skills": _skills,
+    "projects": _projects,
+    "education": _education,
+    "certifications": _certifications,
+    "languages": _languages,
+}

@@ -87,7 +87,8 @@ When torn between two ratings, give the lower one. `requirements_met`: each list
 a specific line of the CV shows the candidate meets, with that line copied word for word as \
 `quote`; leave out any you would have to infer. Quotes are checked against the CV: a rating \
 above {UNQUOTED_CAP} or a requirement whose quote is not in that CV does not count. \
-`impression`: one sentence on what the top of the CV conveys for this job.
+`impression`: one sentence on what a recruiter takes away from a six-second skim of the top \
+of the CV (headline, summary, key strengths, first role) for this job.
 Use the same standard for every CV, so the ratings can be compared. Return one reading per \
 CV in `readings`, in the order given: CV 1 first."""
 

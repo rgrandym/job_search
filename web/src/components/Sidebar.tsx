@@ -15,6 +15,7 @@ import { SearchHistory } from "./SearchHistory";
 import { TrackerPanel } from "./TrackerPanel";
 import { CVDocument } from "./CVDocument";
 import { CVEditor } from "./CVEditor";
+import { CVHealthPanel } from "./CVHealthPanel";
 import { FindOneJob } from "./FindOneJob";
 import { ChipInput, Field, Modal, Toggle, Resizable } from "./ui";
 
@@ -196,7 +197,9 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
   const cvFiles = state?.cv_files.available ?? [];
   const selectedCv = cvFiles.find((item) => item.id === state?.cv_files.selected);
   const hasCv = !!selectedCv;
-  const expandedProfile = profiles.data?.profiles.find((record) => record.key === expandedProfileKey);
+  const otherProfiles = profiles.data?.other_profiles ?? [];
+  const expandedOwn = profiles.data?.profiles.find((record) => record.key === expandedProfileKey);
+  const expandedProfile = expandedOwn ?? otherProfiles.find((record) => record.key === expandedProfileKey);
   return (
     <aside className="flex h-full min-w-0 flex-col gap-3 overflow-x-hidden overflow-y-auto p-3 scroll-thin">
       {/* Profile */}
@@ -300,7 +303,10 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
         )}
         {hasCv && (
           <div className="space-y-1">
-            <span className="label">Available profiles · {profiles.data?.profiles.length ?? 0}</span>
+            <span className="flex items-center justify-between">
+              <span className="label">Available profiles · {(profiles.data?.profiles.length ?? 0) + otherProfiles.length}</span>
+              <button type="button" className="text-[11px] text-accent hover:underline" onClick={() => onShowSummary()}>Open all profiles</button>
+            </span>
             <button
               type="button"
               className="btn-ghost w-full justify-center py-1 text-[11px]"
@@ -365,6 +371,47 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
                 ))}
               </ul>
             )}
+            {otherProfiles.length > 0 && (
+              <div className="space-y-1 pt-1">
+                <span className="label">Profiles of your other CVs · {otherProfiles.length}</span>
+                <p className="text-[10px] text-faint">Kept until you delete them. Select that CV to search, pin or edit with one.</p>
+                <ul className="max-h-40 space-y-1 overflow-y-auto pr-1 scroll-thin" aria-label="Profiles of your other CVs">
+                  {otherProfiles.map((record) => {
+                    const name = record.role_family === "any" ? "General profile" : record.role_family;
+                    return (
+                      <li key={record.key} className={`flex items-center rounded-md border ${
+                        expandedProfileKey === record.key ? "border-accent bg-accent-bg" : "border-border bg-surface"
+                      }`}>
+                        <button
+                          type="button"
+                          title={record.summary.headline}
+                          onClick={() => setExpandedProfileKey(expandedProfileKey === record.key ? null : record.key)}
+                          className="flex min-w-0 flex-1 items-center gap-1 px-2 py-1 text-left text-[11px]"
+                        >
+                          <ChevronRight size={12} className="shrink-0" />
+                          <span className="min-w-0">
+                            <span className="block truncate font-medium text-fg">{name}</span>
+                            <span className="block truncate text-faint">{record.cv_name}</span>
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          className="shrink-0 px-2 text-bad disabled:opacity-50"
+                          aria-label={`Delete ${name} profile of ${record.cv_name}`}
+                          title="Delete profile"
+                          disabled={deleteProfile.isPending}
+                          onClick={() => {
+                            if (window.confirm(`Delete the "${name}" profile of ${record.cv_name}?`)) deleteProfile.mutate(record.key);
+                          }}
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
             {deleteProfile.error && <p className="text-[11px] text-bad">{deleteProfile.error.message}</p>}
           </div>
         )}
@@ -378,6 +425,7 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
             {generalCV.isPending && <TaskProgress id={generalTask.id} />}
             {generalCV.data && <a className="block text-[11px] text-accent hover:underline" href={generalCV.data.download_url}>Download CV · {generalCV.data.roles} roles</a>}
             <TaskError error={generalCV.error} className="text-[11px]" />
+            <CVHealthPanel />
           </div>
         )}
         <Toggle checked={s.useCv && hasCv} onChange={(v) => s.set({ useCv: v })} label="Match against my CV" />
@@ -601,7 +649,7 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
         onClose={() => { setExpandedProfileKey(null); setEditingProfile(false); }}
         title={expandedProfile?.role_family === "any" ? "General profile" : expandedProfile?.role_family ?? "Profile"}
         resizable
-        headerAction={!editingProfile && <button type="button" className="text-[12px] text-accent hover:underline" onClick={() => setEditingProfile(true)}>Edit profile</button>}
+        headerAction={!editingProfile && expandedOwn && <button type="button" className="text-[12px] text-accent hover:underline" onClick={() => setEditingProfile(true)}>Edit profile</button>}
       >
         {editingProfile && expandedProfileKey ? (
           <SummaryDialog open onClose={() => setEditingProfile(false)} initialProfileKey={expandedProfileKey} embedded />

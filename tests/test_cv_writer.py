@@ -9,14 +9,14 @@ from typing import Any
 
 import pytest
 from docx import Document
-from docx.shared import Pt
+from docx.shared import Pt, RGBColor
 from pydantic import ValidationError
 
 from src.cv import master_cv_manager as mgr
 from src.cv.docx_exporter import TEMPLATES, export_docx, fmt_date
 from src.cv.docx_original import restore_normalized_indents
 from src.cv.models import (
-    CVCritique,
+    ChangeRecord,
     JDAnalysis,
     MasterCV,
     RewrittenBullet,
@@ -293,7 +293,7 @@ def test_requirement_sentences_are_not_reported_as_missing_keywords(master_cv: M
 
 def test_tailor_end_to_end(master_cv: MasterCV) -> None:
     plan = TailoringPlan(headline_options=["Senior Machine Learning Engineer | MLOps"])
-    llm = FakeLLM({JDAnalysis: JD, TailoringPlan: plan, CVCritique: CVCritique()})
+    llm = FakeLLM({JDAnalysis: JD, TailoringPlan: plan})
     job = "We need a Staff ML Engineer: Python, PyTorch, Kubernetes, Spark and MLOps."
     out = tailor(master_cv, job, llm)
     assert out.cv.basics.headline == master_cv.basics.headline  # the CV's own headline stays
@@ -301,7 +301,7 @@ def test_tailor_end_to_end(master_cv: MasterCV) -> None:
     assert out.trim is not None
     assert out.target_company == "Orbit AI"
     assert 0 < out.keyword_coverage < 1
-    assert [m for _, m in llm.calls].count(TailoringPlan) == 1  # no issues: no revision
+    assert [m for _, m in llm.calls].count(TailoringPlan) == 2  # under grade A: one revision
 
 
 # ---------------------------------------------------------------- docx export
@@ -547,13 +547,12 @@ def test_suggested_headlines_are_written_under_the_cvs_own(
     assert texts[1:4] == [master_cv.basics.headline, *options]
 
 
-def test_the_review_reads_the_cv_as_printed_and_knows_the_rules(master_cv: MasterCV) -> None:
-    from src.cv.tailor import CRITIC_SYSTEM, cv_to_text
+def test_the_printed_cv_has_no_skill_tag_lines(master_cv: MasterCV) -> None:
+    from src.cv.tailor import cv_to_text
 
     tag = master_cv.experience[0].bullets[0].skills[0]
     printed = cv_to_text(master_cv, tags=False).splitlines().count(tag)
     assert printed < cv_to_text(master_cv).splitlines().count(tag)  # no per-role tag lines
-    assert "never removing" in CRITIC_SYSTEM and "own headline" in CRITIC_SYSTEM
 
 
 def test_footer_carries_the_cvs_own_name_and_todays_date(
@@ -598,3 +597,39 @@ def test_a_rewrite_may_not_drop_the_lines_numbers_or_most_of_its_detail(
         "Built a real-time recommendation service in Python and PyTorch for 4M users, "
         "lifting click-through rate by 18%."
     ).accepted
+
+
+def _red_texts(path: Path) -> set[str]:
+    return {
+        p.text
+        for p in Document(str(path)).paragraphs
+        if p.runs and all(r.font.color.rgb == RGBColor(0xC0, 0x00, 0x00) for r in p.runs)
+    }
+
+
+def test_every_change_is_red_in_a_draft_and_black_in_the_final_version(
+    master_cv: MasterCV, tmp_path: Path
+) -> None:
+    from src.cv.docx_original import write_like_original
+
+    original = _original_cv(master_cv, tmp_path / "original.docx")
+    cv = master_cv.model_copy(deep=True)
+    new = "Built a real-time recommendation service in Python serving 4M users (18% CTR lift)."
+    cv.experience[0].bullets[0].text = new
+    draft, final = tmp_path / "draft.docx", tmp_path / "final.docx"
+    write_like_original(original, master_cv, cv, draft, ["Staff ML Engineer"], ["Python"])
+    red = _red_texts(draft)
+    assert {new, "Staff ML Engineer", "Relevant skills for this role: Python"} <= red
+    assert master_cv.experience[0].bullets[1].text not in red  # unchanged lines stay black
+    write_like_original(original, master_cv, cv, final, (), ["Python"], mark_changes=False)
+    assert _red_texts(final) == set()
+    tailored = apply_plan(master_cv, TailoringPlan(), JD)
+    tailored.headline_options = ["Staff ML Engineer"]
+    tailored.cv.experience[0].bullets[0].text = new
+    tailored.changes.append(ChangeRecord(source_id="nimbus-1", original="", tailored=new,
+                                         accepted=True))  # fmt: skip
+    export_docx(tailored, draft)
+    assert new in _red_texts(draft) and "Staff ML Engineer" in _red_texts(draft)
+    export_docx(tailored, final, final=True)
+    text = [p.text for p in Document(str(final)).paragraphs]
+    assert _red_texts(final) == set() and "Staff ML Engineer" not in text and new in text

@@ -48,15 +48,17 @@ from urllib.parse import urljoin, urlsplit
 from pydantic import BaseModel
 
 from src.core.config import Settings, get_settings
-from src.jobs.models import SearchQuery
+from src.jobs.models import JobPosting, SearchQuery
 from src.jobs.sources.base import HttpFetcher, SourceError, extract_jsonld_jobs, html_to_text
 from src.jobs.sources.companies import (
     URL_KINDS,
     AtsKind,
     CompanyBoard,
     CompanyCareersSource,
+    company_words,
     detect_boards,
     load_companies,
+    same_company,
     save_companies,
 )
 from src.jobs.sources.directories import DirectoryCompany, fetch_directory
@@ -207,11 +209,23 @@ class DirectoryListing(BaseModel):
     companies: list[DirectoryCompany]
 
 
+class LearnedEmployer(BaseModel):
+    """An employer seen on a job board (a matched job): queued, then checked for a feed."""
+
+    name: str
+    apply_url: str | None = None
+    board: CompanyBoard | None = None
+    note: str = ""
+    checked_on: date | None = None  # None: queued, not checked yet
+
+
 class DiscoveryCache(BaseModel):
-    """Everything discovery knows: directory listings and one record per company website."""
+    """Everything discovery knows: directory listings, one record per company website, and
+    the employers learned from job boards (by company key)."""
 
     directories: dict[str, DirectoryListing] = {}
     records: list[DiscoveryRecord] = []
+    learned: dict[str, LearnedEmployer] = {}
 
 
 class DiscoveryStatus(BaseModel):
@@ -539,6 +553,124 @@ def _save(
         without_feed=len(companies) - len(boards),
         watch_list=len(watch_list),
     )
+
+
+# ---------------------------------------------------------------- employers seen on job boards
+
+BOARDS_ORIGIN = "boards"  # watch-list entries learned from employers seen on job boards
+_AGENCY = re.compile(
+    r"\b(?:recruit\w*|staffing|resourcing|talent|personnel|selection|appointments|"
+    r"consult\w*|agency|search partners)\b",
+    re.IGNORECASE,
+)
+
+
+def queue_employers(settings: Settings, jobs: list[JobPosting]) -> int:
+    """Queue the employers of matched job-board postings whose job feed is not known yet
+    (user's decision 2026-10-15: most matches come from boards, and most of their employers'
+    own feeds were missing). No network; returns how many were queued."""
+    path = discovery_path(settings)
+    cache = _load_cache(path)
+    watch = load_companies(settings.companies_path) if settings.companies_path.exists() else []
+    queued = 0
+    for job in jobs:
+        key = "-".join(company_words(job.company))
+        if (
+            ":" in job.source  # read from an employer's own feed already
+            or len(key) < 3
+            or job.company in ("?", "unknown")
+            or _AGENCY.search(job.company)
+            or any(same_company(b.name, job.company) for b in watch)
+        ):
+            continue
+        known = cache.learned.get(key)
+        if known is None or (known.apply_url is None and job.apply_url):
+            cache.learned[key] = LearnedEmployer(name=job.company, apply_url=job.apply_url)
+            queued += known is None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(cache.model_dump_json(indent=2), encoding="utf-8")
+    return queued
+
+
+def learn_employers(
+    settings: Settings, limit: int | None = None, http: HttpFetcher | None = None
+) -> list[CompanyBoard]:
+    """Look for the job feed of up to `limit` queued employers (and recheck ones not found
+    after MAX_AGE_DAYS): the ATS their posting's apply link names, else a public ATS board
+    under their name whose own name matches. Found feeds join the watch-list."""
+    limit = settings.learn_employers if limit is None else limit
+    with _RUN_LOCK:
+        path, today = discovery_path(settings), date.today()
+        cache = _load_cache(path)
+        todo = [
+            e
+            for e in cache.learned.values()
+            if e.checked_on is None
+            or (e.board is None and (today - e.checked_on).days > MAX_AGE_DAYS)
+        ][:limit]
+        source = CompanyCareersSource([], http or HttpFetcher(settings), settings)
+        for employer in todo:
+            board, note = learn_board(source, employer)
+            employer.board, employer.note, employer.checked_on = board, note, today
+        path.write_text(cache.model_dump_json(indent=2), encoding="utf-8")
+        boards = [e.board for e in cache.learned.values() if e.board is not None]
+        watch_path = settings.companies_path
+        existing = load_companies(watch_path) if watch_path.exists() else []
+        save_companies(watch_path, merge_boards(existing, boards, BOARDS_ORIGIN))
+    return [e.board for e in todo if e.board is not None]
+
+
+def learn_board(
+    source: CompanyCareersSource, employer: LearnedEmployer
+) -> tuple[CompanyBoard | None, str]:
+    """One employer's feed (or None) and how it was found or why not."""
+    note = "no public job board found under this name"
+    if employer.apply_url:
+        for board in detect_boards(employer.apply_url, employer.name, BOARDS_ORIGIN):
+            try:
+                source.fetch_board(board, PROBE_QUERY)
+                return board, "named by the posting's apply link"
+            except SourceError as exc:
+                note = f"{board.key} did not answer: {exc}"[:200]
+    words = company_words(employer.name)
+    slugs = list(dict.fromkeys(["".join(words), "-".join(words)]))
+    if len(slugs[0]) < 5:  # a short name could be anyone's board
+        return None, note
+    for slug in slugs:
+        for ats, probe in NAME_PROBES.items():
+            try:
+                found = probe(source.http, slug)
+            except (SourceError, ValueError, KeyError, TypeError, IndexError):
+                continue
+            if found and same_company(found, employer.name):
+                board = CompanyBoard(name=employer.name, ats=ats, token=slug, origin=BOARDS_ORIGIN)
+                return board, f"{ats} board {slug!r} ({found})"
+    return None, note
+
+
+def _greenhouse_name(http: HttpFetcher, slug: str) -> str | None:
+    return str(http.get(f"https://boards-api.greenhouse.io/v1/boards/{slug}").json()["name"])
+
+
+def _workable_name(http: HttpFetcher, slug: str) -> str | None:
+    url = f"https://apply.workable.com/api/v1/widget/accounts/{slug}"
+    return str(http.get(url).json()["name"])
+
+
+def _smartrecruiters_name(http: HttpFetcher, slug: str) -> str | None:
+    url = f"https://api.smartrecruiters.com/v1/companies/{slug}/postings"
+    content = http.get(url, params={"limit": 1}).json()["content"]
+    return str(content[0]["company"]["name"]) if content else None
+
+
+# Public ATS APIs that state the board's company name, so a board found by guessing the
+# employer's slug can be checked to be theirs (Lever and Ashby do not: never guessed).
+# Unverified mappings: the "name" fields are as documented by each ATS, tested with mocks only.
+NAME_PROBES: dict[AtsKind, Callable[[HttpFetcher, str], str | None]] = {
+    "greenhouse": _greenhouse_name,
+    "workable": _workable_name,
+    "smartrecruiters": _smartrecruiters_name,
+}
 
 
 # ---------------------------------------------------------------- the user's own companies

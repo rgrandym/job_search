@@ -182,8 +182,7 @@ def _readings_path(ws: Workspace) -> Path:
 
 def _reader(ws: Workspace) -> str:
     """The model that reads: another model may read differently, so it reads afresh."""
-    llm = ws.llm
-    return f"{llm.provider_for('cv')}:{llm.model_for('cv')}:{llm.effort_for('cv')}"
+    return cv_service.grader_id(ws)
 
 
 def _known(ws: Workspace, keys: list[str]) -> list[FitReading | None]:
@@ -347,7 +346,7 @@ async def compare(
     requirements = requirements_for(lead.tailored, lead.jd, search_fit)
     keywords = ats_keywords(lead.jd)
     progress.step(f"Reading {len(items)} CVs side by side for this job")
-    llm = ws.structured("cv", usage_sink, "CV version comparison")
+    llm = ws.structured(cv_service.GRADER, usage_sink, "CV version comparison (independent grader)")
     jd_text = _job_text(lead)
     projected, extra = _projections(documents)
     first_extra = extra[: MAX_VERSIONS - len(texts)]

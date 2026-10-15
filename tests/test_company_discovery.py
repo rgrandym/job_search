@@ -792,3 +792,108 @@ def test_adding_a_company_says_why_nothing_was_found(settings: Settings) -> None
     with pytest.raises(ValueError, match=r"refuses automated reading \(403\)"):
         cd.add_company(settings, "Gamma", "https://gamma.com/", http)
     assert cd.your_companies(settings) == []
+
+
+# ------------------------------------------------------------------ employers seen on job boards
+
+
+def test_linkedin_names_the_employers_own_apply_link() -> None:
+    from src.jobs.sources.public_boards import linkedin_apply_url
+
+    target = "https://altos.wd3.myworkdayjobs.com/Careers/job/Cambridge/Scientist_R1"
+    link = "https://www.linkedin.com/jobs/view/externalApply/1?url=" + httpx.QueryParams(
+        {"u": target}
+    )["u"].replace(":", "%3A").replace("/", "%2F")
+    page = f'<code id="applyUrl" style="display: none"><!--"{link}&amp;urlHash=x"--></code>'
+    assert linkedin_apply_url(page) == target
+    assert linkedin_apply_url("<p>Easy Apply</p>") is None
+
+
+def test_board_employers_are_queued_and_their_feeds_learned(settings: Settings) -> None:
+    save_companies(
+        settings.companies_path,
+        [
+            CompanyBoard(
+                name="GSK",
+                ats="workday",
+                url="https://gsk.wd5.myworkdayjobs.com/GSKCareers",
+                origin="known",
+            )
+        ],
+    )
+    jobs = [
+        JobPosting(
+            id="linkedin:1",
+            title="Scientist",
+            company="Altos Labs Ltd",
+            source="linkedin_search",
+            apply_url="https://boards.greenhouse.io/altoslabs/jobs/9",
+        ),
+        JobPosting(id="adzuna:2", title="Scientist", company="Basecamp Research", source="adzuna"),
+        JobPosting(
+            id="adzuna:3", title="Scientist", company="CK Group Recruitment", source="adzuna"
+        ),
+        JobPosting(id="adzuna:4", title="Scientist", company="GSK plc", source="adzuna"),
+        JobPosting(id="workday:x", title="Scientist", company="Pfizer", source="workday:pfizer"),
+    ]
+    assert cd.queue_employers(settings, jobs) == 2  # not agencies, known feeds or feeds
+    http, seen = _http(
+        settings,
+        {
+            "boards-api.greenhouse.io/v1/boards/altoslabs/jobs": {"jobs": []},
+            "apply.workable.com/api/v1/widget/accounts/basecampresearch": {
+                "name": "Basecamp Research",
+                "jobs": [],
+            },
+            "/v1/boards/basecamp-research": {"name": "Someone Else"},  # not theirs
+        },
+    )
+    found = cd.learn_employers(settings, 10, http)
+    assert {(b.name, b.ats, b.token) for b in found} == {
+        ("Altos Labs Ltd", "greenhouse", "altoslabs"),
+        ("Basecamp Research", "workable", "basecampresearch"),
+    }
+    watch = load_companies(settings.companies_path)
+    assert {b.origin for b in watch} == {"known", "boards"} and len(watch) == 3
+    assert cd.learn_employers(settings, 10, http) == []  # checked: not again for 30 days
+    assert not any("ckgroup" in str(r.url) for r in seen)
+
+
+def test_a_thin_board_posting_is_read_from_the_employers_feed(settings: Settings) -> None:
+    from src.jobs.sources.companies import EmployerFeedReader
+
+    save_companies(
+        settings.companies_path,
+        [CompanyBoard(name="Altos Labs", ats="greenhouse", token="altoslabs", origin="boards")],
+    )
+    full = "<p>" + "Lead assay development for cell rejuvenation. " * 20 + "</p>"
+    http, _ = _http(
+        settings,
+        {
+            "boards-api.greenhouse.io/v1/boards/altoslabs/jobs": {
+                "jobs": [
+                    {
+                        "id": 9,
+                        "title": "Senior Scientist, Cell Biology",
+                        "content": full,
+                        "absolute_url": "https://boards.greenhouse.io/altoslabs/jobs/9",
+                        "location": {"name": "Cambridge, UK"},
+                        "updated_at": "2026-10-10T10:00:00Z",
+                    },
+                ]
+            }
+        },
+    )
+    reader = EmployerFeedReader(settings, http)
+    job = JobPosting(
+        id="linkedin:5",
+        title="Senior Scientist - Cell Biology",
+        company="Altos Labs Ltd",
+        source="linkedin_search",
+        description="Short.",
+    )
+    read = reader.enrich(job)
+    assert "assay development" in read.description
+    assert read.apply_url == "https://boards.greenhouse.io/altoslabs/jobs/9"
+    other = job.model_copy(update={"title": "Head of Finance"})
+    assert reader.enrich(other) is other  # not the same job

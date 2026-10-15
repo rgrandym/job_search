@@ -453,12 +453,7 @@ class DeleteProfile(BaseModel):
     "delete_profile", "Delete a saved profile only after explicit user confirmation.", DeleteProfile
 )
 async def delete_profile(args: DeleteProfile, ctx: AgentContext) -> dict[str, bool]:
-    from src.services import cv_service
-
-    cv = cv_service.cached_selected_cv(ctx.ws)
-    if cv is None:
-        raise ValueError("No parsed CV selected")
-    search_service.delete_profile(ctx.ws, cv, args.key)
+    search_service.delete_profile(ctx.ws, args.key)
     await ctx.emit("profile_updated", {"key": args.key, "reason": "profile deleted"})
     return {"deleted": True}
 

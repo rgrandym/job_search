@@ -565,6 +565,10 @@ export interface TailoredCVView {
   source_ats_keyword_coverage: number | null;
   reviewed: boolean;
   imported: boolean;
+  /** The clean final version (all black, nothing pending), once written; null after any edit. */
+  final_url: string | null;
+  /** What the final version left out, and its ATS read-back warnings. */
+  final_notes: string[];
   /** What tailoring did; kept with the draft (null for an imported Word CV). */
   report: TailorReport | null;
 }
@@ -583,6 +587,10 @@ export interface ReviewAddition {
   background_quote: string;
   job_quote: string;
   reason: string;
+  /** What makes it typical for the role (title, employer, sector, documented work). */
+  basis?: string;
+  /** likely: such a role routinely involves it; possible: plausible but less certain. */
+  likelihood?: "likely" | "possible";
   status: "pending" | "confirmed" | "deleted";
   /** enrichment, metric: the bullet as it was. */
   original_text?: string;
@@ -592,7 +600,7 @@ export interface ReviewAddition {
  * `CompressionProposal`). */
 export interface CompressionProposal {
   id: string;
-  kind: "tighten" | "merge_bullets" | "merge_roles";
+  kind: "tighten" | "merge_bullets" | "merge_roles" | "condense_role";
   role_ids: string[];
   source_ids: string[];
   bullets: string[];
@@ -798,6 +806,33 @@ export interface ScreeningScore {
   points: Record<string, number>;
 }
 
+/** How easily a person reads a CV (backend `cv/readability.py`): computed by code. */
+export interface ReadabilityScore {
+  score: number;
+  grade: string;
+  /** What to fix, most points first. */
+  notes: string[];
+  words: number;
+  bullets: number;
+}
+
+/** What to fix in the selected CV before tailoring from it (backend `services/cv_health.py`). */
+export interface CVHealth {
+  cv_name: string;
+  /** The Word file used as the design (null: tailored CVs use the classic template). */
+  word_file: string | null;
+  /** What an ATS parser may miss or misread in the Word file. */
+  design: string[];
+  /** What the CV's facts leave out (tailoring cannot add these). */
+  knowledge: string[];
+  readability: ReadabilityScore;
+}
+
+export interface Readability {
+  before: ReadabilityScore;
+  after: ReadabilityScore;
+}
+
 /** The original, the tailored CV and, with red proposals, the CV with all confirmed. */
 export interface Screening {
   before: ScreeningScore;
@@ -822,6 +857,8 @@ export interface TailorReport {
   positioning?: Positioning | null;
   requirements?: RequirementEvidence[];
   role_skills?: string[];
+  /** The checked "Key strengths" lines under the summary. */
+  key_strengths?: string[];
   skills_to_confirm?: { skill: string; background_quote: string; reason: string }[];
   review_additions?: ReviewAddition[];
   compressions?: CompressionProposal[];
@@ -833,6 +870,7 @@ export interface TailorReport {
   academic?: boolean;
   fit_check?: FitComparison | null;
   screening?: Screening | null;
+  readability?: Readability | null;
   rejected: number;
   rejections: { source_id: string; reason: string | null }[];
 }
@@ -1105,8 +1143,20 @@ export interface LetterFlag {
   reason: string;
 }
 
+/** How well a letter makes the case, computed by code (backend `cover_letter.score_letter`). */
+export interface LetterScore {
+  score: number;
+  grade: string;
+  /** What to improve, most points first. */
+  notes: string[];
+  words: number;
+  terms: string[];
+}
+
 export interface CoverLetterView {
   id: string;
+  /** Null for letters written before the score existed. */
+  score?: LetterScore | null;
   /** The job it was written for ("" for older letters). */
   job_id: string;
   /** Paragraphs a check questions (red in Word and here) until edited or kept as written. */

@@ -23,6 +23,7 @@ import re
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import date
 from difflib import SequenceMatcher
 
 from src.cv.claims import escalation, jargon, overclaim, third_person
@@ -49,8 +50,12 @@ from src.tools.search_tools import (
     seniority_level,
 )
 
-MAX_ADDITIONS = 20  # enough to cover every open gap and missing term of one job
-MAX_PER_ROLE = 5  # the user reviews every one; more than this per role reads as made up
+# Scaled to the job's open gaps and missing terms (user's decision 2026-10-15): the user
+# reviews every proposal, so optimised mode may fill each gap the background makes credible.
+MAX_ADDITIONS = 30
+MIN_ADDITIONS = 12
+MAX_PER_ROLE = 8
+POSSIBLE_SHARE = 1 / 3  # at most this share may be "possible" rather than "likely"
 MAX_METRICS = 5
 MAX_COMPRESSIONS = 6
 DECLINED_MATCH = 0.8  # this similar to a declined proposal counts as the same proposal
@@ -102,13 +107,20 @@ class AdditionContext:
     background: str = ""  # stored profile and the user's other CVs: grounds for inference
     declined: tuple[str, ...] = ()
     keywords: frozenset[str] = frozenset()  # the job's ATS keywords
+    open_items: int = 0  # key gaps and missing job terms the draft leaves open
+
+    def limit(self) -> int:
+        """How many proposals this job may get: its open items and some room, within bounds."""
+        return min(MAX_ADDITIONS, max(MIN_ADDITIONS, self.open_items + 6))
 
 
 def check_additions(
     proposed: Sequence[AdditionCandidate], ctx: AdditionContext
 ) -> list[ReviewAddition]:
-    """Keep the proposals whose quotes, place and wording check out; at most `MAX_ADDITIONS`,
-    `MAX_PER_ROLE` per role, `MAX_METRICS` number questions, one summary and one headline."""
+    """Keep the proposals whose quotes, place and wording check out: at most `ctx.limit()`
+    (scaled to the open gaps), `MAX_PER_ROLE` per role, `MAX_METRICS` number questions, one
+    summary and one headline; "possible" ones at most `POSSIBLE_SHARE` of the total, after
+    the "likely" ones."""
     bullets = {b.id: (role, b) for role in ctx.master.experience for b in role.bullets}
     roles = {r.id: r for r in ctx.master.experience}
     top = max((seniority_level(r.title) for r in ctx.master.experience), default=0)
@@ -116,7 +128,9 @@ def check_additions(
     per_role: Counter[str] = Counter()
     per_kind: Counter[str] = Counter()
     out: list[ReviewAddition] = []
-    for item in proposed:
+    limit = ctx.limit()
+    ordered = sorted(proposed, key=lambda a: a.likelihood != "likely")  # stable: plan order
+    for item in ordered:
         text = item.text.strip()
         key = f"{item.kind}:{normalize_skill(text)}"
         if key in seen or not _common_ok(item, text, ctx):
@@ -127,14 +141,17 @@ def check_additions(
         role_id, original = placed
         if item.kind in ROLE_KINDS and per_role[role_id or ""] >= MAX_PER_ROLE:
             continue
-        limit = {"metric": MAX_METRICS, "summary": 1, "headline": 1}.get(item.kind)
-        if limit is not None and per_kind[item.kind] >= limit:
+        cap = {"metric": MAX_METRICS, "summary": 1, "headline": 1}.get(item.kind)
+        if cap is not None and per_kind[item.kind] >= cap:
+            continue
+        if item.likelihood == "possible" and per_kind["possible"] >= limit * POSSIBLE_SHARE:
             continue
         seen.add(key)
         per_role[role_id or ""] += item.kind in ROLE_KINDS
         per_kind[item.kind] += 1
+        per_kind["possible"] += item.likelihood == "possible"
         out.append(_addition(item, text, role_id, original))
-        if len(out) == MAX_ADDITIONS:
+        if len(out) == limit:
             break
     return out
 
@@ -291,7 +308,10 @@ def rank_additions(
     gained = Counter(g.addition_id for g in projection.gained if g.addition_id)
     terms = {a.id: sum(mentions(a.text, k) for k in missing) for a in additions}
     if not gained:  # the reader credited no proposal: nothing tells which change nothing
-        return sorted(additions, key=lambda a: (a.status != "pending", -terms[a.id]))
+        return sorted(
+            additions,
+            key=lambda a: (a.status != "pending", -terms[a.id], a.likelihood != "likely"),
+        )
 
     def worth(a: ReviewAddition) -> bool:
         return (
@@ -301,7 +321,15 @@ def rank_additions(
         )
 
     kept = [a for a in additions if worth(a)]
-    return sorted(kept, key=lambda a: (a.status != "pending", -gained[a.id], -terms[a.id]))
+    return sorted(
+        kept,
+        key=lambda a: (
+            a.status != "pending",
+            -gained[a.id],
+            -terms[a.id],
+            a.likelihood != "likely",
+        ),
+    )
 
 
 # --- compressions ---------------------------------------------------------------------------
@@ -319,6 +347,10 @@ def check_compressions(
     used: set[str] = set()
     out: list[CompressionProposal] = []
     for item in proposed:
+        if item.kind == "condense_role":
+            continue  # built by code (`condensed_roles`), never taken from the model
+        if item.kind == "merge_roles":
+            continue  # different roles are never combined (user's decision 2026-10-15)
         sources = _sources(item, roles)
         if sources is None or used & {b.id for b in sources}:
             continue
@@ -327,7 +359,6 @@ def check_compressions(
             continue
         used |= {b.id for b in sources}
         chosen = [roles[i] for i in dict.fromkeys(item.role_ids)]
-        heading = merged_heading(chosen) if item.kind == "merge_roles" else ""
         identity = f"{item.kind}\0{','.join(b.id for b in sources)}\0{'|'.join(bullets)}"
         out.append(
             CompressionProposal.model_validate(
@@ -336,13 +367,48 @@ def check_compressions(
                     "role_ids": [r.id for r in chosen],
                     "source_ids": [b.id for b in sources],
                     "bullets": bullets,
-                    "heading": heading,
                     "id": hashlib.sha256(identity.encode()).hexdigest()[:12],
                 }
             )
         )
         if len(out) == MAX_COMPRESSIONS:
             break
+    return out
+
+
+OLD_ROLE_YEARS = 10
+KEEP_OLD_LINES = 2
+
+
+def condensed_roles(
+    cv: MasterCV, keywords: Sequence[str], today: date | None = None
+) -> list[CompressionProposal]:
+    """Roles that ended over `OLD_ROLE_YEARS` years ago with more than three lines, cut to
+    their `KEEP_OLD_LINES` most relevant ones (lines naming a job term first, then the
+    draft's order). Built by code, shown in red, applied only by the user (user's decision
+    2026-10-15: a recruiter reads the recent roles; an earlier career reads best brief)."""
+    today = today or date.today()
+    out: list[CompressionProposal] = []
+    for role in cv.experience:
+        ended = int(role.end[:4]) if role.end else today.year
+        if today.year - ended <= OLD_ROLE_YEARS or len(role.bullets) <= KEEP_OLD_LINES + 1:
+            continue
+        ranked = sorted(role.bullets, key=lambda b: not any(mentions(b.text, k) for k in keywords))
+        kept = {b.id for b in ranked[:KEEP_OLD_LINES]}
+        left = [b for b in role.bullets if b.id not in kept]
+        identity = f"condense_role\0{role.id}\0{','.join(b.id for b in left)}"
+        out.append(
+            CompressionProposal(
+                id=hashlib.sha256(identity.encode()).hexdigest()[:12],
+                kind="condense_role",
+                role_ids=[role.id],
+                source_ids=[b.id for b in left],
+                bullets=[b.text for b in role.bullets if b.id in kept],
+                removed=[b.text for b in left],
+                reason=f"Ended in {ended}: a reader takes in an earlier role from its "
+                f"{KEEP_OLD_LINES} most relevant lines",
+            )
+        )
     return out
 
 
@@ -432,6 +498,11 @@ def apply_compression(cv: MasterCV, proposal: CompressionProposal) -> MasterCV:
     out = cv.model_copy(deep=True)
     if proposal.kind == "merge_roles":
         return _merge_roles(out, proposal)
+    if proposal.kind == "condense_role":
+        for entry in out.experience:
+            if entry.id in proposal.role_ids:
+                entry.bullets = [b for b in entry.bullets if b.id not in proposal.source_ids]
+        return MasterCV.model_validate(out.model_dump())
     role = next((r for r in out.experience if r.id == proposal.role_ids[0]), None)
     if role is None:
         raise ValueError("The role of this compressed version is no longer in the draft")

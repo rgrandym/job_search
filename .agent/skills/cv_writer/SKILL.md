@@ -1,6 +1,6 @@
 ---
 name: cv_writer
-description: Create or update the structured Master CV (including evidence from documents the user supplies, accepted one by one), tailor it to a job description (requirement-to-evidence map, positioning for adjacent, more junior or academic roles, STAR-format bullets, no fabricated facts; reviewed and revised once; a before/after fit check; several versions per job compared side by side against the original), write guarded one-page cover letters, and export them to styled Word (.docx) documents with an ATS read-back. Use when the user wants to import/edit their CV, tailor a CV to a job, write a cover letter, or produce a .docx CV.
+description: Create or update the structured Master CV (including evidence from documents the user supplies, accepted one by one), tailor it to a job description (requirement-to-evidence map, positioning for adjacent, more junior or academic roles, STAR-format bullets, no fabricated facts; revised once only when code finds a reason; a before/after fit check by an independent grader; several versions per job compared side by side against the original), write guarded one-page cover letters, and export them to styled Word (.docx) documents with an ATS read-back. Use when the user wants to import/edit their CV, tailor a CV to a job, write a cover letter, or produce a .docx CV.
 ---
 
 # cv_writer
@@ -187,17 +187,20 @@ Kinds, each placed where a reader expects it (`proposals.check_additions`):
 - `skill`: in red at the end of its own skills category line (`skill_group`), else under the
   profile.
 - `summary` (at most one sentence) and `headline` (at most one; never above the level held).
-At most 20 proposals, at most 5 per role, at most 5 number questions. Code checks both quotes,
+As many proposals as the job's open gaps and missing terms need (12 to 30,
+`AdditionContext.limit`), at most 8 per role, at most 5 number questions. Each states its
+`basis` (what people with that title, employer and sector routinely do) and `likelihood`:
+`likely` ones come first and `possible` ones are at most a third; nothing such a role would
+be unlikely to involve (creative but realistic, user's decision 2026-10-15). Code checks both quotes,
 the anchor, that no number the source lacks and no jargon is added, and drops anything the
 user deleted before for this CV (`services/declined.py`; similar wording counts as the same).
 Wording uses the posting's terms where accurate, once, never trading accuracy for a keyword;
 each `reason` names the doubt it settles and what the user must check.
-The factual guards can trigger one focused model revision of rejected wording. When open key
-or essential requirements or missing job keywords remain that no proposal addresses, one
-hiring-manager pass (`ask_additions`) proposes for them. While the screening score with every
-proposal confirmed stays under grade A (`TARGET_ATS` = 80), up to `MAX_TARGET_PASSES` = 2
-more passes aim at the job terms, title and requirements still missing; code scores each and
-keeps it only when it scores better (`_toward_target`); the model reads the draft once, after. Proposals the reader credits with nothing (and that
+Accurate but fast (user's decision 2026-10-15): when code finds rejected wording, open key or
+essential requirements or missing job keywords that no proposal addresses, or a screening
+score under grade A (`TARGET_ATS` = 80, with every proposal confirmed), one revision
+(`_revised_once`) addresses them all; code scores both drafts and keeps the better one; the
+independent grader reads the draft once, after. Proposals the reader credits with nothing (and that
 name no missing job term) are dropped once the reader credited some proposal; the rest are
 ranked by what they gain (`rank_additions`). Each request saves one Word version.
 Proposals remain separate from `TailoredCV.cv` and print in red with `[CONFIRM ...]`.
@@ -210,13 +213,13 @@ cover letters.
 
 **Compressed versions (optimised mode, user's decision 2026-10-14).** The plan may also
 return `compressions`: `tighten` (one long bullet without details this job does not need),
-`merge_bullets` (two or more overlapping bullets of one role as one) or `merge_roles` (similar
-consecutive roles, same level and a shared title word, e.g. several postdocs, as one entry).
+or `merge_bullets` (two or more overlapping bullets of one role as one). Consolidation stays
+within one role: different roles are never combined (user's decision 2026-10-15); a
+`merge_roles` the model returns is dropped, and one pending in an older draft cannot be applied.
 Code (`proposals.check_compressions`) keeps one only if every number and job term of its
-sources stays, nothing they do not show is added (numbers, skills, ownership, jargon), a
-tightened line is shorter and a merged entry has fewer bullets; it builds a merged entry's
-heading itself, keeping every institution with its own dates ("Postdoctoral Research Fellow,
-University A (Jan 2010 – Jun 2014); Institute B (Jul 2014 – Aug 2017)"). A compression is
+sources stays, nothing they do not show is added (numbers, skills, ownership, jargon) and a
+tightened line is shorter. Every role keeps its heading lines (title, employer, dates), even
+when the title and dates sit above the employer's line (`docx_original._spans`). A compression is
 written in red below the lines it would replace, which stay as they are: the app never
 removes them. The user compares and chooses: "Use the shorter version"
 (`tailored_documents.review_compression`, apply) replaces them in that draft only (a merged
@@ -311,7 +314,8 @@ Also produced, and guarded the same way (recorded in `changes` as `summary`):
 - Headline suggestions (rule 2), and a user's own headline edit to a saved draft, are rejected
   if they claim a seniority above any title held, a role the CV does not show (role words of the
   title part, before a comma, "|" or dash), or skills or numbers the CV lacks.
-- `summary` (three sentences; user's decision 2026-10-14): who the candidate is for this job
+- `summary` (two or three short sentences, at most 60 words; user's decision 2026-10-15): who
+  the candidate is for this job
   with their years of experience (computed by code from the role dates,
   `tailor.career_years`: the only number a summary or headline may add), the strongest
   relevant achievement from a bullet, and what they bring to this team (distinctive relevant
@@ -319,6 +323,11 @@ Also produced, and guarded the same way (recorded in `changes` as `summary`):
   exist somewhere in the CV. A summary with several paragraphs keeps their number. The tailoring request
   may emphasise leadership or hands-on work and use a more senior or junior presentation;
   these choices never change the candidate's evidenced level or permit new claims.
+- `key_strengths` (user's decision 2026-10-15): 3 or 4 lines of at most 25 words under the
+  summary, each citing the CV bullets it states (`source_ids`); checked by
+  `tailor._key_strengths` with the same guards as a rewrite of those bullets taken together
+  (numbers and skills from them only, no jargon, ownership or third person). Printed as
+  "• ..." lines before the relevant-skills line; they count for the screening score.
 - `bullet_order`: a list of `{experience_id, bullet_ids}` for every role (a list, because
   strict output schemas such as Codex's cannot carry dict keys) (most relevant first; unlisted bullets follow, or are left out only under
   rule 4) and `skills_priority` (re-orders existing skills only). If trimming left out the only
@@ -402,7 +411,16 @@ the job title (before any comma or dash) in the CV: 15 (the share of its words i
 headline and role titles at half value otherwise); degrees the posting names: 10; its soft
 skills: 10. A part the posting does not ask for is left out and the rest scaled to 100.
 Terms match as an ATS search does (`ats_score.Text.has`): case, plural or singular, hyphens
-and slashes ignored ("post-doctoral" = "postdoctoral"). Grades: A 80+, B 65+, C 50+, D.
+and slashes ignored ("post-doctoral" = "postdoctoral"). When the posting writes a term with
+its abbreviation ("liquid chromatography-mass spectrometry (LC-MS)"), either form in the CV
+counts (`cv/acronyms.py`; initials must match). Grades: A 80+, B 65+, C 50+, D.
+
+**Both forms of a term** (user's decision 2026-10-15; `tailor._spell_out`, code only): an ATS
+search is literal, so a job keyword the tailored CV lacks while a bullet shows its other form
+is written there once as "long form (ABBR)" ("natural language processing (NLP)"). Pairs come
+from the posting or the CV (bracketed, initials checked) or the known skill synonyms; an
+abbreviation matches only in its own capitals ("10 ml" is never "ML"). The same term, so no
+new fact; the change is recorded in `TailoredCV.changes`.
 It is scored for the original, the tailored CV and (optimised) the CV with every red
 proposal confirmed, with the keywords found and still missing; it is shown first and is what
 tailoring aims at. It is scored again when a proposal is confirmed or a compressed version
@@ -575,6 +593,39 @@ standard section names (Summary, Experience, Skills, Education, Certifications);
 
 Name generated CV files `<First>_<Last>_<Company>.docx` under `output/cvs/` (git-ignored).
 
+**Independent grader** (user's decision 2026-10-15): the before/after reading and version
+comparisons use the screening model (`cv_service.GRADER`), never the CV writer, so a draft is
+not graded by the model that wrote it; a kept reading of the original from another model is
+read again. Its `impression` is what a recruiter takes from a six-second skim of the top.
+
+**Readability** (`cv/readability.py`, code only): bullets of at most 35 words (25), strong
+openings (20), active voice (10), varied openings within a role (10), a summary of at most 80
+words in four sentences (15), the job's keywords the CV shows within its first 150 words
+(20); shown beside the screening score, original → tailored, with what to fix.
+
+**Red changes and the final version** (user's decision 2026-10-15): in a draft every changed
+or added line is red (`docx_original._mark`, `docx_exporter` for templates): rewritten
+bullets, the summary, key strengths, the relevant-skills line, reordered skills lists and
+suggested headlines, besides the proposals. `tailored_documents.finalise` writes
+`<draft>_final.docx` beside it: all black, its headline only, nothing pending (what was left
+out is listed in `final_notes`); any later edit of the draft clears it.
+
+**Shorter earlier roles** (both modes, `proposals.condensed_roles`, code only): a role that
+ended over 10 years ago with more than three lines gets a red `condense_role` proposal
+keeping its two most relevant lines (those naming a job term first); `source_ids` are the
+lines it leaves out, `removed` their text. Only the user applies it.
+
+**CV health check** (`services/cv_health.py`): the selected CV's Word design read as an ATS
+does (`check_docx`), what its facts leave out (`knowledge_gaps`: roles with one line or no
+result, skills used but not listed, no summary or education) and its readability;
+`clean_template` adds an ATS-safe classic copy with the same facts to the library and selects
+it.
+
+**Cover letters**: drafted once and redrafted only when the checks question something (the
+app makes no separate review call); `cover_letter.score_letter` scores the result by code:
+the job's most used terms named (35, full at half), company and exact role (20), 250 to 400
+words (15), sentences averaging 22 words or fewer (15), unquestioned paragraphs (15).
+
 **ATS read-back** (`ats.check_docx(path, cv, keywords) -> ATSReport`, run after every
 tailored export and returned as `TailoredCV.ats`): reads the file's text as a parser would,
 and reports contact details not readable as plain text, keyword coverage of the exported
@@ -583,6 +634,8 @@ the user prefers a full-length CV), tables, and contact details
 placed in the page header. Layout warnings (`ats.layout_warnings`, user's decision 2026-10-14;
 warnings only, the design stays the user's): two or more columns (parsers read straight
 across), contact details in the footer, text boxes and images (their text is not read), roles
-with no year next to them (systems count years of experience from the dates), no standard
-Experience or Education heading, and unusual fonts. The fit score is shown with an A–D grade
+with no year next to them (systems count years of experience from the dates), role dates in a
+style parsers may misread (numeric months "01/2020", short ranges "2020–21", seasons, "to
+date"; "Jan 2020 – Present" is safe; user's decision 2026-10-15), no standard Experience,
+Education or Skills heading, and unusual fonts. The fit score is shown with an A–D grade
 and labelled as the app's estimate, not an employer's number.

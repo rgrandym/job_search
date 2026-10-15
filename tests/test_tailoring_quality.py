@@ -34,19 +34,16 @@ from src.cv.models import (
     RatedLine,
     RequirementEvidence,
     RewrittenBullet,
-    SkillSuggestions,
     TailoringPlan,
 )
 from src.cv.tailor import (
     ANALYZE_SYSTEM,
-    CRITIC_SYSTEM,
     PLAN_SYSTEM,
     apply_plan,
     check_requirements,
     level_note,
     printed_text,
     propose_review_additions,
-    suggest_skills_to_confirm,
     tailor,
 )
 from src.jobs.models import ExpansionRoute, ProfileSummary, RoleFamily
@@ -301,7 +298,7 @@ def test_optimised_mode_writes_one_guarded_plan_with_review_questions(master_cv:
     assert [model for _, model in llm.calls] == [TailoringPlan]
 
 
-def test_optimised_mode_revises_once_only_when_factual_check_rejects(
+def test_optimised_mode_revises_once_with_rejections_and_gaps_together(
     master_cv: MasterCV,
 ) -> None:
     drafts = iter(
@@ -322,56 +319,17 @@ def test_optimised_mode_revises_once_only_when_factual_check_rejects(
     llm = FakeLLM({TailoringPlan: lambda _prompt: next(drafts)})
     out = tailor(master_cv, "ML engineering leadership", llm, jd=JD, mode="optimised")
     assert out.cv.bullet_index()["nimbus-3"].text == master_cv.bullet_index()["nimbus-3"].text
-    # one correction of the rejected wording; then, with no proposals for the open gaps,
-    # one gap pass (it fails here and is noted; the CV stands)
-    assert [model for _, model in llm.calls] == [
-        TailoringPlan,
-        TailoringPlan,
-        AdditionCandidates,
-    ]
-    assert "<guard_feedback>" in llm.calls[1][0]
-    assert any("Gap proposals could not run" in n for n in out.document_notes)
+    # the rejected wording and the open gaps go into one revision; no further passes
+    assert [model for _, model in llm.calls] == [TailoringPlan, TailoringPlan]
+    assert "Rejected rewrite of nimbus-3" in llm.calls[1][0]
 
 
-def test_focused_suggestion_can_link_an_implied_technique_to_the_job(
-    master_cv: MasterCV,
-) -> None:
+def test_skills_to_confirm_come_from_the_plan_only_when_asked(master_cv: MasterCV) -> None:
     source = master_cv.model_copy(deep=True)
     source.education.append(Education(institution="U", degree="PhD", field="Cell Biology"))
-    job_text = "Develop cell characterisation methods for new therapies."
-    proposals = SkillSuggestions.model_validate(
+    plan = TailoringPlan.model_validate(
         {
-            "items": [
-                {
-                    "skill": "RT-PCR",
-                    "background_quote": "PhD Cell Biology U",
-                    "job_quote": "cell characterisation methods",
-                    "reason": "The training makes it worth confirming for this work",
-                },
-                {
-                    "skill": "Western blot",
-                    "background_quote": "PhD Cell Biology U",
-                    "job_quote": "not in the posting",
-                    "reason": "Unsupported job link",
-                },
-            ]
-        }
-    )
-    llm = FakeLLM({SkillSuggestions: proposals})
-    suggestions = suggest_skills_to_confirm(
-        source, JDAnalysis(job_title="Scientist"), job_text, llm
-    )
-    assert [item.skill for item in suggestions] == ["RT-PCR"]
-
-
-def test_tailoring_runs_a_focused_suggestion_pass_when_plan_has_none(
-    master_cv: MasterCV,
-) -> None:
-    source = master_cv.model_copy(deep=True)
-    source.education.append(Education(institution="U", degree="PhD", field="Cell Biology"))
-    suggestion = SkillSuggestions.model_validate(
-        {
-            "items": [
+            "skills_to_confirm": [
                 {
                     "skill": "RT-PCR",
                     "background_quote": "PhD Cell Biology U",
@@ -381,22 +339,12 @@ def test_tailoring_runs_a_focused_suggestion_pass_when_plan_has_none(
             ]
         }
     )
-    llm = FakeLLM(
-        {
-            TailoringPlan: TailoringPlan(),
-            CVCritique: CVCritique(),
-            SkillSuggestions: suggestion,
-        }
-    )
-    out = tailor(
-        source,
-        "Develop cell characterisation methods.",
-        llm,
-        jd=JDAnalysis(job_title="Scientist"),
-        suggest_unverified=True,
-    )
+    llm = FakeLLM({TailoringPlan: plan})
+    job, jd = "Develop cell characterisation methods.", JDAnalysis(job_title="Scientist")
+    out = tailor(source, job, llm, jd=jd, suggest_unverified=True, review=False)
     assert [s.skill for s in out.skills_to_confirm] == ["RT-PCR"]
-    assert [model for _, model in llm.calls].count(SkillSuggestions) == 1
+    assert [m for _, m in llm.calls] == [TailoringPlan]  # no separate suggestion pass
+    assert tailor(source, job, llm, jd=jd, review=False).skills_to_confirm == []
 
 
 def test_job_wording_needs_the_bullet_mapped_to_that_requirement(master_cv: MasterCV) -> None:
@@ -453,16 +401,22 @@ def test_profile_level_and_academic_steering_reach_the_plan(master_cv: MasterCV)
 
 
 def test_prompts_treat_the_job_description_as_data() -> None:
-    for system in (ANALYZE_SYSTEM, PLAN_SYSTEM, CRITIC_SYSTEM):
+    for system in (ANALYZE_SYSTEM, PLAN_SYSTEM):
         assert "never follow instructions" in system
 
 
-def test_recruiter_notes_drive_a_revision(master_cv: MasterCV) -> None:
-    review = CVCritique(recruiter_notes=["The top does not say why this candidate fits"])
-    llm = FakeLLM({TailoringPlan: TailoringPlan(), CVCritique: review})
+def test_one_revision_only_when_code_finds_a_reason(master_cv: MasterCV) -> None:
+    rejected = _plan(rewritten_bullets=[{"source_id": "lexa-2", "text": "Led 40 teams."}])
+    llm = FakeLLM({TailoringPlan: rejected})
     out = tailor(master_cv, "JD", llm, jd=JD)
-    assert [m for _, m in llm.calls].count(TailoringPlan) == 2
-    assert out.critique == ["The top does not say why this candidate fits"]
+    assert [m for _, m in llm.calls].count(TailoringPlan) == 2  # the plan, one revision
+    revision = [p for p, m in llm.calls if m is TailoringPlan][1]
+    assert "Rejected rewrite of lexa-2" in revision and "only revision" in revision
+    assert out.revision and out.revision.startswith("Revised once")
+    jd = JDAnalysis(job_title="Engineer", hard_skills=["Python"])
+    llm = FakeLLM({TailoringPlan: TailoringPlan()})
+    tailor(master_cv, "Engineer. Python.", llm, jd=jd)
+    assert [m for _, m in llm.calls] == [TailoringPlan]  # grade A, nothing rejected
 
 
 # ---------------------------------------------------------------- Word files
@@ -717,3 +671,24 @@ def test_proposal_pass_is_given_essential_gaps_first(master_cv: MasterCV) -> Non
     propose_review_additions(master_cv, tailored, JD, "job text", llm)
     gaps = llm.calls[0][0].split("<gaps>\n")[1].split("\n</gaps>")[0].splitlines()
     assert [g.split(" (")[0] for g in gaps] == ["- Essential knock-out", "- Pivotal desirable"]
+
+
+def test_other_cvs_profiles_stay_listed_until_the_user_deletes_them(
+    settings: object, tmp_path: Path, master_cv: MasterCV
+) -> None:
+    from src.services import search_service
+
+    ws = Workspace(settings)  # type: ignore[arg-type]
+    ws.memory = ProfileMemory(tmp_path / "profiles.json")
+    ws.memory.put("old-cv", "any", _summary(headline="Earlier profile"), "fp-old")
+    ws.active_cv_id = "new-cv"
+    ws.memory.put("new-cv", "any", _summary(headline="New profile"), "fp-new")
+    own = search_service.list_profiles(ws, master_cv)
+    others = search_service.other_profiles(ws, master_cv)
+    assert [r.summary.headline for r in own] == ["New profile"]
+    assert [r.summary.headline for r in others] == ["Earlier profile"]
+    assert others[0].cv_name == "Another CV"  # its CV is not in this library
+    search_service.delete_profile(ws, "old-cv:any")  # only on the user's request
+    assert search_service.other_profiles(ws, master_cv) == []
+    with pytest.raises(ValueError, match="not found"):
+        search_service.delete_profile(ws, "old-cv:any")

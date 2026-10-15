@@ -7,7 +7,7 @@ import { cn } from "../lib/utils";
 import { profileSearchQuery, useSearch } from "../stores/searchStore";
 import { EvidenceReview } from "./EvidenceReview";
 import { IntentEditor } from "./IntentEditor";
-import { PublicationsView } from "./ProfileDetails";
+import { ProfileDetails, PublicationsView } from "./ProfileDetails";
 import { RoleFamiliesEditor, RoleFamiliesView } from "./RoleFamilies";
 import { TaskError, TaskProgress, useTaskId } from "./TaskProgress";
 import { AutoText, Field, Modal } from "./ui";
@@ -37,7 +37,8 @@ const TABS: { value: Tab; label: string }[] = [
 ];
 const day = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString() : "");
 
-/** Stored profile summaries for the selected CV: view, pin for searches, edit, rebuild, delete. */
+/** Every stored profile: the selected CV's (view, pin for searches, edit, rebuild, delete) and
+ * those of the user's other CVs (view, delete, or select their CV to use them). */
 export function SummaryDialog({ open, onClose, initialProfileKey, embedded = false }: {
   open: boolean;
   onClose: () => void;
@@ -52,8 +53,10 @@ export function SummaryDialog({ open, onClose, initialProfileKey, embedded = fal
 
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles, enabled: open });
   const records = profiles.data?.profiles ?? [];
+  const others = profiles.data?.other_profiles ?? [];
+  const own = (key: string | null | undefined) => records.some((r) => r.key === key);
   const current = selected
-    ? records.find((r) => r.key === selected)
+    ? [...records, ...others].find((r) => r.key === selected)
     : records.find((r) => r.key === profileKey) ?? records[0];
 
   useEffect(() => {
@@ -88,6 +91,15 @@ export function SummaryDialog({ open, onClose, initialProfileKey, embedded = fal
     mutationFn: (key: string) => api.refreshProfile(key, updateTask.next()),
     onSuccess: (r) => {
       setSelected(r.key);
+      void refresh();
+    },
+  });
+  // Another CV's profile is used, pinned and edited with its CV selected: select it here.
+  const useItsCv = useMutation({
+    mutationFn: (cvId: string) => api.selectCV(cvId),
+    onSuccess: () => {
+      set({ summary: null, profileKey: null });
+      void qc.invalidateQueries({ queryKey: ["state"] });
       void refresh();
     },
   });
@@ -129,7 +141,8 @@ export function SummaryDialog({ open, onClose, initialProfileKey, embedded = fal
             The quality model builds a profile from your CV for each kind of search and stores it with this CV. The job_matcher
             screens every shortlisted posting against it, and the job boards search its role families. Pin a
             profile to use it for every search with this CV; edit it to correct or steer the matching. Profiles are kept when
-            you edit the CV and only change when you click Update. Selecting a different CV builds its own profiles.
+            you edit the CV and only change when you click Update. Each CV has its own profiles; those of your other CVs are
+            listed too and stay until you delete them.
           </p>
           {profiles.isPending ? (
             <p className="flex items-center gap-2 text-[12px] text-muted"><Loader2 size={14} className="animate-spin" /> Loading profiles…</p>
@@ -144,6 +157,7 @@ export function SummaryDialog({ open, onClose, initialProfileKey, embedded = fal
                     search: it is created and stored automatically.
                   </p>
                 )}
+                {records.length > 0 && others.length > 0 && <p className="label">This CV</p>}
                 {records.map((r) => (
                   <button
                     key={r.key}
@@ -168,6 +182,29 @@ export function SummaryDialog({ open, onClose, initialProfileKey, embedded = fal
                     </span>
                   </button>
                 ))}
+                {others.length > 0 && (
+                  <>
+                    <p className="label pt-1">Your other CVs · {others.length}</p>
+                    {others.map((r) => (
+                      <button
+                        key={r.key}
+                        type="button"
+                        onClick={() => {
+                          setSelected(r.key);
+                          setEditing(false);
+                        }}
+                        className={cn(
+                          "w-full rounded-md border px-2 py-1.5 text-left text-[12px]",
+                          current?.key === r.key ? "border-accent bg-accent-bg" : "border-border hover:border-accent",
+                        )}
+                      >
+                        <span className="block font-medium text-fg [overflow-wrap:anywhere]">{familyLabel(r.role_family)}</span>
+                        <span className="block text-[11px] text-muted [overflow-wrap:anywhere]">{r.cv_name}</span>
+                        <span className="text-[11px] text-faint">Created {day(r.created_at)}{r.edited && " · edited"}</span>
+                      </button>
+                    ))}
+                  </>
+                )}
                 <div className="space-y-1 pt-1">
                   <button className="btn-ghost w-full justify-center text-[12px]" disabled={build.isPending} onClick={() => build.mutate(false)}>
                     {build.isPending ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />} Build general profile
@@ -179,8 +216,30 @@ export function SummaryDialog({ open, onClose, initialProfileKey, embedded = fal
               <section className="min-w-0">
                 {!current ? (
                   <p className="text-[12px] text-muted">Select or build a profile to see it here.</p>
-                ) : editing ? (
+                ) : editing && own(current.key) ? (
                   <ProfileEditor record={current} onDone={() => setEditing(false)} />
+                ) : !own(current.key) ? (
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-surface p-2 text-[12px]">
+                      <span className="text-muted">A profile of {current.cv_name}. Select that CV to pin, edit or update it.</span>
+                      {current.cv_id && (
+                        <button className="btn-primary py-1 text-[12px]" disabled={useItsCv.isPending} onClick={() => useItsCv.mutate(current.cv_id ?? "")}>
+                          {useItsCv.isPending && <Loader2 size={12} className="animate-spin" />} Select {current.cv_name}
+                        </button>
+                      )}
+                      <button
+                        className="btn-ghost py-1 text-[12px] text-bad"
+                        disabled={remove.isPending}
+                        onClick={() => {
+                          if (window.confirm(`Delete the "${familyLabel(current.role_family)}" profile of ${current.cv_name}?`)) remove.mutate(current.key);
+                        }}
+                      >
+                        <Trash2 size={12} /> Delete
+                      </button>
+                    </div>
+                    {useItsCv.error && <p className="text-[12px] text-bad">{(useItsCv.error as Error).message}</p>}
+                    <ProfileDetails record={current} />
+                  </div>
                 ) : (
                   <ProfileView
                     record={current}

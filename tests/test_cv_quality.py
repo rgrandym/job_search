@@ -17,11 +17,9 @@ from src.cv.cover_letter import apply_letter, draft_letter, write_letter
 from src.cv.docx_exporter import export_cover_letter, export_docx
 from src.cv.models import (
     Bullet,
-    BulletIssue,
     ChangeRecord,
     CoverLetter,
     CoverLetterDraft,
-    CVCritique,
     Experience,
     JDAnalysis,
     LetterOpening,
@@ -29,7 +27,6 @@ from src.cv.models import (
     LetterReview,
     LetterSections,
     MasterCV,
-    MissedRequirement,
     RewrittenBullet,
     TailoredCVEdits,
     TailoringPlan,
@@ -153,42 +150,22 @@ def test_trimming_only_for_a_clearly_more_junior_role(master_cv: MasterCV) -> No
 # ---------------------------------------------------------------- guidance and review
 
 
-def test_matcher_guidance_reaches_the_plan_and_review_drives_one_revision(
-    master_cv: MasterCV,
-) -> None:
-    review = CVCritique(
-        missed_requirements=[
-            MissedRequirement(requirement="MLOps", source_id="nimbus-2"),
-            MissedRequirement(requirement="Spark", source_id="ghost"),  # not a CV fact
-        ],
-        weak_bullets=[BulletIssue(source_id="nimbus-1", issue="result buried")],
+def test_matcher_guidance_reaches_the_plan_and_the_one_revision(master_cv: MasterCV) -> None:
+    rejected = TailoringPlan(
+        rewritten_bullets=[RewrittenBullet(source_id="lexa-2", text="Led 40 data teams.")]
     )
-    plans = iter(
-        [TailoringPlan(), TailoringPlan(bullet_order={"nimbus": ["nimbus-2", "nimbus-1"]})]
-    )
-    llm = FakeLLM({JDAnalysis: JD, TailoringPlan: lambda _: next(plans), CVCritique: review})
-    out = tailor(master_cv, "JD text", llm, guidance="reasons: recsys at scale")
+    plans = iter([rejected, TailoringPlan(bullet_order={"nimbus": ["nimbus-2", "nimbus-1"]})])
+    llm = FakeLLM({JDAnalysis: JD, TailoringPlan: lambda _: next(plans)})
+    out = tailor(
+        master_cv, "JD text", llm, guidance="reasons: recsys at scale",
+        emphasis="leadership", level="senior",
+    )  # fmt: skip
     prompts = [p for p, m in llm.calls if m is TailoringPlan]
-    assert len(prompts) == 2 and "<match_assessment>\nreasons: recsys at scale" in prompts[0]
-    assert "<review>" in prompts[1] and "ghost" not in prompts[1]
-    assert out.critique == ["Surface MLOps (nimbus-2)", "Strengthen nimbus-1: result buried"]
-    assert out.cv.experience[0].bullets[0].id == "nimbus-2"
-
-
-def test_tailoring_emphasis_reaches_initial_and_revised_plans(master_cv: MasterCV) -> None:
-    plans = iter([TailoringPlan(), TailoringPlan()])
-    llm = FakeLLM(
-        {
-            JDAnalysis: JD,
-            TailoringPlan: lambda _: next(plans),
-            CVCritique: CVCritique(order_notes=["Retain evidenced leadership in the summary"]),
-        }
-    )
-    tailor(master_cv, "JD text", llm, emphasis="leadership", level="senior")
-    prompts = [prompt for prompt, model in llm.calls if model is TailoringPlan]
-    assert len(prompts) == 2
-    assert all("Foreground evidenced people" in prompt for prompt in prompts)
-    assert all("do not claim a higher title" in prompt for prompt in prompts)
+    assert len(prompts) == 2 and "<reading>" in prompts[1]
+    assert all("<match_assessment>\nreasons: recsys at scale" in p for p in prompts)
+    assert all("Foreground evidenced people" in p for p in prompts)
+    assert all("do not claim a higher title" in p for p in prompts)
+    assert out.revision.startswith("Revised once")
 
 
 # ---------------------------------------------------------------- ATS read-back

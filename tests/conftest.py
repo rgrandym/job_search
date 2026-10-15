@@ -47,6 +47,7 @@ def settings(tmp_path: Path) -> Settings:
         linkedin_delay_s=0,
         linkedin_cooldown_s=0,
         browser_delay_s=0,
+        learn_employers=0,  # never in the background during tests
         data_dir=tmp_path,
         output_dir=tmp_path / "output",
         master_cv_path=tmp_path / "master_cv.json",

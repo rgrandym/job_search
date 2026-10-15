@@ -14,13 +14,16 @@ and not public, so this score is a transparent stand-in built the same way (user
 
 A part the posting does not ask for is left out and the rest scaled to 100. Terms match as an
 ATS search would: case-insensitive, plural or singular, with or without hyphens
-("post-doctoral" = "postdoctoral"). Grade A is 80 or more.
+("post-doctoral" = "postdoctoral"). When the posting writes a term with its abbreviation
+("machine learning (ML)"), either form in the CV counts: a recruiter may search for either
+(`cv/acronyms.py`). Grade A is 80 or more.
 """
 
 from __future__ import annotations
 
 import re
 
+from src.cv.acronyms import Pair, pairs_in
 from src.cv.models import JDAnalysis, ScreeningScore, TermCheck
 from src.tools.search_tools import role_words
 
@@ -89,7 +92,13 @@ def _weight(jd_text: Text, term: str) -> int:
     return max(1, min(MAX_TERM_WEIGHT, count))
 
 
-def _checks(cv: Text, jd: Text, terms: list[str]) -> list[TermCheck]:
+def other_forms(term: str, pairs: list[Pair]) -> list[str]:
+    """The term's other forms in `pairs`: its abbreviation, or the long form it stands for."""
+    key = tokens(term)
+    return [b if tokens(a) == key else a for a, b in pairs if key in (tokens(a), tokens(b))]
+
+
+def _checks(cv: Text, jd: Text, terms: list[str], pairs: list[Pair]) -> list[TermCheck]:
     seen: set[str] = set()
     out: list[TermCheck] = []
     for term in terms:
@@ -97,7 +106,8 @@ def _checks(cv: Text, jd: Text, terms: list[str]) -> list[TermCheck]:
         if not key or key in seen:
             continue
         seen.add(key)
-        out.append(TermCheck(term=term, weight=_weight(jd, term), found=cv.has(term)))
+        found = cv.has(term) or any(cv.has(f) for f in other_forms(term, pairs))
+        out.append(TermCheck(term=term, weight=_weight(jd, term), found=found))
     return out
 
 
@@ -138,9 +148,9 @@ def score_cv(
 ) -> ScreeningScore:
     """The screening score of one CV's printed text. `titles`: its headline and role titles;
     `keywords`: the job's ATS keywords (`tailor.ats_keywords`)."""
-    cv, posting = Text(cv_text), Text(jd_text)
-    words = _checks(cv, posting, keywords)
-    soft = _checks(cv, posting, [s for s in jd.soft_skills if len(s.split()) <= 4])
+    cv, posting, pairs = Text(cv_text), Text(jd_text), pairs_in(jd_text)
+    words = _checks(cv, posting, keywords, pairs)
+    soft = _checks(cv, posting, [s for s in jd.soft_skills if len(s.split()) <= 4], pairs)
     asked = degrees_asked(jd_text)
     education = [TermCheck(term=d, weight=1, found=_degree_found(cv, d)) for d in asked]
     title = _title_points(cv_text, titles, jd.job_title)

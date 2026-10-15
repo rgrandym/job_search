@@ -154,6 +154,19 @@
           "default": null,
           "title": "Url"
         },
+        "apply_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The employer's own application link, when the source names one",
+          "title": "Apply Url"
+        },
         "posted_at": {
           "anyOf": [
             {

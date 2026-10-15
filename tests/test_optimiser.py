@@ -4,6 +4,7 @@ layer (proposal kinds, compressions, declined proposals, the pass toward the tar
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -21,8 +22,8 @@ from src.cv.docx_original import write_like_original
 from src.cv.fit_check import WEIGHTS, compare_fit
 from src.cv.models import (
     AdditionCandidate,
-    AdditionCandidates,
     CompressionCandidate,
+    CompressionProposal,
     EvidencedReading,
     EvidencedReadings,
     JDAnalysis,
@@ -34,6 +35,7 @@ from src.cv.models import (
     ReviewAddition,
     RewrittenBullet,
     TailoredCV,
+    TailoredCVEdits,
     TailoringPlan,
     TailoringSettings,
     TermBridge,
@@ -50,6 +52,7 @@ from src.cv.proposals import (
 )
 from src.cv.tailor import (
     MAX_ROLE_SKILLS,
+    PLAN_SYSTEM,
     apply_plan,
     career_years,
     cv_to_text,
@@ -322,10 +325,17 @@ def test_other_cvs_ground_an_inference_and_declined_ones_never_return(master_cv:
     assert check_additions([experience], declined_ctx) == []
 
 
-def test_at_most_five_red_lines_per_role(master_cv: MasterCV) -> None:
-    words = ("alpha", "beta", "gamma", "delta", "epsilon", "zeta")
+def test_caps_scale_with_the_gaps_and_likely_proposals_come_first(master_cv: MasterCV) -> None:
+    words = ("alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota")
     items = [_proposal(text=f"with monitoring step {word}") for word in words]
-    assert len(check_additions(items, _ctx(master_cv))) == 5
+    assert len(check_additions(items, _ctx(master_cv))) == 8  # at most eight per role
+    ctx = _ctx(master_cv)
+    assert ctx.limit() == 12 and replace(ctx, open_items=40).limit() == 30
+    possible = [i.model_copy(update={"likelihood": "possible"}) for i in items[:6]]
+    likely = [i.model_copy(update={"text": i.text + " now"}) for i in items[6:]]
+    kept = check_additions([*possible, *likely], ctx)
+    assert [k.likelihood for k in kept[:3]] == ["likely"] * 3  # likely first
+    assert sum(k.likelihood == "possible" for k in kept) == 4  # a third of the limit (12)
 
 
 def test_proposals_that_change_nothing_are_dropped_and_the_rest_ranked() -> None:
@@ -400,9 +410,8 @@ def test_compressions_keep_every_number_and_job_term(master_cv: MasterCV) -> Non
     assert role.bullets[1].text == good.bullets[0]
 
 
-def test_similar_roles_merge_into_one_entry_keeping_every_institution(master_cv: MasterCV) -> None:
+def test_different_roles_are_never_combined(master_cv: MasterCV) -> None:
     cv = _postdocs(master_cv)
-    vocab = [*JD.hard_skills, *cv.all_skills()]
     merge = CompressionCandidate(
         kind="merge_roles", role_ids=["pd1", "pd2"],
         bullets=["Developed NLP models for document classification with 92% accuracy using "
@@ -410,17 +419,20 @@ def test_similar_roles_merge_into_one_entry_keeping_every_institution(master_cv:
                  "science teams."],
         reason="Two postdocs with the same work",
     )  # fmt: skip
-    across = merge.model_copy(update={"role_ids": ["nimbus", "pd1"]})  # different level
-    kept = check_compressions([across, merge], cv, [], vocab)
-    assert len(kept) == 1
-    assert kept[0].heading == (
-        "Postdoctoral Research Fellow, University A (Jan 2010 – Jun 2014); "
-        "Institute B (Jul 2014 – Aug 2017)"
-    )
-    assert merged_heading([cv.experience[0]]).startswith("Senior Machine Learning Engineer, Nimbus")
-    out = apply_compression(cv, kept[0])
-    assert [r.company for r in out.experience] == ["Nimbus Analytics", "University A; Institute B"]
-    assert (out.experience[1].start, out.experience[1].end) == ("2010-01", "2017-08")
+    assert check_compressions([merge], cv, [], [*cv.all_skills()]) == []
+    assert "never combine different roles" in PLAN_SYSTEM
+
+
+def _old_merge(cv: MasterCV) -> CompressionProposal:
+    """A merged entry proposed by a draft made before roles were no longer combined."""
+    roles = [r for r in cv.experience if r.id in ("pd1", "pd2")]
+    return CompressionProposal(
+        id="m1", kind="merge_roles", role_ids=["pd1", "pd2"], heading=merged_heading(roles),
+        bullets=["Developed NLP models for document classification with 92% accuracy using "
+                 "scikit-learn and spaCy, and designed a PostgreSQL feature store used by 3 "
+                 "data science teams."],
+        reason="r",
+    )  # fmt: skip
 
 
 # --- Word file -----------------------------------------------------------------------------
@@ -442,15 +454,7 @@ def test_red_layer_goes_where_a_reader_expects_it(master_cv: MasterCV, tmp_path:
             requirement="model monitoring", background_quote="a b", job_quote="c d", reason="r",
         ),
     ]  # fmt: skip
-    merge = check_compressions(
-        [CompressionCandidate(
-            kind="merge_roles", role_ids=["pd1", "pd2"],
-            bullets=["Developed NLP models for document classification with 92% accuracy using "
-                     "scikit-learn and spaCy, and designed a PostgreSQL feature store used by 3 "
-                     "data science teams."],
-            reason="r",
-        )], cv, [], [*cv.all_skills()],
-    )  # fmt: skip
+    merge = [_old_merge(cv)]  # an older draft's pending merge still displays
     pending = tmp_path / "pending.docx"
     write_like_original(
         original, cv, tailored.cv, pending, review_additions=additions, compressions=merge
@@ -581,14 +585,8 @@ def test_optimised_mode_proposes_toward_grade_a_scored_by_code(master_cv: Master
         anchor_id="nimbus-1", background_quote="real-time recommendation service",
         job_quote="model monitoring, on-call",
     )  # fmt: skip
-    llm = FakeLLM(
-        {
-            TailoringPlan: plan,
-            AdditionCandidates: lambda prompt: AdditionCandidates(
-                items=[second] if "<already_proposed>" in prompt else []
-            ),
-        }
-    )
+    revised = plan.model_copy(update={"review_candidates": [second]})
+    llm = FakeLLM({TailoringPlan: lambda prompt: revised if "<reading>" in prompt else plan})
     readings: list[TailoredCV] = []
 
     def check(draft: TailoredCV) -> TailoredCV:
@@ -596,15 +594,15 @@ def test_optimised_mode_proposes_toward_grade_a_scored_by_code(master_cv: Master
         return draft
 
     out = tailor(master_cv, job, llm, jd=jd, mode="optimised", check=check, declined=["x"])
-    assert len(readings) == 1  # one AI reading, at the end; the passes are scored by code
-    assert [a.kind for a in out.review_additions] == ["enrichment", "experience"]
+    assert len(readings) == 1  # one AI reading, at the end; the revision is scored by code
+    assert [m for _, m in llm.calls] == [TailoringPlan, TailoringPlan]  # plan + one revision
+    assert sorted(a.kind for a in out.review_additions) == ["enrichment", "experience"]
     sc = out.screening
     assert sc is not None and sc.if_confirmed is not None
     assert sc.before.score <= sc.after.score < sc.if_confirmed.score
     found = {c.term for c in sc.if_confirmed.keywords if c.found}
     assert {"model monitoring", "on-call"} <= found
-    prompts = [p for p, model in llm.calls if model is AdditionCandidates]
-    assert any("<declined>" in p for p in prompts)
+    assert all("<declined>" in p for p, _ in llm.calls)
 
 
 # --- screening match: literal keywords, one baseline, rewordings ----------------------------
@@ -739,3 +737,44 @@ def test_a_draft_saved_before_the_score_existed_is_scored_when_shown(
     scored = tailored_documents.with_screening(document)
     assert scored.screening is not None
     assert scored.screening == tailored_documents.with_screening(document).screening
+
+
+def test_the_final_version_leaves_out_what_is_pending(ws: Workspace, master_cv: MasterCV) -> None:
+    tailored = apply_plan(master_cv, TailoringPlan(), JD)
+    tailored.headline_options = ["Staff ML Engineer", "ML Engineer"]
+    tailored.review_additions = check_additions([_proposal()], _ctx(master_cv))
+    document_id = _draft(ws, master_cv, tailored)
+    final = tailored_documents.finalise(ws, document_id)
+    assert final.final_file and final.final_file.endswith("_final.docx")
+    path = ws.output_dir / "cvs" / final.final_file
+    text = "\n".join(p.text for p in Document(str(path)).paragraphs)
+    assert "CONFIRM" not in text and "Staff ML Engineer" not in text
+    assert any("1 suggestion(s) still pending" in n for n in final.final_notes)
+    edited = tailored_documents.edit(
+        ws, document_id, TailoredCVEdits(summary=master_cv.basics.summary + " I build ML.")
+    )
+    assert edited.final_file is None  # the draft changed: write the final version again
+
+
+def test_a_role_heading_above_the_employer_line_is_never_taken_or_removed(
+    master_cv: MasterCV, tmp_path: Path
+) -> None:
+    from src.cv.docx_original import align_to_document
+
+    original = tmp_path / "original.docx"
+    doc = Document()
+    doc.add_paragraph("EXPERIENCE")
+    for role in master_cv.experience:
+        doc.add_paragraph(f"{role.title}\tMar 2017 – Feb 2021")  # title and dates first
+        doc.add_paragraph(f"{role.company}, Lisbon, Portugal")
+        for bullet in role.bullets:
+            doc.add_paragraph(bullet.text, style="List Bullet")
+    doc.save(str(original))
+    aligned = align_to_document(original, master_cv)
+    assert all("\t" not in b.text for r in aligned.experience for b in r.bullets)
+    tailored = aligned.model_copy(deep=True)
+    tailored.experience[0].bullets = tailored.experience[0].bullets[:2]  # one line left out
+    out = tmp_path / "out.docx"
+    write_like_original(original, aligned, tailored, out)
+    text = [p.text for p in Document(str(out)).paragraphs]
+    assert sum("\tMar 2017 – Feb 2021" in t for t in text) == len(master_cv.experience)

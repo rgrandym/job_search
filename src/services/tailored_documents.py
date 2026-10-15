@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Literal
 
 from src.cv.ats import check_docx
-from src.cv.docx_exporter import TEMPLATES, export_docx
+from src.cv.docx_exporter import TEMPLATES, clean_copy, export_docx
 from src.cv.docx_original import restore_normalized_indents, write_like_original
 from src.cv.models import (
     JDAnalysis,
@@ -24,7 +24,7 @@ from src.cv.models import (
     TailoringSettings,
 )
 from src.cv.proposals import MAX_ROLE_SKILLS, apply_compression, enriched
-from src.cv.tailor import keyword_coverage, literal_terms, revise_tailored, screen
+from src.cv.tailor import keyword_coverage, literal_terms, readability, revise_tailored, screen
 from src.jobs.models import JobPosting
 from src.services import declined
 from src.services.workspace import Workspace
@@ -186,12 +186,78 @@ def _write_revision(
             f"edit was saved as {path.name}."
         )
         revised = revised.model_copy(update={"document_notes": [*revised.document_notes, note]})
-    original = Path(document.original_file) if document.original_file else None
     # Suggested headlines stay in the file until the user picks one.
     headlines = revised.headline_options if options is None else options
     source = source_cv or document.source_cv
     directory.mkdir(parents=True, exist_ok=True)
     written = path.with_name(f".{path.stem}.writing.docx")  # replaced whole, never half-written
+    _write_file(document, source, revised, headlines, written)
+    written.replace(path)
+    keywords = revised.matched_keywords + revised.missing_keywords
+    revised = revised.model_copy(update={"ats": check_docx(path, revised.cv, keywords)})
+    updated = document.model_copy(
+        update={
+            "tailored": revised,
+            "source_cv": source,
+            "filename": path.name,
+            "updated_at": datetime.now(UTC).isoformat(),
+            "reviewed": not any(a.status == "pending" for a in revised.review_additions),
+            "final_file": None,  # the draft changed: a final version is written again
+            "final_notes": [],
+        }
+    )
+    _save(ws, updated)
+    return updated
+
+
+def finalise(ws: Workspace, document_id: str) -> TailoredDocument:
+    """Write the clean final version beside the draft (user's decision 2026-10-15): the
+    draft's content with every change in black, its chosen headline only, and nothing still
+    pending review (red proposals, compressions and skills to confirm are left out and
+    listed). The draft itself is unchanged."""
+    document = load(ws, document_id)
+    draft = document.tailored
+    pending = sum(a.status == "pending" for a in draft.review_additions)
+    pending += sum(c.status == "pending" for c in draft.compressions)
+    notes = [f"{pending} suggestion(s) still pending were left out"] if pending else []
+    if draft.skills_to_confirm:
+        notes.append("The skills to confirm were left out")
+    if len(draft.headline_options) > 1:
+        notes.append("Suggested headlines were left out: the CV keeps its headline")
+    clean = clean_copy(draft)
+    clean = clean.model_copy(
+        update={"compressions": [c for c in draft.compressions if c.status != "pending"]}
+    )
+    directory = ws.output_dir / "cvs"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{Path(document.filename).stem}_final.docx"
+    original = Path(document.original_file) if document.original_file else None
+    if document.template == ORIGINAL and original is not None and original.is_file():
+        write_like_original(
+            original, document.source_cv, clean.cv, path, (), clean.role_skills,
+            clean.academic, (), clean.review_additions, clean.compressions, mark_changes=False,
+            key_strengths=clean.key_strengths,
+        )  # fmt: skip
+    else:
+        template = document.template if document.template in TEMPLATES else "classic"
+        export_docx(clean, path, template, final=True)
+    keywords = draft.matched_keywords + draft.missing_keywords
+    report = check_docx(path, clean.cv, keywords)
+    notes += [f"ATS read-back: {w}" for w in report.warnings]
+    updated = document.model_copy(update={"final_file": path.name, "final_notes": notes})
+    _save(ws, updated)
+    return updated
+
+
+def _write_file(
+    document: TailoredDocument,
+    source: MasterCV,
+    revised: TailoredCV,
+    headlines: list[str],
+    written: Path,
+) -> None:
+    """The draft's Word file: a copy of the original's design, or its template."""
+    original = Path(document.original_file) if document.original_file else None
     if document.template == ORIGINAL and original is not None and original.is_file():
         write_like_original(
             original,
@@ -204,6 +270,7 @@ def _write_revision(
             revised.skills_to_confirm,
             revised.review_additions,
             revised.compressions,
+            key_strengths=revised.key_strengths,
         )
     else:
         export_docx(
@@ -211,20 +278,6 @@ def _write_revision(
             written,
             document.template if document.template in TEMPLATES else "classic",
         )
-    written.replace(path)
-    keywords = revised.matched_keywords + revised.missing_keywords
-    revised = revised.model_copy(update={"ats": check_docx(path, revised.cv, keywords)})
-    updated = document.model_copy(
-        update={
-            "tailored": revised,
-            "source_cv": source,
-            "filename": path.name,
-            "updated_at": datetime.now(UTC).isoformat(),
-            "reviewed": not any(a.status == "pending" for a in revised.review_additions),
-        }
-    )
-    _save(ws, updated)
-    return updated
 
 
 OUTSIDE_EDIT_SLACK_S = 5.0  # the app writes the file just before it saves the draft record
@@ -307,6 +360,7 @@ def _refresh(revised: TailoredCV, document: TailoredDocument) -> None:
     jd = document.jd
     revised.fit_check = None
     revised.screening = screen(as_tailored(document), revised, jd, document.job_description)
+    revised.readability = readability(as_tailored(document), revised, jd)
     matched, missing = keyword_coverage(revised.cv, jd)
     revised.matched_keywords = matched
     revised.missing_keywords = missing
@@ -457,6 +511,8 @@ def review_compression(
     item = next((c for c in document.tailored.compressions if c.id == compression_id), None)
     if item is None or item.status != "pending":
         raise ValueError("Pending compressed version was not found")
+    if decision == "apply" and item.kind == "merge_roles":  # from a draft made before 2026-10-15
+        raise ValueError("Different roles are never combined: keep your lines")
     revised = document.tailored.model_copy(deep=True)
     if decision == "apply":
         revised.cv = apply_compression(revised.cv, item)
@@ -470,14 +526,18 @@ def review_compression(
 
 
 def with_screening(document: TailoredDocument) -> TailoredCV:
-    """The draft with its screening score: as saved, or for a draft saved before the score
-    existed, computed now (code only, no model; the same every time)."""
+    """The draft with its screening and readability scores: as saved, or for a draft saved
+    before a score existed, computed now (code only, no model; the same every time)."""
     tailored = document.tailored
-    if tailored.screening is not None or document.imported or not document.job_description:
+    if document.imported or not document.job_description:
         return tailored
     jd = literal_terms(document.jd, document.job_description)
-    screening = screen(as_tailored(document), tailored, jd, document.job_description)
-    return tailored.model_copy(update={"screening": screening})
+    update: dict[str, object] = {}
+    if tailored.screening is None:
+        update["screening"] = screen(as_tailored(document), tailored, jd, document.job_description)
+    if tailored.readability is None:
+        update["readability"] = readability(as_tailored(document), tailored, jd)
+    return tailored.model_copy(update=update) if update else tailored
 
 
 def as_tailored(document: TailoredDocument) -> MasterCV:

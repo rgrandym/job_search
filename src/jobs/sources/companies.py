@@ -41,6 +41,7 @@ import html
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
+from difflib import SequenceMatcher
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -234,6 +235,64 @@ def _site_boards(text: str, company: str, origin: str | None, page_url: str) -> 
 
 
 # ------------------------------------------------------------------ the source
+
+
+_LEGAL = {
+    "ltd", "limited", "plc", "inc", "llc", "llp", "uk", "group", "the", "gmbh", "co", "corp",
+    "corporation", "holdings", "company", "sa", "ag", "bv", "nv",
+}  # fmt: skip
+
+
+def company_words(name: str) -> list[str]:
+    """A company's name as words, without legal suffixes ("Altos Labs Ltd" -> altos, labs)."""
+    return [w for w in re.findall(r"[a-z0-9]+", name.lower()) if w not in _LEGAL]
+
+
+def same_company(a: str, b: str) -> bool:
+    """Two names for one employer: the same words, or one name starting the other ("GSK" and
+    "GSK plc"; "Altos" and "Altos Labs" when the shorter has at least 5 letters)."""
+    x, y = "".join(company_words(a)), "".join(company_words(b))
+    if not x or not y:
+        return False
+    short, long = sorted((x, y), key=len)
+    return x == y or (len(short) >= 5 and long.startswith(short))
+
+
+SAME_TITLE = 0.85  # this similar, two postings of one employer are the same job
+
+
+class EmployerFeedReader:
+    """Full text for a board's snippet-only posting from the employer's own job feed, when
+    the employer is on the watch-list (user's decision 2026-10-15): the same job, read in
+    full from its source, without opening the board's page."""
+
+    name = "employer_feed"
+
+    def __init__(self, settings: Settings | None = None, http: HttpFetcher | None = None) -> None:
+        self.settings = settings or get_settings()
+        path = self.settings.companies_path
+        self.boards = load_companies(path) if path.exists() else []
+        self.source = CompanyCareersSource(self.boards, http, self.settings)
+
+    def enrich(self, job: JobPosting) -> JobPosting:
+        """`job` with its feed posting's text, or `job` itself when the feed lacks it."""
+        board = next((b for b in self.boards if same_company(b.name, job.company)), None)
+        if board is None or job.source.startswith(f"{board.ats}:"):
+            return job
+        found = self.source.fetch_board(board, SearchQuery(titles=[job.title]))
+        title = job.title.casefold()
+        best = max(
+            found,
+            key=lambda j: SequenceMatcher(None, j.title.casefold(), title).ratio(),
+            default=None,
+        )
+        if best is None or SequenceMatcher(None, best.title.casefold(), title).ratio() < SAME_TITLE:
+            return job
+        if len(best.description) <= len(job.description):
+            return job
+        return job.model_copy(
+            update={"description": best.description, "apply_url": job.apply_url or best.url}
+        )
 
 
 class CompanyCareersSource(CareerSiteFeeds):

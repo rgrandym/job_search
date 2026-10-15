@@ -1,4 +1,6 @@
 import type {
+  LetterScore,
+  CVHealth,
   AppState,
   LetterFlag,
   Audience,
@@ -203,6 +205,8 @@ export const api = {
   saveCV: (cv: MasterCV) => request<MasterCV>("/api/cv", json("PUT", cv)),
   deleteCV: (assetId: string) =>
     request<{ deleted: boolean }>(`/api/cv/${encodeURIComponent(assetId)}`, { method: "DELETE" }),
+  cvHealth: () => request<CVHealth>("/api/cv/health"),
+  cvAtsCopy: () => request<{ id: string; filename: string }>("/api/cv/health/ats-copy", { method: "POST" }),
   exportGeneralCV: (progressId?: string) =>
     request<{ download_url: string; roles: number }>(tracked("/api/cv/general", progressId), { method: "POST" }),
   taskProgress: (taskId: string) => request<TaskProgress>(`/api/progress/${encodeURIComponent(taskId)}`),
@@ -240,7 +244,7 @@ export const api = {
   stopSearch: (runId: string) =>
     request<{ stopped: boolean }>(`/api/search/stop/${encodeURIComponent(runId)}`, { method: "POST" }),
   profiles: () =>
-    request<{ cv_parsed: boolean; profiles: ProfileRecord[]; family_yield: FamilyYield[] }>("/api/profiles"),
+    request<{ cv_parsed: boolean; profiles: ProfileRecord[]; other_profiles: ProfileRecord[]; family_yield: FamilyYield[] }>("/api/profiles"),
   intent: () => request<SearchIntent>("/api/intent"),
   saveIntent: (intent: SearchIntent) => request<SearchIntent>("/api/intent", json("PUT", intent)),
   outcomesReview: () => request<OutcomeReview>("/api/outcomes/review"),
@@ -325,13 +329,15 @@ export const api = {
       `/api/tailored-cvs/${encodeURIComponent(id)}/additions/${encodeURIComponent(additionId)}`,
       json("PUT", { decision, text, reason: reason ?? "" }),
     ),
+  finalTailoredCV: (id: string) =>
+    request<TailoredCVView>(`/api/tailored-cvs/${encodeURIComponent(id)}/final`, { method: "POST" }),
   reviewCVCompression: (id: string, compressionId: string, decision: "apply" | "reject") =>
     request<TailoredCVView>(
       `/api/tailored-cvs/${encodeURIComponent(id)}/compressions/${encodeURIComponent(compressionId)}`,
       json("PUT", { decision }),
     ),
   coverLetter: (jobId: string, template: string, result?: MatchResult, tailored_cv_id?: string, progressId?: string) =>
-    request<{ id: string | null; download_url: string; paragraphs: number; flags: LetterFlag[]; notes: string[] }>(
+    request<{ id: string | null; download_url: string; paragraphs: number; flags: LetterFlag[]; notes: string[]; score: LetterScore | null }>(
       tracked(`/api/jobs/${encodeURIComponent(jobId)}/cover-letter`, progressId),
       json("POST", { template, result, tailored_cv_id }),
     ),

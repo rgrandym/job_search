@@ -20,6 +20,7 @@ import re
 
 from src.core import progress
 from src.core.llm_provider import LLMProvider
+from src.cv.ats_score import Text, grade, tokens
 from src.cv.claims import escalation, jargon, overclaim
 from src.cv.models import (
     ChangeRecord,
@@ -29,6 +30,7 @@ from src.cv.models import (
     LetterFlag,
     LetterParagraph,
     LetterReview,
+    LetterScore,
     LetterSections,
     MasterCV,
     TailoredCV,
@@ -277,7 +279,7 @@ def write_letter(
         feedback = "Revise the letter to fix these issues: " + "; ".join(problems)
     assert best is not None
     letter, problems, notes = best
-    if review and letter.paragraphs:
+    if review and letter.paragraphs:  # an extra model read; the app skips it (fast)
         progress.step("Reading the letter as the hiring manager")
         issues = review_letter(letter, jd_text, llm)
         if issues:
@@ -286,7 +288,8 @@ def write_letter(
             revised = _guarded_draft(master, jd, jd_text, llm, motivation, feedback, context, gaps)
             if revised[0].paragraphs and len(revised[1]) <= len(problems):
                 letter, problems, notes = revised
-    return letter.model_copy(update={"notes": notes})
+    score = score_letter(letter, letter_terms(jd, jd_text))
+    return letter.model_copy(update={"notes": notes, "score": score})
 
 
 def _guarded_draft(
@@ -353,6 +356,68 @@ def _sections(draft: CoverLetterDraft) -> list[str]:
     bridge = ["bridge"] if draft.bridge is not None else []
     conclusion = ["conclusion"] if draft.conclusion is not None else []
     return ["opening", *("evidence" for _ in draft.evidence), *bridge, *conclusion]
+
+
+LETTER_WORDS = (250, 400)  # a full, one-page letter body
+LETTER_TERMS = 8
+SENTENCE_WORDS = (22, 32)  # easy to read at or under the first; hard at the second
+LETTER_WEIGHTS = {"terms": 35, "specific": 20, "length": 15, "sentences": 15, "checks": 15}
+
+
+def letter_terms(jd: JDAnalysis, jd_text: str) -> list[str]:
+    """The job's keywords a letter should name: the ones the posting uses most."""
+    words = tokens(jd_text)
+    short = [t for t in dict.fromkeys([*jd.must_have, *jd.hard_skills]) if len(t.split()) <= 4]
+
+    def count(term: str) -> int:
+        part = tokens(term)
+        n = len(part)
+        return sum(words[i : i + n] == part for i in range(len(words) - n + 1)) if n else 0
+
+    return sorted(short, key=lambda t: -count(t))[:LETTER_TERMS]
+
+
+def score_letter(letter: CoverLetter, terms: list[str]) -> LetterScore:
+    """A deterministic score of how well the letter makes the case (user's decision
+    2026-10-15): the job's main terms named (35, full at half of them: a letter argues, it
+    does not list), the company and the exact role named (20), a one-page length (15),
+    readable sentences (15), paragraphs the checks did not question (15). Grades as the
+    screening score."""
+    body = " ".join(letter.paragraphs)
+    text = Text(body)
+    named = [t for t in terms if text.has(t)]
+    words = len(body.split())
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+", body) if s.strip()]
+    average = words / len(sentences) if sentences else 0
+    low, high = LETTER_WORDS
+    easy, hard = SENTENCE_WORDS
+    company = letter.target_company
+    specific = [_names_role(body, letter.target_title)]
+    specific += [mentions(body, company)] if company else []
+    shares = {
+        "terms": min(1.0, 2 * len(named) / len(terms)) if terms else None,
+        "specific": sum(specific) / len(specific),
+        "length": max(0.0, 1 - max(low - words, words - high, 0) / 200),
+        "sentences": max(0.0, min(1.0, (hard - average) / (hard - easy))),
+        "checks": 1 - len(letter.flags) / len(letter.paragraphs) if letter.paragraphs else 0.0,
+    }
+    asked = {k: v for k, v in shares.items() if v is not None}
+    total = sum(LETTER_WEIGHTS[k] for k in asked)
+    lost = {k: LETTER_WEIGHTS[k] * (1 - v) * 100 / total for k, v in asked.items()}
+    score = max(0, round(100 - sum(lost.values())))
+    missing = [t for t in terms if t not in named]
+    notes = {
+        "terms": "Name more of what the job asks for: " + ", ".join(missing[:4]),
+        "specific": f"Name the company and the exact role ({letter.target_title})",
+        "length": f"The body has {words} words; {low} to {high} fill one page well",
+        "sentences": f"Sentences average {average:.0f} words; shorter ones read faster",
+        "checks": f"{len(letter.flags)} paragraph(s) questioned by the checks (in red)",
+    }
+    ordered = sorted((k for k in lost if lost[k] >= 0.5), key=lambda k: -lost[k])
+    return LetterScore(
+        score=score, grade=grade(score), notes=[notes[k] for k in ordered], words=words,
+        terms=terms,
+    )  # fmt: skip
 
 
 def _names_role(text: str, job_title: str) -> bool:

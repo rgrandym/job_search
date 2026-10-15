@@ -82,6 +82,7 @@ from src.services import (
     calibration,
     company_discovery,
     cover_letters,
+    cv_health,
     cv_service,
     cv_versions,
     document_files,
@@ -277,6 +278,10 @@ async def companies_discover(
                     mode=mode,
                     should_stop=stop.is_set,
                 )
+                if not stop.is_set():  # and every employer queued from job boards
+                    await asyncio.to_thread(
+                        company_discovery.learn_employers, settings, LEARN_ON_UPDATE
+                    )
             except SourceError as exc:  # recorded in the status for the UI
                 if not stop.is_set():
                     log.warning("company discovery failed: %s", exc)
@@ -288,6 +293,9 @@ async def companies_discover(
         task.add_done_callback(_DISCOVERY_TASKS.discard)
         await asyncio.sleep(0.05)  # let the pass take its lock, so the status says running
     return company_discovery.status(settings).model_dump(mode="json")
+
+
+LEARN_ON_UPDATE = 100  # employers from job boards checked by the Update button
 
 
 @app.post("/api/companies/discover/stop")
@@ -549,6 +557,25 @@ async def export_general_cv(progress_id: str | None = None) -> dict[str, Any]:
     return {"download_url": _file_url(path), "roles": roles}
 
 
+@app.get("/api/cv/health")
+async def cv_health_check() -> cv_health.CVHealth:
+    """What to fix in the selected CV (its Word design and its facts) before tailoring."""
+    try:
+        return await cv_health.check(get_workspace())
+    except (ValueError, LLMError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/cv/health/ats-copy")
+async def cv_ats_copy() -> dict[str, Any]:
+    """Add an ATS-safe Word copy of the selected CV to the library and select it."""
+    try:
+        asset = await cv_health.clean_template(get_workspace())
+    except (ValueError, LLMError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"id": asset.id, "filename": asset.filename}
+
+
 @app.get("/api/cv/source/{asset_id:path}")
 def cv_source(asset_id: str) -> FileResponse:
     """The CV file exactly as stored, shown inline (PDFs render in the browser)."""
@@ -622,14 +649,18 @@ async def profile_summary(body: SummaryRequest, progress_id: str | None = None) 
 
 @app.get("/api/profiles")
 def list_profiles() -> dict[str, Any]:
-    """Stored profile summaries for the selected CV (empty until the CV has been parsed)."""
+    """Stored profile summaries for the selected CV (empty until the CV has been parsed), and
+    those of the user's other CVs, which stay until the user deletes them."""
     ws = get_workspace()
     cv = cv_service.cached_selected_cv(ws)
     if cv is None:
-        return {"cv_parsed": False, "profiles": [], "family_yield": []}
+        others = [r.model_copy(update={"cv_name": r.cv_name or "Another CV"})
+                  for r in ws.memory.all_records()]  # fmt: skip
+        return {"cv_parsed": False, "profiles": [], "other_profiles": others, "family_yield": []}
     return {
         "cv_parsed": True,
         "profiles": search_service.list_profiles(ws, cv),
+        "other_profiles": search_service.other_profiles(ws, cv),
         "family_yield": history.family_yield(ws, ws.active_cv_id or ""),
     }
 
@@ -683,7 +714,7 @@ async def refresh_profile(key: str, progress_id: str | None = None) -> ProfileRe
 @app.delete("/api/profiles/{key:path}")
 def delete_profile(key: str) -> dict[str, bool]:
     try:
-        search_service.delete_profile(get_workspace(), _profile_cv(), key)
+        search_service.delete_profile(get_workspace(), key)
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
     return {"deleted": True}
@@ -955,6 +986,7 @@ def _tailor_report(tailored: TailoredCV, document_id: str | None, url: str) -> d
         "positioning": tailored.positioning,
         "requirements": tailored.requirements,
         "role_skills": tailored.role_skills,
+        "key_strengths": tailored.key_strengths,
         "skills_to_confirm": tailored.skills_to_confirm,
         "review_additions": tailored.review_additions,
         "compressions": tailored.compressions,
@@ -964,6 +996,7 @@ def _tailor_report(tailored: TailoredCV, document_id: str | None, url: str) -> d
         "academic": tailored.academic,
         "fit_check": tailored.fit_check,
         "screening": tailored.screening,
+        "readability": tailored.readability,
         "rejected": sum(not c.accepted for c in tailored.changes),
         "rejections": [
             {"source_id": c.source_id, "reason": c.reason}
@@ -1010,6 +1043,8 @@ def _tailored_view(
         "source_ats_keyword_coverage": document.tailored.source_ats_keyword_coverage,
         "reviewed": document.reviewed,
         "imported": document.imported,
+        "final_url": _file_url(cvs_dir / document.final_file) if document.final_file else None,
+        "final_notes": document.final_notes,
         "report": report,
     }
 
@@ -1130,6 +1165,15 @@ def review_cv_addition(
         raise HTTPException(422, str(exc)) from exc
 
 
+@app.post("/api/tailored-cvs/{document_id}/final")
+def final_tailored_cv(document_id: str) -> dict[str, Any]:
+    """Write the clean final version (no red, nothing pending) beside the draft."""
+    try:
+        return _tailored_view(tailored_documents.finalise(get_workspace(), document_id))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 class ReviewCompressionRequest(BaseModel):
     decision: Literal["apply", "reject"]
 
@@ -1229,6 +1273,7 @@ async def cover_letter(
         "paragraphs": len(letter.paragraphs),
         "flags": [flag.model_dump() for flag in letter.flags],
         "notes": letter.notes,
+        "score": letter.score,
     }
 
 
@@ -1248,6 +1293,7 @@ def _letter_view(document: cover_letters.SavedLetter) -> dict[str, Any]:
         "closing": document.letter.closing,
         "flags": [flag.model_dump() for flag in document.letter.flags],
         "notes": document.letter.notes,
+        "score": document.letter.score,
         "docx_url": f"/api/cover-letters/{document.id}/export/docx",
         "txt_url": f"/api/cover-letters/{document.id}/export/txt",
     }

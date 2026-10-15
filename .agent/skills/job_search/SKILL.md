@@ -114,6 +114,19 @@ page are left alone. SuccessFactors, Phenom and Radancy CWS careers sites are re
 assets they load, Oracle and Jobvite by their links; a page on a platform the app cannot read
 (an older SuccessFactors site, Avature, Taleo, Eightfold, Salesforce, a recruiter's talent
 community) is named in the note.
+**Employers learned from job boards** (user's decision 2026-10-15): in 23 searches about
+55% of matches came from LinkedIn and four in five of its employers had no feed on the
+watch-list. After each search the employers of matched board jobs are queued
+(`queue_employers`; agencies, unknown names and watched employers skipped) and up to
+`learn_employers` (8) are checked in the background (`learn_employers`; the Update button
+checks up to 100): the ATS named by the posting's apply link (LinkedIn's guest page names it:
+`public_boards.linkedin_apply_url`, kept as `JobPosting.apply_url`), else the employer's name
+as a board slug on the APIs that state the board's company name (Greenhouse, Workable,
+SmartRecruiters), kept only when that name matches (`same_company`). Lever and Ashby boards
+are never guessed (their APIs name no company). Found feeds join the watch-list with origin
+"boards"; one not found is tried again after 30 days. Nature Careers (robots.txt disallows its
+search and RSS) and New Scientist Jobs (closed) were checked and are not sources.
+
 **Your companies** (`add_company`, sidebar) go through the same search at
 once, are kept with no `origin` (never overwritten by discovery) and can be removed. When nothing
 readable is found, the error says why (platform, talent community, site refusing automated
@@ -271,6 +284,9 @@ the last match per source, so sources that never produce a match can be switched
 The job_matcher can only check requirements it can read, so shortlisted postings with
 snippet-only descriptions (< `ENRICH_BELOW` = 600 chars) get their full text before screening,
 then the shortlist is re-scored (`search_service._enrich`):
+0. first, when the employer is on the watch-list, the same job from the employer's own feed
+   (`companies.EmployerFeedReader`: the feed posting whose title is at least 85% the same;
+   user's decision 2026-10-15), so no board page is opened for it;
 1. the posting's own source (`enrich`: Reed, LinkedIn, Totaljobs, jobs.ac.uk, NHS Jobs);
    LinkedIn alert jobs (Gmail, inbox) share LinkedIn's ids and are opened by `LinkedInSource`;
 2. then, if still thin, the posting's own page (`sources/pages.PostingPages`): its schema.org

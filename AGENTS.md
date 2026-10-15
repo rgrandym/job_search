@@ -55,7 +55,7 @@ another provider than search and matching (e.g. Opus through Claude Code while C
 | Role | Used for | Calls |
 | --- | --- | --- |
 | **profile** | explicit profile building and updates (optional; blank = the quality model and its effort; may use its own provider, `profile_provider`) | when requested |
-| **cv** | tailored CVs: JD analysis, plan, review and revision (optional; blank = the quality model; `cv_provider`) | per tailored CV |
+| **cv** | tailored CVs: JD analysis, plan and at most one revision (optional; blank = the quality model; `cv_provider`); never grades its own drafts | per tailored CV |
 | **letter** | cover letters (optional; blank = the CV model, else the quality model; `letter_provider`) | per letter |
 | **quality** | CV parsing for search, search-time summary on a cache miss, evidence extraction, second opinions on matches and near the threshold, the assistant's default, and writing tasks without their own model | rare, accuracy-critical |
 | **screening** | the job_matcher's first pass (batches of 3) | hundreds per search |
@@ -172,14 +172,18 @@ ownership or scope (claims.escalation), job wording only in bullets mapped to th
 requirement map ids checked (check_requirements), summary skills/numbers in the CV; headline
 kept, up to 4 checked headline_options offered; role_skills only CV skills; every bullet kept
 and reordered unless the length choice or assess_trim allows trimming)
-─▶ critique_cv (LLM, hiring manager + recruiter) ─▶ revise_plan ─▶ apply_plan ─▶ TailoredCV
-─▶ fit_check.compare_fit (LLM reads original and tailored CV blind; before → after)
+─▶ code scores it (screening score, readability) and finds what to fix (rejected wording, key
+gaps and job terms no proposal addresses, a score under grade A) ─▶ at most one revision
+(revise_for_reader) ─▶ apply_plan ─▶ the better-scoring TailoredCV
+─▶ fit_check.compare_fit (the screening model, an independent grader, reads original and
+   tailored CV blind; before → after; a recruiter's six-second skim)
    (each tailoring is a saved version with its settings; cv_versions.compare reads a job's
    versions and one library CV (Master or selected, or the user's pick) side by side, three
    blind reads whose quoted evidence code checks, median kept and remembered per CV; code gives
    each version's verdict and each setting's effect by fixed margins, ranks them and saves it)
 ─▶ docx_original.write_like_original (a copy of the CV's Word design, also for a PDF CV's Word
-version, + "Relevant skills for this role" line; academic: sections moved whole into academic
+version, + "Key strengths" and "Relevant skills for this role" lines; every changed or added
+line red; "Write final version" (tailored_documents.finalise) saves a clean all-black copy; academic: sections moved whole into academic
 order; optimised: red proposals where they belong and red compressed versions below their
 lines, which only the user applies (tailored_documents.review_compression); templates only
 when chosen)
@@ -189,7 +193,8 @@ job ─▶ cover_letter.draft_letter (LLM; master template: introduction "applyi
 Y; my experience in a, b, c fits", evidence, gap paragraph when letter_gaps finds unmet
 essentials or the role is a change of function or level, conclusion; one page) ─▶ apply_letter (each paragraph cites CV ids; numbers/skills from them; no added
 ownership; a questioned paragraph is kept, flagged red for the user, never blocking)
-─▶ review_letter (LLM, hiring manager) ─▶ one checked redraft
+─▶ one checked redraft only when the checks question something (no review call in the app)
+─▶ cover_letter.score_letter (code: terms, company and role, length, sentences, flags)
 ─▶ <Name>_<Company>_cover_letter.docx
 document ─▶ enrichment.propose (LLM; quotes checked against the document) ─▶ review queue
 ─▶ the user accepts ─▶ Master CV

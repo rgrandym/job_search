@@ -26,11 +26,13 @@ The Totaljobs, jobs.ac.uk and NHS Jobs listings were checked against live respon
 
 from __future__ import annotations
 
+import html
 import json
 import re
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from src.core.config import Settings, get_settings
 from src.cv.models import WorkArrangement
@@ -239,7 +241,24 @@ def linkedin_details(page: str, job: JobPosting) -> dict[str, Any]:
         update["company"] = company or "?"
     if job.work_arrangement == "onsite":  # untagged search: the full text says more
         update["work_arrangement"] = infer_arrangement(job.location, text[:1500])
+    if apply := linkedin_apply_url(page):
+        update["apply_url"] = apply
     return update
+
+
+def linkedin_apply_url(page: str) -> str | None:
+    """The employer's own application link a guest posting page names ("Apply on company
+    website"), or None for LinkedIn's own Easy Apply. It names the employer's ATS, so the app
+    can learn the employer's job feed (`company_discovery.learn_employers`). Unverified
+    mapping: the hidden `applyUrl` code element of the guest page, tested against a fixture
+    only."""
+    found = re.search(r'id="applyUrl"[^>]*>\s*<!--\s*"([^"]+)"', page)
+    if not found:
+        return None
+    link = html.unescape(found.group(1))
+    target = parse_qs(urlsplit(link).query).get("url", [link])[0]
+    host = urlsplit(target).netloc.lower()
+    return target if host and "linkedin." not in host else None
 
 
 # ------------------------------------------------------------------ Totaljobs

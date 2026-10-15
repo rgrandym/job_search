@@ -274,6 +274,16 @@ class AdditionCandidate(_Strict):
     background_quote: str = Field(description="Exact words in the source CV")
     job_quote: str = Field(description="Exact words in the posting")
     reason: str = Field(description="Why this is plausible and what the user must verify")
+    basis: str = Field(
+        "",
+        description="What makes it typical: what people with this title, at this kind of "
+        "employer and in this sector routinely do, or the role's documented work",
+    )
+    likelihood: Literal["likely", "possible"] = Field(
+        "likely",
+        description="likely: such a role routinely involves it; possible: plausible from the "
+        "background but less certain. Never propose what such a role would be unlikely to do",
+    )
 
 
 class TermBridge(_Strict):
@@ -306,14 +316,14 @@ class CompressionCandidate(_Strict):
     """A shorter version of lines that overlap or carry detail this job does not need (LLM
     output, optimised mode). Shown in red below the originals; only the user applies it."""
 
-    kind: Literal["tighten", "merge_bullets", "merge_roles"]
-    role_ids: list[str] = Field(
-        description="tighten, merge_bullets: the one role; merge_roles: the similar roles"
-    )
+    # merge_roles: only in drafts made before 2026-10-15; different roles are never combined
+    kind: Literal["tighten", "merge_bullets", "merge_roles", "condense_role"]
+    role_ids: list[str] = Field(description="The one role whose lines it shortens")
     source_ids: list[str] = Field(
         default_factory=list,
         description="tighten: one bullet; merge_bullets: two or more bullets of the role; "
-        "merge_roles: leave empty (all of the roles' bullets)",
+        "merge_roles: leave empty (all of the roles' bullets); condense_role (built by code, "
+        "never proposed by the model): the lines it leaves out",
     )
     bullets: list[str] = Field(
         description="The compressed wording: one bullet for tighten or merge_bullets; the "
@@ -333,6 +343,13 @@ class CompressionProposal(CompressionCandidate):
     status: Literal["pending", "applied", "rejected"] = "pending"
 
 
+class KeyStrength(_Strict):
+    """One "Key strengths" line under the summary, resting on the CV bullets it cites."""
+
+    text: str = Field(description="One short line (at most about 20 words), first person implied")
+    source_ids: list[str] = Field(description="The CV bullet ids whose facts it states")
+
+
 class TailoringPlan(_Strict):
     """LLM output: what to change. Applied deterministically by `tailor.apply_plan`."""
 
@@ -346,6 +363,11 @@ class TailoringPlan(_Strict):
         "and the user may choose one of these",
     )
     summary: str | None = None
+    key_strengths: list[KeyStrength] = Field(
+        default_factory=list,
+        description="3 or 4 short lines under the summary: the strengths this job needs most, "
+        "each from the CV bullets it cites",
+    )
     rewritten_bullets: list[RewrittenBullet] = Field(default_factory=list)
     bullet_order: list[RoleOrder] = Field(
         default_factory=list,
@@ -575,6 +597,23 @@ class TermCheck(_Strict):
     found: bool
 
 
+class ReadabilityScore(_Strict):
+    """How easily a person reads a CV (`cv/readability.py`): computed by code."""
+
+    score: int = Field(ge=0, le=100)
+    grade: str
+    notes: list[str] = Field(default_factory=list, description="What to fix, most points first")
+    words: int = 0
+    bullets: int = 0
+
+
+class Readability(_Strict):
+    """The original CV and the tailored one, read for ease of reading."""
+
+    before: ReadabilityScore
+    after: ReadabilityScore
+
+
 class ScreeningScore(_Strict):
     """A deterministic screening (ATS) score of one CV's printed text (`cv/ats_score.py`)."""
 
@@ -604,6 +643,7 @@ class OriginalReading(_Strict):
     text_key: str = Field(description="Hash of the original CV's text as read")
     requirements: list[str] = Field(default_factory=list)
     reading: FitReading
+    reader: str = Field("", description="The grader model that read it (provider:model:effort)")
 
 
 class FitComparison(_Strict):
@@ -675,6 +715,9 @@ class TailoredCV(_Strict):
     role_skills: list[str] = Field(
         default_factory=list, description="The 'Relevant skills for this role' line (CV skills)"
     )
+    key_strengths: list[str] = Field(
+        default_factory=list, description="The checked 'Key strengths' lines under the summary"
+    )
     skills_to_confirm: list[SkillToConfirm] = Field(
         default_factory=list,
         description="Unverified job techniques shown in red, outside the confirmed CV facts",
@@ -691,6 +734,9 @@ class TailoredCV(_Strict):
     revision: str = Field("", description="What the score-driven revision did, if it ran")
     screening: Screening | None = Field(
         None, description="Deterministic screening (ATS) score before, after and if confirmed"
+    )
+    readability: Readability | None = Field(
+        None, description="Deterministic ease-of-reading score, original and tailored"
     )
     length_notes: list[str] = Field(
         default_factory=list,
@@ -838,6 +884,10 @@ class TailoredDocument(_Strict):
     )
     search_fit: SearchFitBaseline | None = None
     search_fit_invalidated: bool = False  # older drafts only; no longer set or used
+    final_file: str | None = Field(
+        default=None, description="The clean final version (no red), written on request"
+    )
+    final_notes: list[str] = Field(default_factory=list)
 
 
 class TailoredCVEdits(_Strict):
@@ -910,6 +960,18 @@ class LetterFlag(_Strict):
     reason: str
 
 
+class LetterScore(_Strict):
+    """How well a letter makes the case, computed by code (`cover_letter.score_letter`)."""
+
+    score: int = Field(ge=0, le=100)
+    grade: str
+    notes: list[str] = Field(default_factory=list, description="What to improve, most first")
+    words: int = 0
+    terms: list[str] = Field(
+        default_factory=list, description="The job's most used keywords the score looks for"
+    )
+
+
 class CoverLetter(_Strict):
     """A checked cover letter. Every paragraph is kept; one whose claims do not trace to the
     CV is flagged (red in Word and the app) until the user edits it or keeps it as written
@@ -929,6 +991,7 @@ class CoverLetter(_Strict):
     notes: list[str] = Field(
         default_factory=list, description="Letter-level issues for the user (structure, length)"
     )
+    score: LetterScore | None = None
 
 
 # ---------------------------------------------------------------- evidence enrichment

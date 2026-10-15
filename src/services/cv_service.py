@@ -102,6 +102,12 @@ def store_cv(ws: Workspace, filename: str, data: bytes) -> CVAsset:
     return select_cv(ws, duplicate.id if duplicate else asset_id)
 
 
+def store_parsed_cv(ws: Workspace, filename: str, data: bytes, cv: MasterCV) -> CVAsset:
+    """Store and select a Word CV whose facts are already known (`cv`), so it needs no parse."""
+    mgr.save(cv, _parsed_path(ws, _content_id(data)))
+    return store_cv(ws, filename, data)
+
+
 def list_cvs(ws: Workspace) -> list[CVAsset]:
     """List locally stored CV sources, plus the legacy Master CV when present."""
     document_files.organize_legacy_output(ws)
@@ -688,12 +694,16 @@ async def tailor_to_job(
     profile = stored_profile(ws, result.family if result is not None else None)
     search_fit = search_fit_baseline(result, ws.active_cv_id)
 
-    held = {job.id: load_baseline(ws, job.id)}  # one reading of the original per job
+    grader = ws.structured(GRADER, usage_sink, "CV reading (independent grader)")
+    reader = grader_id(ws)
+    kept = load_baseline(ws, job.id)  # one reading of the original per job and grader
+    held = {job.id: kept if kept is not None and kept.reader == reader else None}
 
-    def check(draft: TailoredCV) -> TailoredCV:  # the reading the revision works from
-        out = _fit_check(master_cv, draft, jd, text, llm, search_fit, held[job.id])
+    def check(draft: TailoredCV) -> TailoredCV:  # the independent grader's reading
+        out = _fit_check(master_cv, draft, jd, text, grader, search_fit, held[job.id])
         baseline = out.fit_check.baseline if out.fit_check else None
         if baseline is not None and baseline != held[job.id]:
+            baseline = baseline.model_copy(update={"reader": reader})
             held[job.id] = baseline
             save_baseline(ws, job.id, baseline)
         return out
@@ -756,6 +766,17 @@ async def tailor_to_job(
 
 
 MAX_BACKGROUND = 15_000  # characters of the user's other CVs given to the optimiser
+
+
+# Who grades a CV is not who wrote it (user's decision 2026-10-15): the screening model, the
+# same judge whose verdict at search time anchors the scores, reads every CV for a job.
+GRADER: Role = "screening"
+
+
+def grader_id(ws: Workspace) -> str:
+    """The grader model (provider:model:effort): another model reads afresh."""
+    llm = ws.llm
+    return f"{llm.provider_for(GRADER)}:{llm.model_for(GRADER)}:{llm.effort_for(GRADER)}"
 
 
 def library_background(ws: Workspace, cv_id: str | None) -> str:
@@ -941,6 +962,7 @@ def _write_tailored(
             tailored.skills_to_confirm,
             tailored.review_additions,
             tailored.compressions,
+            key_strengths=tailored.key_strengths,
         )
         notes.insert(0, f"Written in the design of {original.name}")
     elif template == tailored_documents.ORIGINAL:
@@ -1055,7 +1077,7 @@ async def write_cover_letter(
         llm,
         motivation(ws, document.cv_id if document else None),
         letter_context(document.tailored if document else None),
-        True,
+        False,  # fast: the checks and one redraft; the user reviews the letter
         letter_gaps(document.tailored if document else None),
     )
     if not letter.paragraphs:

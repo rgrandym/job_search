@@ -144,6 +144,9 @@ class JobPosting(_Strict):
         False, description="Source applied the location/distance filter server-side"
     )
     url: str | None = None
+    apply_url: str | None = Field(
+        None, description="The employer's own application link, when the source names one"
+    )
     posted_at: date | None = None
     closes_at: date | None = Field(
         None, description="Last day to apply, when the source states one (e.g. validThrough)"

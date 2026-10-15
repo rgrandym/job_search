@@ -61,7 +61,8 @@ src/
   cv/          models.py · master_cv_manager.py · tailor.py (requirement map, positioning, guards,
                review, trim and level rules) · fit_check.py (before/after) · claims.py · cover_letter.py
                proposals.py (optimised red layer: proposal and compression checks)
-               ats_score.py (deterministic screening score)
+               ats_score.py (deterministic screening score) · acronyms.py (term ↔ abbreviation)
+               readability.py (deterministic ease-of-reading score)
                docx_original.py (tailored CV = a copy of the original Word CV) · edits.py
                ats.py (docx read-back) · docx_exporter.py
   jobs/        models.py · fetcher.py · matcher.py + scorer.py (pre-filter)
@@ -89,7 +90,8 @@ src/
                added automatically at the start of a search, the user can remove any)
                model_compare.py (CLI: score model setups against your labels) · compare_usage.py
                (its cost per model, plan usage and progress bar)
-               company_discovery.py (directory -> data/companies.json; run by searches + Update button)
+               company_discovery.py (directory -> data/companies.json; run by searches + Update button;
+               employers learned from job boards) · cv_health.py (selected CV's design and facts)
                connections.py (who serves each task, plan windows, spend, spent-plan options)
   agents/      the assistant: registry.py · runtime.py (loop; native runs) · mcp.py (tools for the Claude Code
                and Codex loops) · tools.py · definitions.py · prompts/assistant.md · chat.py
@@ -147,6 +149,10 @@ A CV is a factual document. Tailoring may rephrase and reorder. It may never inv
   `transferable`; never a named tool, acronym, number, regulated, credential or management
   term). A pairing makes the term that bullet's evidence and puts it on the relevant-skills
   line; pairings are shown to the user. All other guards are unchanged.
+- Both forms of a term (user's decision 2026-10-15): a job keyword the CV lacks while a bullet
+  shows its abbreviation or long form is written there once in both, "machine learning (ML)"
+  (`tailor._spell_out`, pairs from `cv/acronyms.py`: bracketed in the posting or CV with
+  matching initials, or known synonyms). Same term, no new fact.
 - Every accept/reject is recorded in `TailoredCV.changes` with a reason. Surface rejections and
   `missing_keywords` to the user.
 - New facts go into the Master CV (after the user confirms them), never straight into a tailored CV.
@@ -167,16 +173,18 @@ A CV is a factual document. Tailoring may rephrase and reorder. It may never inv
   for numbers), words added inside an existing bullet (`enrichment`, red at its end), a new
   bullet after the one it relates to (`experience`), a question for a number the bullet lacks
   (`metric`; never a figure), a skill in its own skills category, at most one summary
-  sentence and one headline; at most 20, at most 5 per role, no jargon, no number the source lacks, no headline above the level held, never one
-  the user deleted before (`services/declined.py`, per CV). Code checks the proposed wording;
-  only rejected wording can trigger one correction. When open key gaps or missing job terms
-  remain that no proposal addresses, one hiring-manager pass proposes for them; after the fit
-  check, while the screening score with every proposal confirmed stays under grade A (80,
-  `tailor.TARGET_ATS`), up to two more passes aim at the job terms, title and requirements
-  still missing, each scored by code and kept only if it scores better (user's decision
-  2026-10-14); one model reading follows, then proposals it credits with nothing are dropped
-  and the rest ranked by gain (`_toward_target`, `_ranked`). The request saves one Word
-  version.
+  sentence and one headline; as many as the open gaps and missing terms need (12 to 30,
+  `AdditionContext.limit`), at most 8 per role, no jargon, no number the source lacks, no
+  headline above the level held, never one the user deleted before (`services/declined.py`,
+  per CV). Creative but realistic (user's decision 2026-10-15): each states its `basis` (what
+  people with that title, employer and sector routinely do) and a `likelihood` (`likely`
+  first; `possible` at most a third); nothing such a role would be unlikely to involve. Code
+  checks the proposed wording. Accurate but fast (user's decision 2026-10-15): when code finds
+  rejected wording, key gaps or missing terms no proposal addresses, or a score under grade A
+  (80, `tailor.TARGET_ATS`), one revision (`tailor._revised_once`) addresses them all and the
+  better-scoring draft is kept; then the independent grader's reading, after which proposals
+  it credits with nothing are dropped and the rest ranked by gain (`_ranked`). The request
+  saves one Word version.
   Each proposal quotes source-CV and posting text, is labelled CONFIRM BEFORE USE, and stays
   outside the factual CV, fit score, ATS keyword coverage and letters. The fit check reads
   the draft a second time with them in place, in the same pass, and reports that separately
@@ -188,16 +196,20 @@ A CV is a factual document. Tailoring may rephrase and reorder. It may never inv
   with the user's reason, for that CV. A draft with pending proposals is not reviewed for
   cover-letter use.
 - Optimised mode also proposes compressed versions (`compressions`, user's decision
-  2026-10-14): a long bullet tightened, overlapping bullets of one role merged, or similar roles
-  (same level, a shared title word, e.g. consecutive postdocs) merged into one entry whose
-  heading, built by code, keeps every institution with its own dates. A compression keeps every
+  2026-10-14): a long bullet tightened, or overlapping bullets of one role merged. Consolidation
+  stays within one role: different roles are never combined (user's decision 2026-10-15; a
+  `merge_roles` from an older draft is still shown but cannot be applied). A compression keeps every
   number and job term of its sources and adds nothing they do not show. It is written in red
   below the lines it would replace, which stay: the app never removes them. Only the user's
   choice ("use the shorter version", `tailored_documents.review_compression`) replaces them in
   that draft; the source CV is never changed.
 - Cover letters (user's decision 2026-10-11): the same checks run on every paragraph, but a
   questioned paragraph is kept and flagged in red with its reason (`CoverLetter.flags`) for the
-  user to edit or keep; a letter is never refused by a check.
+  user to edit or keep; a letter is never refused by a check. Letters are drafted once and
+  redrafted only when the checks question something (no separate review call in the app,
+  user's decision 2026-10-15), and get a deterministic score (`cover_letter.score_letter`:
+  the job's main terms named, company and role named, one-page length, readable sentences,
+  unquestioned paragraphs).
 - Plain wording (user's decision 2026-10-14): a rewrite, summary, headline, proposal or letter
   paragraph that adds corporate jargon the source does not use ("passionate",
   "results-driven", "leveraged", "robust", ...; `claims.jargon`) is rejected (letters: flagged).
@@ -216,9 +228,11 @@ Every tailored CV is written the same way (`tailor.apply_plan`, `cv/docx_origina
   structured Master CV, of the library Word CV holding most of its words (`_master_docx`). Layout, fonts,
   name, section headings and publications are untouched. A template (`docx_exporter.TEMPLATES`)
   is used only when the user picks one, or when no Word version exists.
-- **Additions (user's decision 2026-10-10):** one "Relevant skills for this role" line under
-  the summary, in its formatting: 10 to 12 skills, only ones a bullet or project shows in use
-  (user's decision 2026-10-14). For an **academic** post
+- **Additions (user's decision 2026-10-10):** 3 or 4 "Key strengths" lines under the summary
+  (user's decision 2026-10-15; `tailor._key_strengths`: each cites the bullets it rests on and
+  passes the same guards as a rewrite of them), then one "Relevant skills for this role" line,
+  in its formatting: 10 to 12 skills, only ones a bullet or project shows in use (user's
+  decision 2026-10-14). For an **academic** post
   (`audience`), the sections the CV already has move whole into the academic order
   (`docx_original.academic_order`; name and contact lines stay first). The separate red
   unverified-skills line is a review prompt, not a factual addition.
@@ -226,11 +240,14 @@ Every tailored CV is written the same way (`tailor.apply_plan`, `cv/docx_origina
   (`headline_options`, each passing the headline guards). They are written into the Word file
   under the CV's own headline, in its formatting, for the user to delete the ones they do not
   want (user's decision 2026-10-07); picking one in the app saves a version with only that one.
-  The first is the job's exact title when the level and function fit. The summary is three
-  sentences (who, with the years of experience; the strongest relevant result; what they bring
-  to this team); code computes the years from the role dates and they are the only number a
+  The first is the job's exact title when the level and function fit. The summary is two or
+  three short sentences, at most 60 words (who, with the years of experience; the strongest
+  relevant result; what they bring to this team); code computes the years from the role dates and they are the only number a
   summary or headline may add (`tailor.career_years`).
   Publications are never edited.
+- **Every role keeps its heading** (user's decision 2026-10-15): a role's title, employer and
+  date lines are never taken for content or removed; a heading may sit above the employer's
+  line (`docx_original._spans`, `heading_line`).
 - **Nothing is removed.** Content is rephrased (under the no-fabrication guards) and reordered:
   the bullets that fit the post lead each role, the rest follow at the bottom of that role;
   relevant skills lead each skills list, the others follow. Nothing is dropped. Tailoring starts
@@ -243,7 +260,10 @@ Every tailored CV is written the same way (`tailor.apply_plan`, `cv/docx_origina
   When trimming, at least two bullets stay per role; roles, education and publications stay;
   every left-out line is recorded and shown to the user. Standard mode also lists length
   advice (`tailor.length_notes`: bullets over 35 words, overlapping bullets, long roles that
-  ended over 10 years ago); nothing is changed by it (user's decision 2026-10-14).
+  ended over 10 years ago); nothing is changed by it (user's decision 2026-10-14). Both modes
+  propose, in red, a shorter entry for each role that ended over 10 years ago with more than
+  three lines (`proposals.condensed_roles`, built by code: its two most relevant lines, the
+  rest listed); only the user's choice applies it (user's decision 2026-10-15).
 - **Keywords, not more (user's decision 2026-10-14):** rewrites bring one job term into at most
   two bullets (`tailor._limit_repetition`; repeating adds nothing for screening software and
   reads as stuffing); in standard mode, once 80% of the job's keywords are printed, the
@@ -261,18 +281,31 @@ Every tailored CV is written the same way (`tailor.apply_plan`, `cv/docx_origina
   and the rest scaled; terms match as an ATS search does (case, plural, hyphens). Shown first,
   original → tailored → if every red proposal is confirmed, with an A–D grade (A = 80+). A
   draft under grade A is revised once from what the score found missing; the better-scoring
-  draft is kept (`tailor._improve`, no model reading). Keywords are the posting's own words
+  draft is kept (`tailor._revised_once`, no model reading). A deterministic readability score
+  (`cv/readability.py`: bullet length, openings, active voice, a short summary, the job's
+  keywords near the top) is shown beside it, original → tailored. Keywords are the posting's own words
   (`tailor.literal_terms`: a joined or labelled term is split into the parts the posting
   contains word for word). The model's reading (requirements shown, search-anchored "fit for
   the role") is shown second; wording rarely moves the fit, confirmed new experience can.
 - **Every tailored CV gets a before/after fit check** (`fit_check.compare_fit`): both CVs
-  read blind for the job, side by side in one call (`TAILOR_READS` = 1), once per tailoring. The
+  read blind for the job, side by side in one call (`TAILOR_READS` = 1), once per tailoring,
+  by an independent grader: the screening model, never the CV writer (`cv_service.GRADER`,
+  user's decision 2026-10-15; a reading kept from another model is not reused). Its
+  `impression` is a recruiter's six-second skim of the top of the CV. The
   original is read once per job and kept with its requirement list (`data/fit_baselines.json`,
   `OriginalReading`), so every draft of the job is set against the same baseline. The saved search verdict is the original score when available;
   verified changes in CV presentation adjust its five evidence dimensions with the search
   weights. Practicality stays fixed. This measures presentation, not new experience.
 - Anything the Word writer cannot place safely is left as in the original and reported
   (`TailoredCV.document_notes`).
+- **Every change is red in the draft (user's decision 2026-10-15):** rewritten bullets, the
+  summary, key strengths, the relevant-skills line, reordered skills lists and suggested
+  headlines, as well as the proposals. "Write final version"
+  (`tailored_documents.finalise`) writes a clean copy beside the draft: all black, its own
+  headline only, nothing pending (left-out items are listed); any later edit clears it.
+- **CV health check** (`services/cv_health.py`, code only): what an ATS may miss in the
+  selected CV's Word design, what its facts leave out, and its readability; it can add an
+  ATS-safe Word copy (classic template, same facts, no new parse) and select it as the design.
 Changing these rules means updating `tailor.py`, `docx_original.py`, `fit_check.py`, the
 cv_writer SKILL.md and the tests together.
 
@@ -294,6 +327,16 @@ Personal job-search tool: public job pages may be read, within reason.
   `page_max_details`; never LinkedIn or Indeed hosts).
 - Company directories (BioPharmGuy) are read once per discovery run, never per search, and only
   pages their `robots.txt` allows.
+- **Employers learned from job boards (user's decision 2026-10-15):** most matches come from
+  boards, and most of their employers' feeds were unknown. After a search, the employers of
+  matched board jobs are queued (`company_discovery.queue_employers`: not agencies, not already
+  watched) and, in the background (`learn_employers`, `learn_employers` setting per search;
+  the Update button checks the whole queue), their feed is found from the posting's own apply
+  link (LinkedIn names it: `public_boards.linkedin_apply_url`), else by name on the public ATS
+  APIs that state the board's company name (Greenhouse, Workable, SmartRecruiters; the name
+  must match; never Lever or Ashby by guess). Found feeds join the watch-list (origin
+  "boards"). A thin board posting whose employer is watched is read first from that feed
+  (`companies.EmployerFeedReader`), before its board page.
 - **Public job boards** (`sources/public_boards.py`): LinkedIn's logged-out job search, Totaljobs,
   jobs.ac.uk, NHS Jobs. List result cards per search; open full postings only in `enrich` (the
   shortlist). LinkedIn ignores robots.txt but is slow (`linkedin_delay_s`), capped

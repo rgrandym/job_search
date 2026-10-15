@@ -412,3 +412,27 @@ def test_compare_setup_on_another_provider(settings: Settings) -> None:
     assert cfg.quality_model == "claude-opus-5-5" and cfg.api_key is None
     same = model_compare.setup_config(ws, base, "luna:low")
     assert (same.provider, same.quality_model, same.screening_effort) == ("codex", "sol", "low")
+
+
+def test_an_independent_grader_reads_the_tailored_cv(
+    master_cv: MasterCV, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = Workspace(settings)
+    ws.master_cv, ws.active_cv_id = master_cv, "master"
+    writer = FakeLLM(
+        {JDAnalysis: JDAnalysis(job_title="ML Engineer"), TailoringPlan: TailoringPlan()}
+    )
+    grader = FakeLLM({})  # no answer: the reading fails and is noted, the CV stands
+    roles: list[str] = []
+
+    def structured(role: str, *_: object) -> FakeLLM:
+        roles.append(role)
+        return grader if role == cv_service.GRADER else writer
+
+    monkeypatch.setattr(ws, "structured", structured)
+    job = JobPosting(id="j", title="ML Engineer", company="Orbit", description="Build ML.")
+    tailored, _ = asyncio.run(cv_service.tailor_to_job(ws, job))
+    assert cv_service.GRADER == "screening" and roles == ["cv", "screening"]
+    assert grader.calls and not any(m is not JDAnalysis and m is not TailoringPlan
+                                    for _, m in writer.calls)  # fmt: skip
+    assert any("fit check could not run" in n for n in tailored.document_notes)

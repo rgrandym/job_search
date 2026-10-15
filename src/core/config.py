@@ -122,6 +122,12 @@ class Settings(BaseSettings):
     company_max_details: int = Field(
         30, ge=1, description="Per company, postings opened one by one (Workday, iCIMS, ...)"
     )
+    learn_employers: int = Field(
+        8,
+        ge=0,
+        description="After a search, employers of matched board jobs whose public job feed is "
+        "looked for (in the background); 0 turns it off",
+    )
     inbox_dir: Path = PROJECT_ROOT / "data" / "inbox"
     http_user_agent: str = (
         "ai-job-search/0.1 (personal job search; contact: set JOBSEARCH_HTTP_USER_AGENT)"

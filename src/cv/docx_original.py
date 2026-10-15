@@ -21,6 +21,7 @@ import re
 import shutil
 import uuid
 from collections.abc import Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date
 from difflib import SequenceMatcher
@@ -55,6 +56,14 @@ from src.tools.search_tools import mentions
 SEPARATORS = (", ", "; ", " · ", " | ", " • ", " / ")
 MIN_LINE = 40  # shorter lines in a role block are dates, places or labels, not content
 MATCH = 0.4  # within one role block, enough to pair a CV bullet with its line
+# A role's dates ("Jan 2025 – Nov 2025", "2019 - Present"): a line carrying them is part of a
+# role's heading, never a bullet, and is never removed.
+DATE_RANGE = re.compile(
+    r"\b(?:19|20)\d{2}\b[^\n]{0,12}?(?:–|—|-|\bto\b)\s*"
+    r"(?:present|current|now|today|(?:[a-z]{3,9}\.?\s+)?(?:19|20)\d{2})\b",
+    re.IGNORECASE,
+)
+LEAD_LINES = 2  # heading lines a role may have above the line that names its employer
 SECTION_NAMES = {
     "education", "publications", "skills", "certifications", "awards", "languages", "patents",
     "presentations", "grants", "references", "interests", "projects", "volunteering",
@@ -67,6 +76,9 @@ HEADLINE_MATCH = 0.6  # enough to take the file's own headline line as the CV's 
 ROLE_SKILLS_LABEL = "Relevant skills for this role"
 SKILLS_TO_CONFIRM_LABEL = "Skills to confirm before use (not yet claimed)"
 REVIEW_RED = RGBColor(0xC0, 0x00, 0x00)
+# Every line the app changed or added is red in a draft, so the user sees what to review
+# (user's decision 2026-10-15); the final version (`mark_changes=False`) is all black.
+_MARK: ContextVar[bool] = ContextVar("mark_changes", default=False)
 # Section kinds by heading words, in the order an academic CV presents them.
 ACADEMIC_SECTIONS: list[tuple[str, set[str]]] = [
     ("profile", {"profile", "summary", "statement", "about", "objective"}),
@@ -154,14 +166,19 @@ def _headers(paragraphs: list[Paragraph], cv: MasterCV) -> list[tuple[str, int]]
     return found
 
 
-def role_ranges(doc: DocxDocument, cv: MasterCV) -> dict[str, list[Paragraph]]:
-    """Each role's whole entry: its heading line and everything up to the next role or
-    section (dates, places and content lines)."""
-    paragraphs = all_paragraphs(doc)
+def _spans(paragraphs: list[Paragraph], cv: MasterCV) -> dict[str, tuple[int, int, int]]:
+    """role id -> (first heading line, the line naming it, end): a role's heading may start
+    with lines above the one found (the title and dates above the employer's line), and the
+    role before it ends there, so its heading is never taken for that role's content."""
     headers = _headers(paragraphs, cv)
-    ranges: dict[str, list[Paragraph]] = {}
+    roles = {r.id: r for r in cv.experience}
+    firsts = [
+        _first_line(paragraphs, start, headers[n - 1][1] if n else -1, roles[role_id])
+        for n, (role_id, start) in enumerate(headers)
+    ]
+    spans: dict[str, tuple[int, int, int]] = {}
     for number, (role_id, start) in enumerate(headers):
-        stop = headers[number + 1][1] if number + 1 < len(headers) else len(paragraphs)
+        stop = firsts[number + 1] if number + 1 < len(headers) else len(paragraphs)
         level = _heading_level(paragraphs[start])
         for index in range(start + 1, stop):
             here = _heading_level(paragraphs[index])
@@ -169,15 +186,48 @@ def role_ranges(doc: DocxDocument, cv: MasterCV) -> dict[str, list[Paragraph]]:
             if ends or _section_break(paragraphs[index]):
                 stop = index
                 break
-        ranges[role_id] = paragraphs[start:stop]
-    return ranges
+        spans[role_id] = (firsts[number], start, stop)
+    return spans
+
+
+def _first_line(paragraphs: list[Paragraph], start: int, floor: int, role: Experience) -> int:
+    """The first line of a role's heading: up to `LEAD_LINES` non-bullet lines right above
+    the line found that carry its dates or its title."""
+    first = start
+    for index in range(start - 1, max(floor, start - 1 - LEAD_LINES), -1):
+        line = paragraphs[index]
+        text = line.text.strip()
+        if not text or _listed(line):
+            break
+        if not (DATE_RANGE.search(text) or _plain(role.title)[:20] in _plain(text)):
+            break
+        first = index
+    return first
+
+
+def heading_line(paragraph: Paragraph) -> bool:
+    """A role's heading line (its dates), never a bullet: not listed and carrying dates."""
+    return not _listed(paragraph) and bool(DATE_RANGE.search(paragraph.text))
+
+
+def role_ranges(doc: DocxDocument, cv: MasterCV) -> dict[str, list[Paragraph]]:
+    """Each role's whole entry: its heading lines and everything up to the next role or
+    section (dates, places and content lines)."""
+    paragraphs = all_paragraphs(doc)
+    return {r: paragraphs[first:stop] for r, (first, _, stop) in _spans(paragraphs, cv).items()}
 
 
 def role_blocks(doc: DocxDocument, cv: MasterCV) -> dict[str, list[Paragraph]]:
-    """Each role's content lines: from its heading to the next role or section."""
+    """Each role's content lines: after its heading, up to the next role or section; lines
+    carrying a role's dates are headings, not content."""
+    paragraphs = all_paragraphs(doc)
     return {
-        role_id: [p for p in lines[1:] if len(p.text.strip()) >= MIN_LINE]
-        for role_id, lines in role_ranges(doc, cv).items()
+        role_id: [
+            p
+            for p in paragraphs[start + 1 : stop]
+            if len(p.text.strip()) >= MIN_LINE and not heading_line(p)
+        ]
+        for role_id, (_, start, stop) in _spans(paragraphs, cv).items()
     }
 
 
@@ -273,13 +323,40 @@ def write_like_original(
     skills_to_confirm: Sequence[SkillToConfirm] = (),
     review_additions: Sequence[ReviewAddition] = (),
     compressions: Sequence[CompressionProposal] = (),
+    mark_changes: bool = True,
+    key_strengths: Sequence[str] = (),
 ) -> list[str]:
     """Save `tailored` as a copy of `original` (the Word file `source` was read from) at
     `out`; returns notes on anything kept as in the original. `headline_options` are written
     under the CV's own headline, in its formatting, for the user to keep or delete;
     `role_skills` as one line under the summary. `academic` puts the sections in the order
     academic readers expect. Pending review additions and compressions are written in red
-    beside the lines they concern; an applied merged entry replaces its roles."""
+    beside the lines they concern; an applied merged entry replaces its roles. With
+    `mark_changes` (a draft), every rewritten or added line is red too. `key_strengths` go
+    under the summary, before the relevant-skills line."""
+    token = _MARK.set(mark_changes)
+    try:
+        return _write(
+            original, source, tailored, out, headline_options, role_skills, academic,
+            skills_to_confirm, review_additions, compressions, key_strengths,
+        )  # fmt: skip
+    finally:
+        _MARK.reset(token)
+
+
+def _write(
+    original: Path,
+    source: MasterCV,
+    tailored: MasterCV,
+    out: Path,
+    headline_options: Sequence[str],
+    role_skills: Sequence[str],
+    academic: bool,
+    skills_to_confirm: Sequence[SkillToConfirm],
+    review_additions: Sequence[ReviewAddition],
+    compressions: Sequence[CompressionProposal],
+    key_strengths: Sequence[str],
+) -> list[str]:
     doc = Document(str(original))
     claimed: list[Any] = []
     headline = find_paragraph(doc, source.basics.headline or "", 0.75)
@@ -306,6 +383,7 @@ def write_like_original(
     notes += _skills(doc, source.skills, tailored.skills, claimed)
     # Last, so the added lines are never taken for a role, summary or skills line.
     notes += _headline_options(headline, tailored.basics.headline, headline_options)
+    notes += _key_strengths_lines(doc, key_strengths)
     notes += _role_skills_line(doc, role_skills)
     notes += _skills_to_confirm_line(doc, skills_to_confirm)
     places = Places(blocks, lines, skill_lines, headline)
@@ -371,6 +449,7 @@ def _replace(
     if paragraph is None:
         return [f"{label} kept as in your CV (not found as one paragraph in the Word file)"]
     set_paragraph_text(paragraph, new)
+    _mark(paragraph)
     claimed.append(paragraph._p)
     return []
 
@@ -385,7 +464,21 @@ def _headline_options(
     if line is None:
         return ["Suggested headlines not added (headline not found as one line in the Word file)"]
     for option in reversed(extra):
-        insert_paragraph_after(line, option)
+        _mark(insert_paragraph_after(line, option))
+    return []
+
+
+def _key_strengths_lines(doc: DocxDocument, strengths: Sequence[str]) -> list[str]:
+    """The key strengths under the summary, one line each, in its formatting."""
+    if not strengths:
+        return []
+    lines = profile_paragraphs(doc)
+    if not lines:
+        return ["Key strengths not added (no profile or summary section in the Word file)"]
+    anchor = lines[-1]
+    for text in strengths:
+        anchor = insert_paragraph_after(anchor, f"• {text}")
+        _mark(anchor)
     return []
 
 
@@ -397,7 +490,7 @@ def _role_skills_line(doc: DocxDocument, skills: Sequence[str]) -> list[str]:
     lines = profile_paragraphs(doc)
     if not lines:
         return ["Relevant skills line not added (no profile or summary section in the Word file)"]
-    insert_paragraph_after(lines[-1], f"{ROLE_SKILLS_LABEL}: {' · '.join(skills)}")
+    _mark(insert_paragraph_after(lines[-1], f"{ROLE_SKILLS_LABEL}: {' · '.join(skills)}"))
     return []
 
 
@@ -436,6 +529,12 @@ def _skill_lines(doc: DocxDocument, groups: Sequence[SkillGroup]) -> dict[str, P
 
 def _alive(paragraph: Paragraph | None) -> Paragraph | None:
     return paragraph if paragraph is not None and paragraph._p.getparent() is not None else None
+
+
+def _mark(paragraph: Paragraph) -> None:
+    """A line the app changed or added: red in a draft, as written in the final version."""
+    if _MARK.get():
+        _red(paragraph)
 
 
 def _red(paragraph: Paragraph) -> Paragraph:
@@ -526,6 +625,9 @@ def _compression_lines(
         if item.kind == "merge_roles":
             notes += _merged_entry(source, ranges, item)
             continue
+        if item.kind == "condense_role":
+            notes += _condensed_note(places, item)
+            continue
         lines = [p for i in item.source_ids if (p := _alive(places.lines.get(i)))]
         if not lines:
             notes.append(f"Compressed version for {item.role_ids[0]} not placed (lines not found)")
@@ -535,6 +637,17 @@ def _compression_lines(
         label = f"[CONFIRM COMPRESSED VERSION BEFORE USE: replaces {n} line(s) above]"
         _red(insert_paragraph_after(last, f"{label} {item.bullets[0]}"))
     return notes
+
+
+def _condensed_note(places: Places, item: CompressionProposal) -> list[str]:
+    """In red after the role's last line: which of its lines the shorter entry keeps."""
+    lines = [p for p in places.blocks.get(item.role_ids[0], []) if _alive(p)]
+    if not lines:
+        return [f"Shorter entry for {item.role_ids[0]} not placed (role not found)"]
+    kept = "; ".join(" ".join(b.split()[:6]) + " …" for b in item.bullets)
+    label = f"[CONFIRM SHORTER ENTRY BEFORE USE: keep only {len(item.bullets)} line(s) above]"
+    _red(insert_paragraph_after(max(lines, key=_position), f"{label} {kept}"))
+    return []
 
 
 def _merged_entry(
@@ -646,6 +759,7 @@ def _summary(doc: DocxDocument, old: str | None, new: str | None, claimed: list[
         parts = [" ".join(parts)]
     for paragraph, text in zip(lines, parts, strict=False):
         set_paragraph_text(paragraph, text)
+        _mark(paragraph)
         claimed.append(paragraph._p)
     for paragraph in lines[len(parts) :]:
         remove_paragraph(paragraph)
@@ -719,9 +833,14 @@ def _role(old: Experience, new: Experience, lines: list[Paragraph]) -> list[str]
     for bullet in new.bullets:
         if bullet.id in found and bullet.text != originals.get(bullet.id):
             set_paragraph_text(found[bullet.id], bullet.text)
+            _mark(found[bullet.id])
     for bullet_id, paragraph in found.items():
-        if bullet_id not in kept:
-            remove_paragraph(paragraph)  # left out (trimming) or merged (applied by the user)
+        if bullet_id in kept:
+            continue
+        if heading_line(paragraph):  # a role's heading is never removed
+            notes.append(f"{old.company}: a heading line was kept as in your CV")
+            continue
+        remove_paragraph(paragraph)  # left out (trimming) or merged (applied by the user)
     staying = [found[i] for i in found if i in kept]
     movable = [p for p in lines if _listed(p) and any(p is q for q in staying)]
     order = [found[b.id] for b in new.bullets if b.id in found and _listed(found[b.id])]
@@ -778,6 +897,8 @@ def _skills(
         if paragraph is not None and _reorder_list(paragraph, group.items):
             placed[group.category] = paragraph
             claimed.append(paragraph._p)
+            if group.items != next((g.items for g in old if g.category == group.category), []):
+                _mark(paragraph)
         elif group.items != next((g.items for g in old if g.category == group.category), []):
             kept.append(group.category)
     notes = [f"Skills order kept as in your CV for: {', '.join(kept)}"] if kept else []

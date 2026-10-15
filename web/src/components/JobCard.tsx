@@ -11,7 +11,7 @@ import { CVVersionCompare } from "./CVVersionCompare";
 import { TaskError, TaskProgress, useTaskId } from "./TaskProgress";
 import { CVViewButton, LetterViewButton } from "./LetterDocument";
 import { TailoredCVPanel } from "./TailoredCVPanel";
-import { FitCheckDetails, FitCheckSummary, IfConfirmed, PositioningDetails, ScreeningSummary } from "./TailorInsights";
+import { FitCheckDetails, FitCheckSummary, IfConfirmed, PositioningDetails, ReadabilitySummary, ScreeningSummary } from "./TailorInsights";
 
 const METRICS = [
   ["title", "Title & level"],
@@ -775,6 +775,7 @@ export function JobCard({
             </span>
           )}
           <ScreeningSummary screening={report.screening} />
+          <ReadabilitySummary readability={report.readability} />
           <FitCheckSummary check={report.fit_check} capReason={report.fit_check?.search_anchored && report.fit_check.before === verdict?.fit_score ? verdict?.cap_reason : null} />
           {report.fit_check?.if_confirmed && (
             <IfConfirmed
@@ -794,6 +795,9 @@ export function JobCard({
           {reportOpen && <>
           {report.fit_check && <FitCheckDetails check={report.fit_check} capReason={report.fit_check.search_anchored && report.fit_check.before === verdict?.fit_score ? verdict?.cap_reason : null} />}
           <PositioningDetails positioning={report.positioning} requirements={report.requirements} />
+          {!!report.key_strengths?.length && (
+            <p className="basis-full text-[11px] text-faint">Key strengths under your summary: {report.key_strengths.join(" · ")}</p>
+          )}
           {!!report.role_skills?.length && (
             <p className="basis-full text-[11px] text-faint">Added under your summary: Relevant skills for this role: {report.role_skills.join(" · ")}</p>
           )}
@@ -902,6 +906,12 @@ export function JobCard({
           {letter.data.flags.length > 0 && (
             <span className="text-bad">
               {letter.data.flags.length} paragraph{letter.data.flags.length === 1 ? "" : "s"} in red to review (open the letter in Cover letters to see why)
+            </span>
+          )}
+          {letter.data.score && (
+            <span className="basis-full" title="Computed by code: the job's main terms named, the company and exact role named, a one-page length, readable sentences and paragraphs the checks did not question. Grade A is 80 or more.">
+              <span className="font-medium">Letter score: </span>{letter.data.score.score} ({letter.data.score.grade})
+              {letter.data.score.notes.map((n) => <span key={n} className="block text-[11px] text-faint">{n}</span>)}
             </span>
           )}
           {letter.data.notes.map((n) => <span key={n} className="basis-full text-[11px] text-warn">To check: {n}</span>)}

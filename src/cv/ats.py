@@ -6,9 +6,11 @@ can scramble the reading order. The page count is estimated from the word count 
 reported, not warned about: the user prefers a full-length CV (user's decision, 2026-10-07).
 Layout warnings follow what parsers are known to miss (user's decision 2026-10-14): two
 columns read straight across, contact details in a header or footer, text in images or text
-boxes, role dates the parser cannot find (it counts years of experience from them), no
-standard section headings, and unusual fonts. They are warnings only: a tailored CV keeps the
-design of the user's own Word file.
+boxes, role dates the parser cannot find (it counts years of experience from them) or may
+misread (2026 guidance for Workday and similar parsers: "Jan 2020 – Present" parses, "01/2020",
+"2020–21", seasons and "to date" may not; user's decision 2026-10-15), no standard section
+headings (Experience, Education, Skills), and unusual fonts. They are warnings only: a
+tailored CV keeps the design of the user's own Word file.
 """
 
 from __future__ import annotations
@@ -37,8 +39,16 @@ COMMON_FONTS = {
 STANDARD_HEADINGS = {
     "experience": ("experience", "employment", "work history", "positions", "career"),
     "education": ("education", "qualifications", "degrees"),
+    "skills": ("skills", "competencies", "expertise"),
 }
 YEAR = re.compile(r"\b(?:19|20)\d{2}\b")
+UNCLEAR_DATE = re.compile(
+    r"\b(?:0?[1-9]|1[0-2])/(?:19|20)?\d{2}\b"  # 01/2020, 3/21
+    r"|\b(?:19|20)\d{2}\s*[–—-]\s*\d{2}(?!\d)"  # 2020–21
+    r"|\b(?:spring|summer|autumn|fall|winter)\s+(?:19|20)\d{2}\b"
+    r"|\b(?:19|20)\d{2}\s*(?:[–—-]|to)\s*date\b",
+    re.IGNORECASE,
+)
 
 
 def docx_text(path: Path) -> tuple[str, int]:
@@ -107,6 +117,18 @@ def _undated(lines: list[str], cv: MasterCV) -> list[str]:
     return out
 
 
+def _unclear_dates(lines: list[str], cv: MasterCV) -> list[str]:
+    """Roles whose dates are written in a style parsers may misread."""
+    out = []
+    for role in cv.experience:
+        index = next(
+            (i for i, line in enumerate(lines) if role.company and role.company in line), None
+        )
+        if index is not None and UNCLEAR_DATE.search(" ".join(lines[index : index + 3])):
+            out.append(role.company)
+    return out
+
+
 def _missing_headings(lines: list[str]) -> list[str]:
     short = [_plain(line) for line in lines if 0 < len(line.strip()) < 40]
     return [
@@ -144,10 +166,15 @@ def layout_warnings(path: Path, cv: MasterCV) -> list[str]:
             "No year next to the role: " + ", ".join(undated) + " (systems count your years "
             "of experience from the dates; use e.g. 'Mar 2021 – Present')"
         )
+    if unclear := _unclear_dates(lines, cv):
+        warnings.append(
+            "Dates a parser may misread: " + ", ".join(unclear) + " (numeric months, short "
+            "year ranges, seasons or 'to date'; write e.g. 'Jan 2020 – Present')"
+        )
     if missing := _missing_headings(lines):
         warnings.append(
             "No standard section heading for: " + ", ".join(missing) + " (e.g. 'Experience', "
-            "'Education'); parsers file content by these headings"
+            "'Education', 'Skills'); parsers file content by these headings"
         )
     if fonts := _fonts(doc):
         warnings.append("Unusual font(s): " + ", ".join(fonts) + " (Arial or Calibri read safest)")

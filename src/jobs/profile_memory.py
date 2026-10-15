@@ -475,6 +475,10 @@ class ProfileMemory:
         found = [r for r in self._records.values() if r.key.startswith(f"{owner}:")]
         return sorted(found, key=lambda r: r.created_at)
 
+    def all_records(self) -> list[ProfileRecord]:
+        """Every stored summary, of every CV, oldest first."""
+        return sorted(self._records.values(), key=lambda r: r.created_at)
+
     def adopt(self, cv_id: str, cv_fp: str) -> None:
         """Move summaries stored under this CV's content fingerprint to its id (migration)."""
         records = self._records.values()
