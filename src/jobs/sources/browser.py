@@ -151,6 +151,7 @@ class BrowserFetcher:
         self.http = http or HttpFetcher(self.settings, delay_s=self.settings.browser_delay_s)
         self._opened = 0
         self._strikes: dict[str, int] = {}
+        self._count = threading.Lock()  # several sites' postings are opened at once
 
     @property
     def available(self) -> bool:
@@ -163,12 +164,13 @@ class BrowserFetcher:
             raise SourceError("Chrome is not available")
         if self._strikes.get(host, 0) >= self.settings.browser_host_strikes:
             raise SourceError(f"{host} asked to verify a human earlier: paste the description")
-        if self._opened >= self.settings.browser_max_pages:
-            raise SourceError("browser page limit for this search reached")
         if not any(h in host for h in NO_ROBOTS_HOSTS) and not self.http.allowed(url):
             raise SourceError(f"robots.txt disallows {url}")
+        with self._count:
+            if self._opened >= self.settings.browser_max_pages:
+                raise SourceError("browser page limit for this search reached")
+            self._opened += 1
         self.http.wait_turn(host)
-        self._opened += 1
         with tempfile.TemporaryDirectory(prefix="jobsearch-chrome-") as profile:
             cmd = [
                 str(self.chrome), "--headless=new", "--disable-gpu", "--no-first-run",

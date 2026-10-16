@@ -119,6 +119,11 @@ class Settings(BaseSettings):
     gmail_frontend_url: str = "http://localhost:5173/"
     companies_path: Path = PROJECT_ROOT / "data" / "companies.json"
     company_workers: int = Field(8, ge=1, le=32, description="Company boards fetched in parallel")
+    # No model calls: more at once only shortens the wait (each site keeps its own delay).
+    source_workers: int = Field(3, ge=1, le=8, description="Sources searched at once")
+    enrich_workers: int = Field(
+        4, ge=1, le=8, description="Sites whose postings are opened at once (LinkedIn is one)"
+    )
     company_max_details: int = Field(
         30, ge=1, description="Per company, postings opened one by one (Workday, iCIMS, ...)"
     )

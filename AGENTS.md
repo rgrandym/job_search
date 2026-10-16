@@ -40,6 +40,10 @@ has a **Saved** tab: jobs ticked and saved from a search (`services/saved.py`,
 the tracker. Ticked jobs can be saved, or get a tailored CV + cover letter each from the
 selection bar; `Workspace.job` / `.result` find a job in the current search or the saved
 list, so tailoring and cover letters work on saved jobs from older searches.
+The selected CV is kept in `data/selected_cv.json` (`Workspace.remember_cv`), so a restart
+keeps it and its pinned profile. UI choices persist in the browser: search filters and the
+pinned profile (`stores/searchStore.ts`), and tailoring options, results view and tab, the
+batch CV design and the assistant's model (`stores/prefsStore.ts`).
 Each job card of the current search has **Your call** (Would apply / Maybe / No,
 `services/labels.py`, `data/job_labels.json`): a permanent labelled set, each label with a
 snapshot of the posting, constraints, profile summary and the verdict with its models. Labels
@@ -115,6 +119,7 @@ UI filters ─▶ SearchQuery          career intent (services/intent, per CV)
               run before capture when companies are unchecked)
               · LinkedIn public search · Totaljobs · jobs.ac.uk · NHS Jobs
               · LinkedIn/Indeed alert emails & saved postings · demo           → JobPosting[]
+              (`source_workers` = 3 sources at once, combined in source order; no model calls)
 1b set aside  services/tracker: roles already applied for (12-month look-back), marked N/A or
               deleted from a search, and services/labels: postings you labelled (reviewed
               already; same id, link or role; the label and note are the reason) leave here,
@@ -126,7 +131,8 @@ UI filters ─▶ SearchQuery          career intent (services/intent, per CV)
               + pre-filter score (skills from lists or extracted from text)    → shortlist:
               every role-relevant posting + 10 others (ceiling 250), one per employer+title
 3 enrich      full descriptions for snippet-only shortlisted postings (Reed, LinkedIn,
-              jobs.ac.uk, NHS Jobs, Totaljobs)
+              jobs.ac.uk, NHS Jobs, Totaljobs): one lane per site, LinkedIn first,
+              `enrich_workers` = 4 lanes at once, within `enrich_budget_s`
 4 summary     ProfileSummary (saved profile or search quality model)  ◀── ProfileMemory (data/profile_summaries.json)
               from the original CV document ([src-N] lines, publications included) +
               the dated CV extract + career intent; capabilities and publication record;

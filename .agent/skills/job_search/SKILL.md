@@ -308,8 +308,9 @@ then the shortlist is re-scored (`search_service._enrich`):
    macOS Keychain (`--use-mock-keychain`). `browser_enabled = false` turns it off. Model calls
    through the Claude Code CLI pass `--no-chrome`, so Claude in Chrome never starts the user's
    Chrome either.
-Postings are opened in two lanes in parallel, LinkedIn and every other board, so LinkedIn's
-slower pace (and its waits after a 429) never hold the other boards back. Each posting opened
+Postings are opened in one lane per site (LinkedIn first, then the busiest), `enrich_workers`
+(4) lanes at once, so LinkedIn's slower pace (and its waits after a 429) or one slow site never
+hold the others back; each site keeps its own delay. Each posting opened
 is reported in the progress log ("LinkedIn: opening full posting 7/40 …", then how many were
 read and by which reader). Opening postings stops after `enrich_budget_s` (180 s); the rest
 stay "requirements not checked". Chrome closes as soon as the page is printed (LinkedIn pages
@@ -466,6 +467,9 @@ updated.
   ones are applied by `get_summary` and `pinned_profile` to every summary a search uses
   (`learned_for`), so they survive rebuilds; changing them re-judges remembered verdicts.
   `model_compare` measures them on the labels (`learned = true`, `labels_since`).
+- **Sources at once:** the sources are searched `source_workers` (3) at a time (no model
+  calls, so no extra cost; each site keeps its own delay) and their postings combined in
+  source order.
 - **Progress:** every stage emits `search_progress` events (CV, profile, each source with its
   task and posting count, pre-filter, descriptions, screening batch by batch, done). The UI's
   Search button streams them from `POST /api/search/stream` (NDJSON, with `model_usage` events,

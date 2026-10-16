@@ -554,6 +554,51 @@ def test_linkedin_postings_do_not_hold_other_boards_back(
     assert set(out) == {"linkedin:1", "c:1"}
 
 
+class _Together:
+    """A fake source whose fetch and enrich wait for the other one: both must run at once."""
+
+    def __init__(self, name: str, meet: Any) -> None:
+        self.name, self.meet = name, meet
+
+    def fetch(self, query: SearchQuery) -> list[JobPosting]:
+        self.meet.wait()
+        return [JobPosting(id=f"{self.name}:1", title="Scientist", company=self.name,
+                           source=self.name)]  # fmt: skip
+
+    def enrich(self, job: JobPosting) -> JobPosting:
+        self.meet.wait()
+        return job.model_copy(update={"description": f"{self.name} text. " * 60})
+
+
+def test_sources_are_searched_at_once_and_combined_in_source_order() -> None:
+    import asyncio
+    import threading
+
+    from src.services import search_service
+
+    meet = threading.Barrier(2, timeout=5)
+    sources: list[Any] = [_Together("reed", meet), _Together("adzuna", meet)]
+    counts: dict[str, int] = {}
+    query = SearchQuery(titles=["Scientist"])
+    jobs, errors = asyncio.run(search_service._capture(sources, query, query, counts, workers=2))
+    assert [j.id for j in jobs] == ["reed:1", "adzuna:1"] and not errors
+    assert counts == {"reed": 1, "adzuna": 1}
+
+
+def test_each_site_opens_its_postings_in_its_own_lane(settings: Settings) -> None:
+    import threading
+
+    from src.services import search_service
+
+    meet = threading.Barrier(2, timeout=5)
+    sources: list[Any] = [_Together("reed", meet), _Together("adzuna", meet)]
+    jobs = [
+        JobPosting(id=f"{n}:1", title="Scientist", company=n, source=n) for n in ("reed", "adzuna")
+    ]
+    out = search_service._enrich(jobs, sources, {}, settings)
+    assert set(out) == {"reed:1", "adzuna:1"}
+
+
 def test_on_macos_only_a_headless_shell_is_used_so_no_dock_icon_bounces(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

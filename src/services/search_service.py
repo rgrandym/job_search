@@ -321,7 +321,9 @@ async def _collect(
     )
     skipped |= gmail_skipped
     counts: dict[str, int] = {}
-    jobs, errors = await _capture(sources, req.query, query, counts, emit)
+    jobs, errors = await _capture(
+        sources, req.query, query, counts, emit, ws.settings.source_workers
+    )
     if known is not None:
         jobs = await _unseen(known, jobs, emit)
     jobs, applied, dismissed = await _set_aside(ws, jobs, emit)
@@ -1385,49 +1387,24 @@ async def _capture(
     query: SearchQuery,
     counts: dict[str, int],
     emit: Emit = _noop,
+    workers: int = 3,
 ) -> tuple[list[JobPosting], dict[str, str]]:
-    """Fetch each source in turn, reporting progress. Job boards and company feeds search
-    `query` (which may carry the CV's target roles); small local feeds keep the user's own
-    filters, since every posting they return is judged by the job_matcher."""
-    jobs: list[JobPosting] = []
-    errors: dict[str, str] = {}
-    for i, src in enumerate(sources, 1):
-        label = SOURCE_LABELS.get(src.name, src.name)
-        if _stopped():
-            errors[src.name] = "stopped before searching"
-            continue
-        source_query = query if src.name in TARGETED_SOURCES else user_query
-        await _say(
-            emit,
-            "capture",
-            f"[{i}/{len(sources)}] {label}: {_source_task(src.name, source_query)}",
-            source=src.name,
-            status="running",
-        )
-        found_counts: dict[str, int] = {}  # its own, so a fetch left running cannot touch ours
-        found, failed = await _until_stopped(
-            asyncio.to_thread(fetch_all, [src], source_query, found_counts),
-            ([], {src.name: "stopped while searching"}),
-        )
-        counts |= found_counts
-        jobs += found
-        errors |= failed
-        if src.name in failed:
-            await _say(
-                emit,
-                "capture",
-                f"{label} failed: {failed[src.name]}",
-                source=src.name,
-                status="failed",
-            )
-        else:
-            await _say(
-                emit,
-                "capture",
-                f"{label}: {counts.get(src.name, 0)} postings",
-                source=src.name,
-                status="done",
-            )
+    """Fetch the sources, `workers` at a time, reporting progress. Job boards and company
+    feeds search `query` (which may carry the CV's target roles); small local feeds keep the
+    user's own filters, since every posting they return is judged by the job_matcher. Jobs
+    are combined in source order, whichever finishes first."""
+    slots = asyncio.Semaphore(max(1, workers))
+
+    async def one(i: int, src: JobSource) -> tuple[list[JobPosting], dict[str, str]]:
+        async with slots:
+            if _stopped():
+                return [], {src.name: "stopped before searching"}
+            source_query = query if src.name in TARGETED_SOURCES else user_query
+            return await _fetch_source(src, i, len(sources), source_query, counts, emit)
+
+    found = await asyncio.gather(*(one(i, src) for i, src in enumerate(sources, 1)))
+    jobs = [job for listed, _ in found for job in listed]
+    errors = {name: why for _, failed in found for name, why in failed.items()}
     unique = dedupe(jobs)
     window = ""
     if query.posted_within_days:
@@ -1441,6 +1418,32 @@ async def _capture(
         f"Collected {len(unique)} unique postings{window} ({len(jobs)} before removing duplicates)",
     )
     return unique, errors
+
+
+async def _fetch_source(
+    src: JobSource,
+    i: int,
+    total: int,
+    source_query: SearchQuery,
+    counts: dict[str, int],
+    emit: Emit,
+) -> tuple[list[JobPosting], dict[str, str]]:
+    """One source's postings and errors, with its progress lines."""
+    label = SOURCE_LABELS.get(src.name, src.name)
+    task = _source_task(src.name, source_query)
+    await _say(emit, "capture", f"[{i}/{total}] {label}: {task}", source=src.name, status="running")
+    found_counts: dict[str, int] = {}  # its own, so a fetch left running cannot touch ours
+    found, failed = await _until_stopped(
+        asyncio.to_thread(fetch_all, [src], source_query, found_counts),
+        ([], {src.name: "stopped while searching"}),
+    )
+    counts |= found_counts
+    if src.name in failed:
+        message, status = f"{label} failed: {failed[src.name]}", "failed"
+    else:
+        message, status = f"{label}: {counts.get(src.name, 0)} postings", "done"
+    await _say(emit, "capture", message, source=src.name, status=status)
+    return found, failed
 
 
 def _titles_from_cv(ws: Workspace, req: SearchRequest) -> bool:
@@ -1541,9 +1544,10 @@ def _enrich(
     the posting's own source first (LinkedIn also opens LinkedIn alert jobs, which share its
     ids), then the posting's own page's JSON-LD where robots.txt allows, then the page in
     headless, signed-out Chrome (`BrowserFetcher`) when Chrome is available. LinkedIn
-    postings run in their own lane, in parallel with the rest, so its slower pace does not
-    hold the other boards back. Reports each posting through `note`; stops opening more
-    after `enrich_budget_s` (the rest can be fetched later from the results)."""
+    postings run in their own lane and every other site in its own, `enrich_workers` lanes
+    at a time, so one site's slower pace does not hold the others back. Reports each posting
+    through `note`; stops opening more after `enrich_budget_s` (the rest can be fetched later
+    from the results)."""
     say = note or (lambda _: None)
     by_name: dict[str, Any] = {s.name: s for s in sources if hasattr(s, "enrich")}
     # A recheck later on starts a new LinkedIn client: the search's one may have been refused.
@@ -1554,10 +1558,7 @@ def _enrich(
     feeds = EmployerFeedReader(settings=settings)
     readers = [PostingPages(settings=settings), *([chrome] if chrome.available else [])]
     thin = [j for j in shortlist if len(j.description) <= ENRICH_BELOW]
-    lanes = {
-        "LinkedIn": [j for j in thin if j.id.startswith("linkedin:")],
-        "other boards": [j for j in thin if not j.id.startswith("linkedin:")],
-    }
+    lanes = _lanes(thin)
     deadline = time.monotonic() + settings.enrich_budget_s
 
     def readers_for(job: JobPosting) -> list[Any]:
@@ -1566,8 +1567,8 @@ def _enrich(
         src = linkedin if job.id.startswith("linkedin:") else by_name.get(job.source)
         return [feeds, src, *readers]
 
-    runs = [(contextvars.copy_context(), n, jobs) for n, jobs in lanes.items() if jobs]
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    runs = [(contextvars.copy_context(), n, jobs) for n, jobs in lanes.items()]
+    with ThreadPoolExecutor(max_workers=max(1, settings.enrich_workers)) as pool:
         results = list(
             pool.map(lambda r: r[0].run(_open_lane, r[1], r[2], readers_for, deadline, say), runs)
         )
@@ -1582,6 +1583,18 @@ def _enrich(
         say(f"Full text read for {len(out)} of {len(thin)} snippet-only postings"
             + (f" ({how})" if how else ""))  # fmt: skip
     return out
+
+
+def _lanes(thin: list[JobPosting]) -> dict[str, list[JobPosting]]:
+    """Postings to open, one lane per site: LinkedIn's first (it is the slowest), then the
+    other sources, the busiest first, so the longest lanes start straight away."""
+    lanes: dict[str, list[JobPosting]] = {}
+    for job in thin:
+        name = "LinkedIn" if job.id.startswith("linkedin:") else job.source
+        lanes.setdefault(name, []).append(job)
+    others = sorted((n for n in lanes if n != "LinkedIn"), key=lambda n: -len(lanes[n]))
+    order = ["LinkedIn"] * ("LinkedIn" in lanes) + others
+    return {SOURCE_LABELS.get(n, n): lanes[n] for n in order}
 
 
 _LaneResult = tuple[dict[str, JobPosting], dict[str, str], Counter[str]]

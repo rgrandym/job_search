@@ -77,7 +77,7 @@ src/
                pages.py (a posting's own page: JSON-LD full text, robots.txt kept)
                browser.py (headless signed-out Chrome for postings still too thin)
   tools/       search_tools.py (pure text utils) · docx_tools.py (python-docx primitives)
-  services/    workspace.py (state) · search_service.py (THE search pipeline) · cv_service.py
+  services/    workspace.py (state; the selected CV is kept in data/selected_cv.json) · search_service.py (THE search pipeline) · cv_service.py
                tracker.py (applied / N/A / New / Open + outcome stages, data/job_tracker.json)
                history.py (+ source and role-family yield) · intent.py (career intent, per CV)
                calibration.py (read-only outcome review) · enrichment.py (evidence review queue)
@@ -320,7 +320,9 @@ Personal job-search tool: public job pages may be read, within reason.
   names) **when that host's `robots.txt` allows them**, or
   JSON-LD from careers pages whose `robots.txt` allows us. All HTTP goes through
   `sources.base.HttpFetcher` (User-Agent, per-host delay, robots checks); careers-site endpoints
-  always pass `check_robots=True`. Open postings one by one only for titles that fit the search,
+  always pass `check_robots=True`. Sources run `source_workers` (3) at a time and shortlisted
+  postings open in one lane per site (`enrich_workers`, 4): parallel across sites only, each
+  host keeps its delay. Open postings one by one only for titles that fit the search,
   capped by `company_max_details`.
 - A shortlisted posting still too thin to check its requirements may have its own page read
   once (`sources/pages.PostingPages`: JSON-LD only, `check_robots=True`, capped by

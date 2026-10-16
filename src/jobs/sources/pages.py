@@ -10,6 +10,7 @@ plain HTTP clients, so neither is read here. At most `page_max_details` pages pe
 
 from __future__ import annotations
 
+import threading
 from urllib.parse import urlsplit
 
 from src.core.config import Settings, get_settings
@@ -28,6 +29,7 @@ class PostingPages:
         self.settings = settings or get_settings()
         self.http = http or HttpFetcher(self.settings)
         self._opened = 0
+        self._count = threading.Lock()  # several sites' postings are opened at once
 
     def enrich(self, job: JobPosting) -> JobPosting:
         """`job` with the page's fuller description and requirements; raises SourceError when
@@ -35,9 +37,10 @@ class PostingPages:
         host = urlsplit(job.url or "").netloc.lower()
         if not host or any(h in host for h in SKIP_HOSTS):
             return job
-        if self._opened >= self.settings.page_max_details:
-            return job
-        self._opened += 1
+        with self._count:
+            if self._opened >= self.settings.page_max_details:
+                return job
+            self._opened += 1
         nodes = extract_jsonld_jobs(self.http.get(job.url or "", check_robots=True).text)
         if not nodes:
             return job
