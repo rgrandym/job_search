@@ -213,6 +213,22 @@ def test_cv_library_lists_and_selects_generated_files(master_cv: MasterCV, setti
     assert selected.selected and selected.kind == "generated" and ws.master_cv is None
 
 
+def test_selected_cv_stays_selected_after_a_restart(master_cv: MasterCV, settings: Any) -> None:
+    ws = Workspace(settings)
+    ws.save_master_cv(master_cv)
+    settings.output_dir.mkdir(parents=True)
+    for name in ("First.docx", "Second.docx"):
+        (settings.output_dir / name).write_bytes(name.encode())
+    mgr.save(master_cv, cv_service._parsed_path(ws, "generated:Second.docx"))
+    cv_service.select_cv(ws, "generated:Second.docx")
+
+    restarted = Workspace(settings)
+    selected = [item.id for item in cv_service.list_cvs(restarted) if item.selected]
+
+    assert selected == ["generated:Second.docx"]
+    assert restarted.master_cv == master_cv
+
+
 # ---------------------------------------------------------------- tailoring
 
 

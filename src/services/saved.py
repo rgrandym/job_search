@@ -113,13 +113,27 @@ def save_found(ws: Workspace, job: JobPosting) -> SavedJob:
         )
     items = ws.saved_jobs()
     existing = next((item for item in items if item.result.job.id == job.id), None)
-    if existing is not None:
+    if existing is not None:  # saved before without its full text: keep the fuller copy
+        if len(job.description) > len(existing.result.job.description):
+            return update_posting(ws, job)
         return existing
     item = SavedJob(
         result=MatchResult(job=job), saved_at=datetime.now(UTC).isoformat(timespec="seconds")
     )
     _write(ws, [item, *items])
     return item
+
+
+def update_posting(ws: Workspace, job: JobPosting) -> SavedJob:
+    """Replace a saved job's posting with a fuller copy of it (same id); its verdict stays."""
+    items = ws.saved_jobs()
+    for index, item in enumerate(items):
+        if item.result.job.id == job.id:
+            result = item.result.model_copy(update={"job": job})
+            items[index] = item.model_copy(update={"result": result})
+            _write(ws, items)
+            return items[index]
+    raise ValueError("This job is not in Saved")
 
 
 def remove(ws: Workspace, job_ids: list[str]) -> int:

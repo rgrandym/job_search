@@ -374,6 +374,49 @@ def test_api_find_and_save_found_job(ws: Workspace, monkeypatch: pytest.MonkeyPa
     assert client.get("/api/saved").json()[0]["result"]["job"]["id"] == job.id
 
 
+def test_a_saved_job_without_its_posting_can_read_it_again_or_take_pasted_text(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.services import saved
+    from src.web import app as webapp
+
+    thin = JobPosting(
+        id="linkedin:4478453986",
+        title="Senior Manager Preclinical Research",
+        company="Immunocore",
+        url="https://www.linkedin.com/jobs/view/4478453986",
+        source="linkedin_search",
+    )
+    full = thin.model_copy(update={"description": "Lead preclinical programmes. " * 40})
+    saved.save_found(ws, thin.model_copy(update={"description": "Snippet"}))
+    assert saved.save_found(ws, full).result.job.description == full.description  # fuller kept
+    saved.update_posting(ws, thin)  # empty again
+    monkeypatch.setattr(webapp, "get_workspace", lambda: ws)
+    client = TestClient(webapp.app)
+
+    monkeypatch.setattr(one_job, "find", lambda *_a: one_job.OneJobResults())
+    failed = client.post(f"/api/saved/{thin.id}/posting", json={})
+    assert failed.status_code == 422 and "paste" in failed.json()["detail"]
+    short = client.post(f"/api/saved/{thin.id}/posting", json={"description": "short"})
+    assert short.status_code == 422
+
+    queries: list[one_job.OneJobQuery] = []
+
+    def find(_ws: Workspace, query: one_job.OneJobQuery) -> one_job.OneJobResults:
+        queries.append(query)
+        return one_job.OneJobResults(jobs=[full])
+
+    monkeypatch.setattr(one_job, "find", find)
+    read = client.post(f"/api/saved/{thin.id}/posting", json={})
+    assert read.status_code == 200
+    assert read.json()["result"]["job"]["description"] == full.description
+    assert queries[0].url == thin.url  # the posting's own link first
+    pasted = "Essential: preclinical study design and programme management. " * 5
+    done = client.post(f"/api/saved/{thin.id}/posting", json={"description": pasted})
+    assert done.json()["result"]["job"]["description"] == pasted.strip()
+    assert client.get("/api/saved").json()[0]["result"]["job"]["description"] == pasted.strip()
+
+
 def test_a_link_that_blocks_reading_is_found_on_the_web_by_its_id(
     ws: Workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -386,3 +429,51 @@ def test_a_link_that_blocks_reading_is_found_on_the_web_by_its_id(
         ("Senior Program Manager R&D", "Lonza", EMPLOYER)  # applied for on the user's link
     ]
     assert found.errors == {}
+
+
+def test_an_id_in_the_link_query_is_a_search_clue() -> None:
+    sf = "https://peoplecore.my.salesforce-sites.com/recruit/fRecruit__ApplyJob?vacancyNo=VN887"
+    assert one_job._id_in_link(sf) == "VN887"
+    assert one_job._id_in_link(EMPLOYER) == "R79349"
+    assert one_job._id_in_link("https://example.com/careers?lang=en&page=2") == ""
+
+
+def test_a_link_robots_txt_refuses_says_so_and_is_searched_by_its_id(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    link = "https://careers.example.com/recruit/ApplyJob?vacancyNo=VN887"
+
+    def enrich(jobs: list[JobPosting], _s: object, errors: dict[str, str], *_a: object) -> dict:
+        errors[f"enrich {jobs[0].id}"] = f"robots.txt disallows {link}"
+        return {}
+
+    monkeypatch.setattr(one_job.search_service, "_enrich", enrich)
+    asked = _web(monkeypatch, [_results()], {})  # no page is readable, the web finds nothing
+    found = one_job.find(ws, one_job.OneJobQuery(url=link))
+    assert asked == ["VN887"]  # the vacancy number in the link was searched for
+    assert found.jobs == []
+    assert "robots.txt" in found.errors["link"] and "paste" in found.errors["link"]
+    assert not any(key.startswith("enrich ") for key in found.errors)
+
+
+def test_the_users_own_link_is_read_even_where_robots_txt_turns_readers_away(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checked: list[bool] = []
+
+    class Fetcher:
+        def __init__(self, _settings: Settings) -> None:
+            pass
+
+        def get(self, url: str, *, check_robots: bool = False, **_kw: object) -> httpx.Response:
+            checked.append(check_robots)
+            if check_robots:
+                raise SourceError(f"robots.txt disallows {url}")
+            return httpx.Response(200, text=POSTING)
+
+    monkeypatch.setattr(one_job, "HttpFetcher", Fetcher)
+    found = one_job.find(ws, one_job.OneJobQuery(url=EMPLOYER))
+    assert [(job.title, job.company, job.url) for job in found.jobs] == [
+        ("Senior Program Manager R&D", "Lonza", EMPLOYER)
+    ]
+    assert checked == [False]  # one page, the one the user asked for

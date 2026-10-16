@@ -161,7 +161,9 @@ session cookies, solve CAPTCHAs, rotate proxies or disguise the client. Headless
 only signed out, for thin shortlisted postings (§3). Rate-limit every host,
 open full postings only for the shortlist, and wait (or stop) when a site asks to slow down. Careers sites,
 directories, Totaljobs and jobs.ac.uk stay within robots.txt; LinkedIn's public search does not
-check it (it disallows every crawler) but is slow and capped.
+check it (it disallows every crawler) but is slow and capped. A posting link the user gives
+(Find one job, or Fetch on a saved job) is read once even where robots.txt disallows it: one page
+they asked for (user's decision 2026-10-15).
 
 ## 1b. Set aside: already applied, N/A, deleted, labelled (`services/tracker.py`)
 

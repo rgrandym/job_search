@@ -172,10 +172,13 @@ def list_cvs(ws: Workspace) -> list[CVAsset]:
             uploaded[0] if len(uploaded) == 1 else assets[0] if len(assets) == 1 else None
         )
         ws.active_cv_id = default.id if default else None
+        ws.remember_cv()
         if ws.active_cv_id == "master":
             ws.master_cv = mgr.load(ws.settings.master_cv_path)
         else:
             ws.master_cv = _parsed_cv(ws, ws.active_cv_id) if ws.active_cv_id else None
+    elif ws.master_cv is None and ws.active_cv_id not in (None, "master"):
+        ws.master_cv = _parsed_cv(ws, ws.active_cv_id)  # selection restored after a restart
     return [item.model_copy(update={"selected": item.id == ws.active_cv_id}) for item in assets]
 
 
@@ -207,6 +210,7 @@ def delete_cv(ws: Workspace, asset_id: str) -> None:
     asset = next((item for item in list_cvs(ws) if item.id == asset_id), None)
     if asset is None:
         raise ValueError("CV file was not found")
+    fallback = _replacement(ws, asset) if ws.active_cv_id == asset_id else None
     if asset.kind == "master":
         path = ws.settings.master_cv_path
         path.unlink(missing_ok=True)
@@ -224,9 +228,23 @@ def delete_cv(ws: Workspace, asset_id: str) -> None:
     delete_intent(ws, asset_id)
     if ws.active_cv_id == asset_id:
         ws.active_cv_id = None
+        ws.remember_cv()
         ws.master_cv = None
         ws.last_report = None
-        list_cvs(ws)
+        if fallback in {item.id for item in list_cvs(ws)}:
+            select_cv(ws, fallback)
+
+
+def _replacement(ws: Workspace, asset: CVAsset) -> str | None:
+    """The CV to select once the selected `asset` is deleted, so tailoring stays available:
+    a tailored draft's source CV, else the first other CV the user added."""
+    if asset.kind == "generated":
+        drafts = tailored_documents.list_all(ws)
+        source = next((d.cv_id for d in drafts if d.filename == asset.filename), None)
+        if source is not None:
+            return source
+    others = [item for item in list_cvs(ws) if item.id != asset.id]
+    return next((item.id for item in others if item.kind != "generated"), None)
 
 
 def cached_selected_cv(ws: Workspace) -> MasterCV | None:
@@ -580,6 +598,7 @@ def _migrate_legacy_uploads(ws: Workspace) -> None:
         _move_legacy_parse(ws, old_ids, asset_id)
         if ws.active_cv_id in old_ids:
             ws.active_cv_id = asset_id
+            ws.remember_cv()
         for metadata_path, source, _metadata in duplicates:
             metadata_path.unlink(missing_ok=True)
             if source != target:
@@ -660,6 +679,7 @@ def working_on(ws: Workspace, cv_id: str) -> Iterator[MasterCV]:
 
 def _select(ws: Workspace, asset_id: str, cv: MasterCV | None) -> None:
     ws.active_cv_id = asset_id
+    ws.remember_cv()
     ws.master_cv = cv
     ws.last_report = None
 

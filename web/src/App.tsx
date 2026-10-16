@@ -3,6 +3,7 @@ import { Bot, Briefcase, ListChecks, PanelLeft, PanelRight, PanelTop, Settings, 
 import { Fragment, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Panel, PanelGroup, PanelResizeHandle, type ImperativePanelHandle } from "react-resizable-panels";
 import { AgentPanel } from "./components/AgentPanel";
+import { FindOneJobWindow } from "./components/FindOneJob";
 import { ResultsPanel } from "./components/ResultsPanel";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { Sidebar } from "./components/Sidebar";
@@ -241,6 +242,7 @@ export default function App() {
       )}
 
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} llm={llm} />
+      <FindOneJobWindow />
       <SummaryDialog open={summaryOpen} onClose={() => setSummaryOpen(false)} initialProfileKey={summaryProfileKey} />
     </div>
   );

@@ -175,8 +175,8 @@ def state() -> dict[str, Any]:
             if gmail.configured
             else "Set the Gmail OAuth credentials and account in .env"
         )
+    cv_files = cv_service.list_cvs(ws)  # first: it loads a selection restored after a restart
     cv = ws.master_cv
-    cv_files = cv_service.list_cvs(ws)
     return {
         "llm": _llm_view(),
         "cv": None
@@ -1058,7 +1058,9 @@ def tailored_cvs(job_id: str) -> list[dict[str, Any]]:
 
 @app.get("/api/tailored-cvs")
 def all_tailored_cvs() -> list[dict[str, Any]]:
-    """Saved tailored drafts remain reachable when their job card is no longer displayed."""
+    """Saved tailored drafts remain reachable when their job card is no longer displayed;
+    drafts whose Word file is gone are forgotten first."""
+    tailored_documents.prune_missing(get_workspace())
     documents = tailored_documents.list_all(get_workspace())
     names = cv_versions.labels(documents)
     return [_tailored_view(d, names) for d in documents]
@@ -1476,6 +1478,25 @@ def save_found_job(job: JobPosting) -> SavedJob:
         raise HTTPException(422, str(exc)) from exc
 
 
+class PostingText(BaseModel):
+    description: str | None = None  # pasted by the user; None reads the posting again
+
+
+@app.post("/api/saved/{job_id:path}/posting")
+async def refresh_saved_posting(
+    job_id: str, body: PostingText, progress_id: str | None = None
+) -> SavedJob:
+    """Read a saved job's full posting again, or keep the description the user pasted."""
+    try:
+        return await progress.run(
+            progress_id,
+            "Reading the full posting",
+            asyncio.to_thread(one_job.refresh_saved, get_workspace(), job_id, body.description),
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @app.post("/api/saved/remove")
 def remove_saved(body: JobIds) -> dict[str, int]:
     """Remove saved jobs (their applications stay in the tracker)."""
@@ -1782,4 +1803,5 @@ if DIST.exists():
         target = (DIST / path).resolve()
         if path and target.is_file() and DIST.resolve() in target.parents:
             return FileResponse(target)
-        return FileResponse(Path(DIST / "index.html"))
+        # Revalidated every time, so the window loads a rebuilt UI rather than a cached one.
+        return FileResponse(Path(DIST / "index.html"), headers={"Cache-Control": "no-cache"})

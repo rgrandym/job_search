@@ -429,7 +429,7 @@ export function CVVersionCompare({ open, onClose, jobId, versions, onPick }: {
   const toggle = (id: string) => setChosen((c) => (c.includes(id) ? c.filter((x) => x !== id) : [...c, id]));
   return (
     <Modal open={open} onClose={onClose} title="Compare CV versions" id="cv-version-compare" resizable>
-      <div className="space-y-3">
+      <div className="reading space-y-3">
         <div className="rounded-md bg-surface p-3 text-[12px]">
           <p className="mb-2 text-muted">
             Choose the tailored versions to read beside one original CV. To add a version, change Level, Length,

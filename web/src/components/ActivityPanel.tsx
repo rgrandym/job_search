@@ -106,6 +106,10 @@ function taskRow(task: TaskProgress, seenAt: number): AgentRow {
   };
 }
 
+/** How long an ended task stays listed (s), and how long one may take to start (ms). */
+const TASK_LINGER_S = 30;
+const TASK_START_GRACE_MS = 60_000;
+
 function useRows(): { rows: AgentRow[]; tasks: TaskProgress[] } {
   const chat = useChat();
   const { log, loading, error } = useSearch();
@@ -119,6 +123,16 @@ function useRows(): { rows: AgentRow[]; tasks: TaskProgress[] } {
     })),
   });
   const tasks = polls.map((p) => p.data).filter((t): t is TaskProgress => !!t);
+  // A task leaves the panel a while after it ended, or when the server never knew it.
+  useEffect(() => {
+    const now = Date.now();
+    Object.keys(ids).forEach((id, i) => {
+      const { data, isError } = polls[i] ?? {};
+      const ended = data && (data.finished || data.error) && data.now - data.updated_at > TASK_LINGER_S;
+      const unknown = isError && now - ids[id] > TASK_START_GRACE_MS;
+      if (ended || unknown) useActivity.getState().removeTask(id);
+    });
+  });
   const rows: AgentRow[] = [];
   const turn = chat.items.slice(chat.turnStart).filter((item) => item.kind === "activity");
   if (chat.turnAt) {

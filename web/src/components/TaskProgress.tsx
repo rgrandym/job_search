@@ -84,11 +84,10 @@ export function TaskProgress({ id, className, onStop }: { id: string | null; cla
   useEffect(() => {
     if (poll.data) setOffset(poll.data.now - Date.now() / 1000);
   }, [poll.data]);
-  // The activity panel follows the task while this is on screen (the request is pending).
+  // The activity panel follows the task until the server reports it finished, also once this
+  // is off screen (another tab): the request goes on in the background.
   useEffect(() => {
-    if (!id) return;
-    useActivity.getState().addTask(id);
-    return () => useActivity.getState().removeTask(id);
+    if (id) useActivity.getState().addTask(id);
   }, [id]);
   const now = useNow(!!id) + offset;
   const task = poll.data;

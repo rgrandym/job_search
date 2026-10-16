@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from "react";
 import type { MatchResult, SavedJob, SourceReport, TailoredCVView, TrackedJob } from "../lib/types";
 import { cn } from "../lib/utils";
 import { useActivity } from "../stores/activityStore";
+import { usePrefs, type ResultsView } from "../stores/prefsStore";
 import { useSearch } from "../stores/searchStore";
 import { JobCard } from "./JobCard";
 import { LimitOptions } from "./LimitOptions";
@@ -160,7 +161,9 @@ function SourcesUsed({
 
 /** The centre panel: the current search's results, or the jobs the user saved. */
 export function ResultsPanel({ hasCv }: { hasCv: boolean }) {
-  const [view, setView] = useState<"results" | "saved" | "applied" | "documents" | "cover_letters">("results");
+  const view = usePrefs((s) => s.resultsView);
+  const setPrefs = usePrefs((s) => s.set);
+  const setView = (resultsView: ResultsView) => setPrefs({ resultsView });
   const [focus, setFocus] = useState<(FoundJob & { at: number }) | null>(null);
   const report = useSearch((st) => st.outcome?.report);
   const saved = useQuery({ queryKey: ["saved"], queryFn: api.saved });
@@ -320,7 +323,9 @@ interface Prepared {
 function SelectionBar({ savedIds, saved, hasCv }: { savedIds: Map<string, string>; saved: SavedJob[]; hasCv: boolean }) {
   const qc = useQueryClient();
   const { selected, outcome, set } = useSearch();
-  const [template, setTemplate] = useState("original");
+  const template = usePrefs((s) => s.batchTemplate);
+  const setPrefs = usePrefs((s) => s.set);
+  const setTemplate = (batchTemplate: string) => setPrefs({ batchTemplate });
   const [prepared, setPrepared] = useState<Prepared[]>([]);
   const [working, setWorking] = useState<string | null>(null);
   const stopBatch = useRef(false);
@@ -483,10 +488,12 @@ function SearchResults({ hasCv, savedAt, tracked, focus }: {
       <Square size={12} /> Stop
     </button>
   );
-  const [tab, setTab] = useState<Tab>("matches");
+  const tab = usePrefs((s) => s.resultTab);
+  const setPrefs = usePrefs((s) => s.set);
+  const setTab = (resultTab: Tab) => setPrefs({ resultTab });
   useEffect(() => {
-    if (focus?.tab) setTab(focus.tab);
-  }, [focus]);
+    if (focus?.tab) setPrefs({ resultTab: focus.tab });
+  }, [focus, setPrefs]);
   const [limitDismissed, setLimitDismissed] = useState(false);
   useEffect(() => setLimitDismissed(false), [outcome?.history_id, outcome?.limit?.resets_at]);
 
@@ -797,10 +804,11 @@ function SearchResults({ hasCv, savedAt, tracked, focus }: {
               savedAt={savedAt.get(r.job.id)}
               onRemove={() => removeResult.mutate(r.job.id)}
               onRecheck={
-                outcome.history_id && !loading
+                outcome.history_id
                   ? (description) => void runner.recheck(outcome.history_id!, [r.job.id], description)
                   : undefined
               }
+              recheckPending={loading}
               removeLabel="Delete"
               removeTitle="Delete from this list (its status, note and label are kept)"
             />

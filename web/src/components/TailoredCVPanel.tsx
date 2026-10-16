@@ -229,7 +229,7 @@ export function TailoredCVPanel({ jobId, result, hasCv, onLetter, letterPending 
     if (report?.review_additions?.some((item) => item.status === "pending") || report?.compressions?.some((item) => item.status === "pending")) setEditing(true);
   }, [document?.id]); // eslint-disable-line react-hooks/exhaustive-deps -- open on selection, not after every edit
   return (
-    <div className="mt-2 space-y-2 rounded-md bg-surface p-3 text-[12px]">
+    <div className="reading mt-2 space-y-2 rounded-md bg-surface p-3 text-[12px]">
       <p className="font-medium">Review CV</p>
       {documents.isPending && <p className="text-muted">Loading saved tailored CVs…</p>}
       {documents.error && <p className="text-bad">{(documents.error as Error).message}</p>}

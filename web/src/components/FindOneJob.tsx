@@ -3,14 +3,17 @@ import { ExternalLink, Loader2, Search } from "lucide-react";
 import { useState } from "react";
 import { api } from "../lib/api";
 import type { JobPosting, OneJobQuery, OneJobResults } from "../lib/types";
+import { useFindJob } from "../stores/findJobStore";
 import { TaskError, TaskProgress, useTaskId } from "./TaskProgress";
+import { Modal } from "./ui";
 
 const EMPTY: OneJobQuery = { title: "", company: "", job_id: "", keywords: "", description: "", posted_at: null, url: "" };
 
-/** Find a named posting without running the profile search or matcher. */
-export function FindOneJob({ onSaved }: { onSaved: () => void }) {
+/** Find a named posting without running the profile search or matcher. `prefill`: the clues
+ *  to start from; `savedJobId`: a saved job without its posting, which the found one fills in. */
+export function FindOneJob({ onSaved, prefill = null, savedJobId = null }: { onSaved: () => void; prefill?: OneJobQuery | null; savedJobId?: string | null }) {
   const qc = useQueryClient();
-  const [query, setQuery] = useState<OneJobQuery>(EMPTY);
+  const [query, setQuery] = useState<OneJobQuery>(prefill ?? EMPTY);
   const [result, setResult] = useState<OneJobResults | null>(null);
   const task = useTaskId();
   const [saving, setSaving] = useState<string | null>(null);
@@ -25,7 +28,8 @@ export function FindOneJob({ onSaved }: { onSaved: () => void }) {
     setSaving(job.id);
     setSaveError(null);
     try {
-      await api.saveFoundJob(job);
+      if (savedJobId) await api.refreshSavedPosting(savedJobId, job.description, crypto.randomUUID());
+      else await api.saveFoundJob(job);
       await qc.invalidateQueries({ queryKey: ["saved"] });
       onSaved();
     } catch (error) {
@@ -72,13 +76,26 @@ export function FindOneJob({ onSaved }: { onSaved: () => void }) {
             </div>
             <p className="line-clamp-4 whitespace-pre-line text-[11px] text-muted">{job.description || "No readable description found."}</p>
             <button className="btn-primary text-[12px]" disabled={!job.description || !!saving} onClick={() => void save(job)}>
-              {saving === job.id ? <Loader2 size={12} className="animate-spin" /> : null} Save for CV and letter
+              {saving === job.id ? <Loader2 size={12} className="animate-spin" /> : null} {savedJobId ? "Use this posting for the saved job" : "Save for CV and letter"}
             </button>
             {!job.description && <p className="text-[11px] text-faint">Paste the full description in Saved → Add a job you found.</p>}
           </article>)}
-          {!result.jobs.length && <p className="text-[12px] text-muted">If you have the posting text, use Saved → Add a job you found so you can still tailor a CV and write a letter.</p>}
+          {!result.jobs.length && <p className="text-[12px] text-muted">{savedJobId
+            ? "If you have the posting text, use Paste description on the job's card so you can still tailor a CV and write a letter."
+            : "If you have the posting text, use Saved → Add a job you found so you can still tailor a CV and write a letter."}</p>}
         </div>}
       </div>
     </div>
+  );
+}
+
+/** The "Find one job" window, opened from the sidebar or a job card (`useFindJob`). Mounted
+ *  once at the app level, so it opens whether or not the sidebar is shown. */
+export function FindOneJobWindow() {
+  const { open, opened, prefill, savedJobId, hide } = useFindJob();
+  return (
+    <Modal open={open} title="Find one job" onClose={hide} resizable>
+      <FindOneJob key={opened} prefill={prefill} savedJobId={savedJobId} onSaved={hide} />
+    </Modal>
   );
 }

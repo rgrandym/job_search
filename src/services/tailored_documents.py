@@ -26,7 +26,7 @@ from src.cv.models import (
 from src.cv.proposals import MAX_ROLE_SKILLS, apply_compression, enriched
 from src.cv.tailor import keyword_coverage, literal_terms, readability, revise_tailored, screen
 from src.jobs.models import JobPosting
-from src.services import declined
+from src.services import declined, tracker
 from src.services.workspace import Workspace
 from src.tools.search_tools import extract_numbers
 
@@ -125,13 +125,31 @@ def ensure_original_layout(ws: Workspace, path: Path) -> bool:
 
 
 def delete_for_file(ws: Workspace, filename: str) -> None:
-    """Discard saved drafts whose current Word export was removed from the CV library."""
+    """Discard saved drafts whose current Word export was removed from the CV library; the
+    job's tracker entry then names its newest remaining draft, if any."""
     for document in list_all(ws):
         if document.filename == filename:
             (_directory(ws) / f"{document.id}.json").unlink()
             current = ws.tailored.get(document.job_id)
             if current is not None and current.document_id == document.id:
                 ws.tailored.pop(document.job_id, None)
+    newest: dict[str, str] = {}
+    for document in list_all(ws):  # newest first
+        newest.setdefault(document.job_id, document.filename)
+    tracker.forget_cv_file(ws, filename, newest)
+
+
+def prune_missing(ws: Workspace) -> None:
+    """Forget drafts, and tracker file names, whose Word file is gone (deleted outside the app,
+    or before deletions cleaned up after themselves), so job cards stop showing them."""
+    present = {
+        p.name for folder in (ws.output_dir, ws.output_dir / "cvs") for p in folder.glob("*.docx")
+    }
+    for filename in {d.filename for d in list_all(ws)} - present:
+        delete_for_file(ws, filename)
+    named = {e.cv_file for e in tracker.load(ws).values() if e.cv_file is not None}
+    for filename in named - present:
+        tracker.forget_cv_file(ws, filename, {})
 
 
 def load(ws: Workspace, document_id: str, job_id: str | None = None) -> TailoredDocument:

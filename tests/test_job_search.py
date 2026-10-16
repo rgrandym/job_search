@@ -787,3 +787,21 @@ def test_retrieval_cap_keeps_role_relevant_titles(master_cv: MasterCV, settings:
     )
     retrieved = [r.job.id for r in (*report.matches, *report.below_threshold)]
     assert retrieved == ["role"] and report.not_retrieved == ["camp"]
+
+
+def test_jsonld_sections_outside_the_description_are_kept() -> None:
+    node = {
+        "@type": "JobPosting",
+        "title": "Senior Manager Preclinical Research Programme Management",
+        "hiringOrganization": {"@type": "Organization", "name": ""},
+        "description": "<p>We are a biotechnology company.</p>",
+        "responsibilities": "<ul><li>Lead preclinical programme planning</li></ul>",
+        "experienceRequirements": "Programme management in drug discovery",
+        "skills": ["MS Project", "Risk management"],
+    }
+    job = posting_from_jsonld(node, source="manual", url=None)
+    assert job.company == "unknown"  # an empty name is no name
+    assert "Responsibilities\nLead preclinical programme planning" in job.description
+    assert "Experience\nProgramme management in drug discovery" in job.description
+    assert "Skills\nMS Project\nRisk management" in job.description
+    assert job.description.startswith("We are a biotechnology company.")

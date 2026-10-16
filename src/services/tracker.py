@@ -430,6 +430,18 @@ def remember_document_job(ws: Workspace, job: JobPosting, cv_file: str | None = 
     _save(ws, entries, today)
 
 
+def forget_cv_file(ws: Workspace, filename: str, newest: dict[str, str]) -> None:
+    """A deleted CV file is no longer named on its job: the job's newest remaining draft in
+    `newest` (job id -> file name) is, else none."""
+    entries = load(ws)
+    named = [entry for entry in entries.values() if entry.cv_file == filename]
+    for entry in named:
+        jobs = [entry.job_id, *entry.document_postings]
+        entry.cv_file = next((newest[job] for job in jobs if job in newest), None)
+    if named:
+        _save(ws, entries, date.today())
+
+
 def document_job(ws: Workspace, job_id: str) -> JobPosting | None:
     """Find the original posting of a previously generated document."""
     return next(

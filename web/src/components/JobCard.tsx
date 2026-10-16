@@ -1,5 +1,5 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bookmark, CalendarDays, ChevronDown, ExternalLink, FileText, Loader2, Mail, Scale, Trash2 } from "lucide-react";
+import { useMutation, useMutationState, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Bookmark, CalendarDays, ChevronDown, ExternalLink, FileText, Loader2, Mail, Scale, Search, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "../lib/api";
 import { isAdjacentPossibility } from "../lib/resultGroups";
@@ -7,6 +7,8 @@ import type { Rejection } from "../lib/api";
 import type { FitDimensions, JobStatus, JobVerdict, MatchResult, OutcomeStage, UserLabel } from "../lib/types";
 import { cn, money, scoreColor } from "../lib/utils";
 import { useSearch } from "../stores/searchStore";
+import { usePrefs, type TailorPrefs } from "../stores/prefsStore";
+import { useFindJob } from "../stores/findJobStore";
 import { CVVersionCompare } from "./CVVersionCompare";
 import { TaskError, TaskProgress, useTaskId } from "./TaskProgress";
 import { CVViewButton, LetterViewButton } from "./LetterDocument";
@@ -323,21 +325,31 @@ function Description({ text }: { text: string }) {
   );
 }
 
-function UncheckedPosting({ onRecheck }: { onRecheck: (description?: string) => void }) {
+const UNCHECKED = "Its requirements could not be read, so it was not checked against your profile. Fetch the full posting, or open it and paste the job description.";
+
+/** Postings shorter than this are a snippet (the search's own `ENRICH_BELOW`). */
+const THIN_POSTING = 600;
+
+function UncheckedPosting({ onRecheck, onSearch, message = UNCHECKED, pending = false }: { onRecheck: (description?: string) => void; onSearch: () => void; message?: string; pending?: boolean }) {
   const [pasting, setPasting] = useState(false);
   const [text, setText] = useState("");
   return (
     <div className="space-y-1.5 rounded-md border border-border bg-surface p-2 text-[11px]">
-      <p className="text-muted">
-        Its requirements could not be read, so it was not checked against your profile. Fetch the full posting, or open it
-        and paste the job description.
-      </p>
+      <p className="text-muted">{message}</p>
       <div className="flex flex-wrap gap-2">
-        <button type="button" className="btn-ghost py-1 text-[12px]" onClick={() => onRecheck()}>
-          Fetch full posting
+        <button type="button" className="btn-ghost py-1 text-[12px]" disabled={pending} onClick={() => onRecheck()}>
+          {pending && <Loader2 size={12} className="animate-spin" />} Fetch full posting
         </button>
         <button type="button" className="btn-ghost py-1 text-[12px]" onClick={() => setPasting(!pasting)}>
           Paste description
+        </button>
+        <button
+          type="button"
+          className="btn-ghost py-1 text-[12px]"
+          title="Open Find one job with this job's title, employer, link and ID filled in: it looks for a readable copy of the posting, also on the employer's site and job boards"
+          onClick={onSearch}
+        >
+          <Search size={12} /> Search for this job
         </button>
       </div>
       {pasting && (
@@ -351,11 +363,11 @@ function UncheckedPosting({ onRecheck }: { onRecheck: (description?: string) => 
           <button
             type="button"
             className="btn-primary py-1 text-[12px]"
-            disabled={text.trim().length < 200}
+            disabled={pending || text.trim().length < 200}
             title={text.trim().length < 200 ? "Paste the whole description (at least 200 characters)" : undefined}
             onClick={() => onRecheck(text)}
           >
-            Judge with this description
+            Use this description
           </button>
         </div>
       )}
@@ -377,6 +389,8 @@ export function JobCard({
   removing = false,
   labelable = true,
   notScreened = false,
+  refetchSaved = false,
+  recheckPending = false,
 }: {
   result: MatchResult;
   canTailor: boolean;
@@ -398,29 +412,40 @@ export function JobCard({
   labelable?: boolean;
   /** Smart search left this posting outside the screening shortlist. */
   notScreened?: boolean;
+  /** A saved job: its full posting can be read again (or pasted) outside any search. */
+  refetchSaved?: boolean;
+  /** A search run (which `onRecheck` starts) is going: its posting options wait for it. */
+  recheckPending?: boolean;
 }) {
   const { job, verdict, score } = result;
   const [open, setOpen] = useState(false);
-  const [template, setTemplate] = useState("original");
-  const [length, setLength] = useState<"auto" | "full" | "junior">("auto");
+  const { template, length, emphasis, level, audience, cvMode } = usePrefs((s) => s.tailor);
+  const setTailor = usePrefs((s) => s.setTailor);
+  const setTemplate = (value: string) => setTailor({ template: value });
+  const setLength = (value: TailorPrefs["length"]) => setTailor({ length: value });
+  const setEmphasis = (value: TailorPrefs["emphasis"]) => setTailor({ emphasis: value });
+  const setLevel = (value: TailorPrefs["level"]) => setTailor({ level: value });
+  const setAudience = (value: TailorPrefs["audience"]) => setTailor({ audience: value });
+  const setCvMode = (value: TailorPrefs["cvMode"]) => setTailor({ cvMode: value });
   const [headlineChoice, setHeadlineChoice] = useState<{ headline: string; url: string } | null>(null);
   const [reportOpen, setReportOpen] = useState(true);
-  const [emphasis, setEmphasis] = useState<"auto" | "leadership" | "hands_on">("auto");
-  const [level, setLevel] = useState<"auto" | "senior" | "junior">("auto");
-  const [audience, setAudience] = useState<"auto" | "industry" | "academic">("auto");
-  const [cvMode, setCvMode] = useState<"standard" | "optimised">("standard");
   const [documentsOpen, setDocumentsOpen] = useState(false);
   // The tailored version whose report the card shows (null: the newest) and the comparison window.
   const [versionId, setVersionId] = useState<string | null>(null);
   const [compareOpen, setCompareOpen] = useState(false);
+  const [tailoredAt, setTailoredAt] = useState(0);
   const qc = useQueryClient();
   const setTracking = useSearch((s) => s.setTracking);
   const tailorTask = useTaskId();
   const letterTask = useTaskId();
+  // Keyed by job, with the task id as the variable, so a card mounted again (another tab, then
+  // back) finds a run still going and shows its progress.
   const tailor = useMutation({
+    mutationKey: ["tailor", job.id],
     meta: { syncLists: true },
-    mutationFn: () => api.tailor(job.id, template, result, emphasis, level, length, tailorTask.next(), audience, cvMode),
+    mutationFn: (taskId: string) => api.tailor(job.id, template, result, emphasis, level, length, taskId, audience, cvMode),
     onSuccess: (data) => {
+      setTailoredAt(Date.now());
       setHeadlineChoice(null);
       setVersionId(data.document_id);
       setDocumentsOpen(true);
@@ -439,10 +464,11 @@ export function JobCard({
   // The cover letter cites the newest reviewed tailored CV for this job, else the selected CV.
   const letterSource = versions.find((d) => d.reviewed);
   const canWriteLetter = !!letterSource || canTailor;
-  const savedDraft = versionId
-    ? versions.find((d) => d.id === versionId && d.report)
-    : versions.find((d) => d.report);
-  const fresh = tailor.data && (!versionId || tailor.data.document_id === versionId) ? tailor.data : null;
+  const chosenDraft = versionId ? versions.find((d) => d.id === versionId && d.report) : undefined;
+  // The last tailoring's report until the saved drafts list it; gone once its CV is deleted.
+  const freshListed = !!tailor.data && (drafts.dataUpdatedAt <= tailoredAt || versions.some((d) => d.id === tailor.data.document_id));
+  const fresh = freshListed && (!versionId || tailor.data?.document_id === versionId) ? tailor.data : null;
+  const savedDraft = chosenDraft ?? (fresh ? undefined : versions.find((d) => d.report));
   const report = savedDraft?.report ?? fresh ?? null;
   const pickVersion = (id: string) => {
     setVersionId(id);
@@ -459,10 +485,45 @@ export function JobCard({
     },
   });
   const letter = useMutation({
+    mutationKey: ["letter", job.id],
     meta: { syncLists: true },
-    mutationFn: (documentId?: string) => api.coverLetter(job.id, template, result, documentId, letterTask.next()),
+    mutationFn: ({ documentId, taskId }: { documentId?: string; taskId: string }) =>
+      api.coverLetter(job.id, template, result, documentId, taskId),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["cover-letters"] }),
   });
+  const writeLetter = (documentId?: string) => letter.mutate({ documentId, taskId: letterTask.next() });
+  const tailorRuns = useMutationState({
+    filters: { mutationKey: ["tailor", job.id], status: "pending" },
+    select: (m) => m.state.variables as string,
+  });
+  const letterRuns = useMutationState({
+    filters: { mutationKey: ["letter", job.id], status: "pending" },
+    select: (m) => (m.state.variables as { taskId: string }).taskId,
+  });
+  const tailorRun = tailor.isPending ? tailorTask.id : (tailorRuns.at(-1) ?? null);
+  const letterRun = letter.isPending ? letterTask.id : (letterRuns.at(-1) ?? null);
+  const thin = job.description.trim().length < THIN_POSTING;
+  const postingTask = useTaskId();
+  const posting = useMutation({
+    mutationKey: ["posting", job.id],
+    meta: { syncLists: true },
+    mutationFn: ({ description, taskId }: { description?: string; taskId: string }) =>
+      api.refreshSavedPosting(job.id, description, taskId),
+  });
+  const postingRuns = useMutationState({
+    filters: { mutationKey: ["posting", job.id], status: "pending" },
+    select: (m) => (m.state.variables as { taskId: string }).taskId,
+  });
+  const postingRun = posting.isPending ? postingTask.id : (postingRuns.at(-1) ?? null);
+  // A board's own id ("linkedin:4478453986") is a search clue; the app's made-up ids are not.
+  const boardId = /^(manual|web):/.test(job.id) ? "" : job.id;
+  const searchForJob = () =>
+    useFindJob.getState().show(
+      { title: job.title, company: job.company, job_id: boardId, keywords: "", description: "", posted_at: null, url: job.url ?? "" },
+      refetchSaved ? job.id : null,
+    );
+  const readPosting =
+    onRecheck ?? (refetchSaved ? (description?: string) => posting.mutate({ description, taskId: postingTask.next() }) : undefined);
   const status = result.tracking?.status;
   const alignment = verdict?.alignment && verdict.alignment !== "neutral" ? ALIGNMENT_CHIP[verdict.alignment] : null;
   const closing = job.closes_at ? closes(job.closes_at) : null;
@@ -474,7 +535,7 @@ export function JobCard({
   const salaryNote = salary && job.salary_maybe_estimated ? " (may be estimated)" : "";
 
   return (
-    <article data-job-id={job.id} className={cn("card min-w-0 p-3.5 [overflow-wrap:anywhere]", selected && "border-accent")}>
+    <article data-job-id={job.id} className={cn("card reading min-w-0 p-3.5 [overflow-wrap:anywhere]", selected && "border-accent")}>
       <div className="flex gap-3">
         {onSelect && (
           <input
@@ -617,6 +678,27 @@ export function JobCard({
             </div>
           )}
 
+          {!verdict && posting.isSuccess && !thin && (
+            <p className="mt-2 text-[12px] text-good">
+              Full posting read ({job.description.length.toLocaleString()} characters): tailoring and cover letters use it now.
+            </p>
+          )}
+          {!verdict && readPosting && (notScreened || thin) && (
+            <div className="mt-2 space-y-1">
+              <UncheckedPosting
+                onRecheck={readPosting}
+                onSearch={searchForJob}
+                pending={!!postingRun || recheckPending}
+                message={
+                  thin
+                    ? "Only the title and a snippet of this posting were read, so there is little to screen or tailor a CV to. Fetch the full posting, or open it and paste the job description."
+                    : "Not screened yet. Fetch the full posting to screen it against your profile, or paste the job description."
+                }
+              />
+              {postingRun && <TaskProgress id={postingRun} />}
+              <TaskError error={posting.error} className="text-[12px]" />
+            </div>
+          )}
           {verdict && (
             <div className="mt-2 space-y-1 text-[12px]">
               {verdict.fit_summary && <p className="text-fg">{verdict.fit_summary}</p>}
@@ -625,7 +707,7 @@ export function JobCard({
               <Lines items={[...verdict.dealbreakers, ...verdict.essential_unmet, ...verdict.gaps]} mark="−" tone="text-warn" />
               <Lines items={verdict.unknowns} mark="?" tone="text-faint" max={2} />
               {verdict.cap_reason && <p className="text-[11px] text-faint">Score capped: {verdict.cap_reason}</p>}
-              {!verdict.requirements_checked && onRecheck && <UncheckedPosting onRecheck={onRecheck} />}
+              {!verdict.requirements_checked && onRecheck && <UncheckedPosting onRecheck={onRecheck} onSearch={searchForJob} pending={recheckPending} />}
             </div>
           )}
         </div>
@@ -657,47 +739,54 @@ export function JobCard({
           </a>
         )}
         {!job.url && <span className="text-[11px] text-faint">No link provided by the source</span>}
-        {canTailor && !result.excluded && (
-          <>
-            <select aria-label="CV design" title="Same as my CV: a copy of your Word CV (for a PDF, its Word version). Pick a design only to change the look." className="input w-auto py-1 text-[12px]" value={template} onChange={(e) => setTemplate(e.target.value)}>
-              <option value="original">Design: same as my CV</option>
-              <option value="classic">Classic design</option>
-              <option value="modern">Modern design</option>
-              <option value="compact">Compact design</option>
-            </select>
-            <select aria-label="CV length" title="Automatic keeps every line unless the job is clearly more junior than your experience" className="input w-auto py-1 text-[12px]" value={length} onChange={(e) => setLength(e.target.value as typeof length)}>
-              <option value="auto">Length: automatic</option>
-              <option value="full">Keep full length</option>
-              <option value="junior">Junior role (trim)</option>
-            </select>
-            <select aria-label="CV emphasis" title="Which evidenced work should lead the CV" className="input w-auto py-1 text-[12px]" value={emphasis} onChange={(e) => setEmphasis(e.target.value as typeof emphasis)}>
-              <option value="auto">Emphasis: automatic</option>
-              <option value="leadership">Leadership</option>
-              <option value="hands_on">Hands-on / wet lab</option>
-            </select>
-            <select aria-label="CV level emphasis" title="Adjust presentation while keeping your actual titles and experience" className="input w-auto py-1 text-[12px]" value={level} onChange={(e) => setLevel(e.target.value as typeof level)}>
-              <option value="auto">Level: automatic</option>
-              <option value="senior">More senior emphasis</option>
-              <option value="junior">More junior emphasis</option>
-            </select>
-            <select aria-label="CV audience" title="Academic: worded as a research profile, with education and publications before experience (sections you already have, moved whole). Automatic: academic when the job is an academic post." className="input w-auto py-1 text-[12px]" value={audience} onChange={(e) => setAudience(e.target.value as typeof audience)}>
-              <option value="auto">Audience: automatic</option>
-              <option value="industry">Industry</option>
-              <option value="academic">Academic</option>
-            </select>
-            <select aria-label="CV writing mode" title="Optimised draft makes the strongest evidenced case and places plausible missing skills or experience in red for your review" className="input w-auto py-1 text-[12px]" value={cvMode} onChange={(e) => setCvMode(e.target.value as typeof cvMode)}>
-              <option value="standard">Standard CV</option>
-              <option value="optimised">Optimised draft · review red text</option>
-            </select>
-            <button className="btn-ghost py-1 text-[12px]" disabled={tailor.isPending} onClick={() => tailor.mutate()}>
-              {tailor.isPending ? <Loader2 size={12} className="animate-spin" /> : <FileText size={12} />}
-              Tailor CV
-            </button>
-          </>
-        )}
+        <select aria-label="CV design" title="Same as my CV: a copy of your Word CV (for a PDF, its Word version). Pick a design only to change the look." className="input w-auto py-1 text-[12px]" value={template} onChange={(e) => setTemplate(e.target.value)}>
+          <option value="original">Design: same as my CV</option>
+          <option value="classic">Classic design</option>
+          <option value="modern">Modern design</option>
+          <option value="compact">Compact design</option>
+        </select>
+        <select aria-label="CV length" title="Automatic keeps every line unless the job is clearly more junior than your experience" className="input w-auto py-1 text-[12px]" value={length} onChange={(e) => setLength(e.target.value as typeof length)}>
+          <option value="auto">Length: automatic</option>
+          <option value="full">Keep full length</option>
+          <option value="junior">Junior role (trim)</option>
+        </select>
+        <select aria-label="CV emphasis" title="Which evidenced work should lead the CV" className="input w-auto py-1 text-[12px]" value={emphasis} onChange={(e) => setEmphasis(e.target.value as typeof emphasis)}>
+          <option value="auto">Emphasis: automatic</option>
+          <option value="leadership">Leadership</option>
+          <option value="hands_on">Hands-on / wet lab</option>
+        </select>
+        <select aria-label="CV level emphasis" title="Adjust presentation while keeping your actual titles and experience" className="input w-auto py-1 text-[12px]" value={level} onChange={(e) => setLevel(e.target.value as typeof level)}>
+          <option value="auto">Level: automatic</option>
+          <option value="senior">More senior emphasis</option>
+          <option value="junior">More junior emphasis</option>
+        </select>
+        <select aria-label="CV audience" title="Academic: worded as a research profile, with education and publications before experience (sections you already have, moved whole). Automatic: academic when the job is an academic post." className="input w-auto py-1 text-[12px]" value={audience} onChange={(e) => setAudience(e.target.value as typeof audience)}>
+          <option value="auto">Audience: automatic</option>
+          <option value="industry">Industry</option>
+          <option value="academic">Academic</option>
+        </select>
+        <select aria-label="CV writing mode" title="Optimised draft makes the strongest evidenced case and places plausible missing skills or experience in red for your review" className="input w-auto py-1 text-[12px]" value={cvMode} onChange={(e) => setCvMode(e.target.value as typeof cvMode)}>
+          <option value="standard">Standard CV</option>
+          <option value="optimised">Optimised draft · review red text</option>
+        </select>
         <button
           className="btn-ghost py-1 text-[12px]"
-          disabled={letter.isPending || !canWriteLetter}
+          title={
+            thin
+              ? "Only a snippet of this posting was read: fetch the full posting first, or the CV is tailored to little more than its title"
+              : canTailor
+                ? "Write a tailored CV for this job (each run adds a version)"
+                : "Tailor from your selected CV: select one in the CV library if none is"
+          }
+          disabled={!!tailorRun}
+          onClick={() => tailor.mutate(tailorTask.next())}
+        >
+          {tailorRun ? <Loader2 size={12} className="animate-spin" /> : <FileText size={12} />}
+          Tailor CV
+        </button>
+        <button
+          className="btn-ghost py-1 text-[12px]"
+          disabled={!!letterRun || !canWriteLetter}
           title={
             letterSource
               ? `Write a cover letter citing ${letterSource.label} (to use another CV, open Review CV)`
@@ -705,9 +794,9 @@ export function JobCard({
                 ? "Write a cover letter citing your selected CV"
                 : "Select a CV in the library, or tailor one for this job, to write a cover letter"
           }
-          onClick={() => letter.mutate(letterSource?.id)}
+          onClick={() => writeLetter(letterSource?.id)}
         >
-          {letter.isPending ? <Loader2 size={12} className="animate-spin" /> : <Mail size={12} />} Cover letter
+          {letterRun ? <Loader2 size={12} className="animate-spin" /> : <Mail size={12} />} Cover letter
         </button>
         <button
           className="btn-ghost py-1 text-[12px]"
@@ -896,9 +985,9 @@ export function JobCard({
           </>}
         </div>
       )}
-      {tailor.isPending && <TaskProgress id={tailorTask.id} className="mt-2" />}
+      {tailorRun && <TaskProgress id={tailorRun} className="mt-2" />}
       <TaskError error={tailor.error} className="mt-2 text-[12px]" />
-      {documentsOpen && <TailoredCVPanel jobId={job.id} result={result} hasCv={canTailor} letterPending={letter.isPending} onLetter={(id) => letter.mutate(id)} />}
+      {documentsOpen && <TailoredCVPanel jobId={job.id} result={result} hasCv={canTailor} letterPending={!!letterRun} onLetter={writeLetter} />}
       {letter.data && (
         <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md bg-surface p-2 text-[12px]">
           {!report && letter.data.id && <LetterViewButton id={letter.data.id} title={`Cover letter · ${job.title}`} downloadUrl={letter.data.download_url} />}
@@ -917,7 +1006,7 @@ export function JobCard({
           {letter.data.notes.map((n) => <span key={n} className="basis-full text-[11px] text-warn">To check: {n}</span>)}
         </div>
       )}
-      {letter.isPending && <TaskProgress id={letterTask.id} className="mt-2" />}
+      {letterRun && <TaskProgress id={letterRun} className="mt-2" />}
       <TaskError error={letter.error} className="mt-2 text-[12px]" />
 
       {open && (

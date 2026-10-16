@@ -263,6 +263,9 @@ export const api = {
   findOneJob: (query: OneJobQuery, progressId?: string) =>
     request<OneJobResults>(tracked("/api/jobs/find-one", progressId), json("POST", query)),
   saveFoundJob: (job: JobPosting) => request<SavedJob>("/api/saved/found", json("POST", job)),
+  /** Read a saved job's full posting again, or keep the pasted `description`. */
+  refreshSavedPosting: (jobId: string, description: string | undefined, progressId: string) =>
+    request<SavedJob>(tracked(`/api/saved/${encodeURIComponent(jobId)}/posting`, progressId), json("POST", { description: description ?? null })),
   importJob: (job: { title: string; company: string; description: string; url?: string; location?: string }) =>
     request<SavedJob>("/api/saved/import", json("POST", job)),
   saveJobs: (job_ids: string[]) => request<SavedJob[]>("/api/saved", json("POST", { job_ids })),

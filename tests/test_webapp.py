@@ -1061,6 +1061,60 @@ def test_delete_master_and_generated_cv_entries(
     assert client.get("/api/state").json()["cv_files"]["available"] == []
 
 
+def test_deleting_the_selected_tailored_cv_selects_its_source_and_clears_the_job(
+    client: TestClient, ws: Workspace, master_cv: MasterCV
+) -> None:
+    from src.cv.models import JDAnalysis, TailoringPlan
+    from src.cv.tailor import apply_plan
+    from src.jobs.models import JobPosting
+    from src.services import tailored_documents, tracker
+
+    source = client.post(
+        "/api/cv/upload", files={"file": ("resume.txt", b"Candidate CV", "text/plain")}
+    ).json()
+    client.post(
+        "/api/cv/upload", files={"file": ("other.txt", b"Another CV", "text/plain")}
+    )  # a second CV: no selection would be made by default
+    client.put(f"/api/cv/selection/{source['id']}")
+    generated = ws.output_dir / "cvs" / "tailored.docx"
+    generated.write_bytes(b"Word file")
+    jd = JDAnalysis(job_title="ML Engineer")
+    tailored_documents.create(
+        ws, "job-1", master_cv, jd, apply_plan(master_cv, TailoringPlan(), jd), "classic", generated
+    )
+    job = JobPosting(id="job-1", title="ML Engineer", company="Acme")
+    tracker.remember_document_job(ws, job, cv_file=generated.name)
+    client.put("/api/cv/selection/generated%3Atailored.docx")
+
+    assert client.delete("/api/cv/generated%3Atailored.docx").json() == {"deleted": True}
+    assert client.get("/api/state").json()["cv_files"]["selected"] == source["id"]
+    assert client.get("/api/jobs/job-1/tailored-cvs").json() == []
+    assert all(entry.cv_file is None for entry in tracker.load(ws).values())
+
+
+def test_drafts_and_tracker_names_of_removed_word_files_are_forgotten(
+    client: TestClient, ws: Workspace, master_cv: MasterCV
+) -> None:
+    from src.cv.models import JDAnalysis, TailoringPlan
+    from src.cv.tailor import apply_plan
+    from src.jobs.models import JobPosting
+    from src.services import tailored_documents, tracker
+
+    jd = JDAnalysis(job_title="ML Engineer")
+    tailored = apply_plan(master_cv, TailoringPlan(), jd)
+    kept = ws.output_dir / "cvs" / "kept.docx"
+    kept.parent.mkdir(parents=True)
+    kept.write_bytes(b"Word file")
+    tailored_documents.create(ws, "job-1", master_cv, jd, tailored, "classic", kept)
+    gone = ws.output_dir / "cvs" / "gone.docx"  # removed outside the app
+    tailored_documents.create(ws, "job-2", master_cv, jd, tailored, "classic", gone)
+    tracker.remember_document_job(ws, JobPosting(id="job-3", title="Old", company="A"), "old.docx")
+
+    listed = client.get("/api/tailored-cvs").json()
+    assert [d["job_id"] for d in listed] == ["job-1"]
+    assert all(entry.cv_file is None for entry in tracker.load(ws).values())
+
+
 def test_api_codex_login_and_status(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     from src.web import app as webapp
 
@@ -1658,6 +1712,36 @@ def test_postings_without_requirements_can_be_read_later_or_pasted(
     monkeypatch.setattr(search_service, "_enrich", lambda *_: {})  # nothing readable now
     again = asyncio.run(search_service.recheck_postings(ws, first.history_id))
     assert again.report.all_results()  # unchanged, and says so in the progress log
+
+
+def test_a_job_left_unscreened_can_have_its_posting_pasted_and_screened(
+    ws: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.jobs import screener
+    from src.services import history
+
+    monkeypatch.setattr(ws, "structured", lambda *_: fake_llm())
+    first = asyncio.run(
+        run_search(ws, SearchRequest(query=SearchQuery(sources=["demo"]), smart=True))
+    )
+    assert first.history_id is not None
+    entries = history._entries(ws)  # one job left outside the screening shortlist
+    report = entries[0]["outcome"]["report"]
+    lists = ("matches", "to_check", "below_threshold")
+    target = next(r for name in lists for r in report[name] if r["verdict"])
+    for name in lists:
+        report[name] = [r for r in report[name] if r is not target]
+    target["verdict"], target["passed"] = None, False
+    report["below_threshold"].append(target)
+    history._save(ws, entries)
+
+    monkeypatch.setattr(screener, "checkable", lambda job: len(job.description) >= 600)
+    pasted = "Essential: lead ML engineering for recommender systems in production. " * 10
+    job_id = target["job"]["id"]
+    done = asyncio.run(search_service.recheck_postings(ws, first.history_id, [job_id], pasted))
+    after = {r.job.id: r for r in done.report.all_results()}
+    assert after[job_id].job.description == pasted.strip()
+    assert after[job_id].verdict is not None  # screened now
 
 
 # ---------------------------------------------------------------- job tracker and source yield

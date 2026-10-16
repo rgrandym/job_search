@@ -325,6 +325,10 @@ Personal job-search tool: public job pages may be read, within reason.
 - A shortlisted posting still too thin to check its requirements may have its own page read
   once (`sources/pages.PostingPages`: JSON-LD only, `check_robots=True`, capped by
   `page_max_details`; never LinkedIn or Indeed hosts).
+- **The user's own link (user's decision 2026-10-15):** a posting link the user gives to Find one
+  job, or a saved job's own link they ask to fetch, is read once even where robots.txt turns
+  automated readers away (`one_job._from_link`, `check_robots=False`): one page they asked for,
+  as a browser would. Searches, discovery, feeds and every other page keep robots.txt.
 - Company directories (BioPharmGuy) are read once per discovery run, never per search, and only
   pages their `robots.txt` allows.
 - **Employers learned from job boards (user's decision 2026-10-15):** most matches come from

@@ -9,6 +9,7 @@ import type { LLMView } from "../lib/types";
 import { cn } from "../lib/utils";
 import { useActivity } from "../stores/activityStore";
 import { useChat, type ChatItem } from "../stores/chatStore";
+import { usePrefs } from "../stores/prefsStore";
 import { useSearch } from "../stores/searchStore";
 import { ActivityPanel } from "./ActivityPanel";
 import { ConnectionsPanel } from "./ConnectionsPanel";
@@ -42,7 +43,9 @@ export function AgentPanel({ ready, llm, hasCv }: { ready: boolean; llm?: LLMVie
     for (const key of ["intent", "profiles", "evidence", "state", "cv-preview", "history", "saved", "tracker", "labels", "learning", "tailored-cvs", "cover-letters", "company-boards", "connections"]) void qc.invalidateQueries({ queryKey: [key] });
   }, [running, qc]);
   const [draft, setDraft] = useState("");
-  const [chatChoice, setChatChoice] = useState("quality");
+  const chatChoice = usePrefs((s) => s.chatChoice);
+  const setPrefs = usePrefs((s) => s.set);
+  const setChatChoice = (value: string) => setPrefs({ chatChoice: value });
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
   const pickerButtonRef = useRef<HTMLButtonElement>(null);

@@ -6,6 +6,7 @@ import type { AppState, CVAsset, MasterCV } from "../lib/types";
 import { useGmail } from "../lib/useGmail";
 import { useSearchRunner } from "../lib/useSearchRunner";
 import { EMPTY_QUERY, useSearch } from "../stores/searchStore";
+import { useFindJob } from "../stores/findJobStore";
 import { AreaThresholds } from "./AreaThresholds";
 import { SourcePicker } from "./SourcePicker";
 import { ProfileDetails } from "./ProfileDetails";
@@ -16,10 +17,9 @@ import { TrackerPanel } from "./TrackerPanel";
 import { CVDocument } from "./CVDocument";
 import { CVEditor } from "./CVEditor";
 import { CVHealthPanel } from "./CVHealthPanel";
-import { FindOneJob } from "./FindOneJob";
 import { ChipInput, Field, Modal, Toggle, Resizable } from "./ui";
 
-const DISTANCES = [5, 10, 25, 50, 100];
+const DISTANCES = [5, 10, 20, 25, 30, 40, 50, 60, 70, 80, 90, 100];
 const POSTED_WINDOWS: { days: number | null; label: string }[] = [
   { days: null, label: "Any time" },
   { days: 1, label: "Last 24 hours" },
@@ -56,7 +56,7 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
   const [dragging, setDragging] = useState(false);
   const [expandedProfileKey, setExpandedProfileKey] = useState<string | null>(null);
   const [editingProfile, setEditingProfile] = useState(false);
-  const [findingOneJob, setFindingOneJob] = useState(false);
+  const showFindJob = useFindJob((st) => st.show);
   const [editingCV, setEditingCV] = useState<CVAsset | null>(null);
   const [editableCV, setEditableCV] = useState<MasterCV | null>(null);
   const { status: gmail, healthy: gmailHealthy, waiting: gmailWaiting, connect: connectGmail, cancel: cancelGmail } = useGmail();
@@ -106,9 +106,10 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
       return { asset, cv: await api.editableCV() };
     },
     onSuccess: ({ asset, cv }) => {
+      // The pinned profile stays until another CV is selected.
+      if (asset.id !== state?.cv_files.selected) s.set({ useCv: true, summary: null, profileKey: null });
       cacheSelection(asset);
       setEditableCV(cv);
-      s.set({ useCv: true, summary: null, profileKey: null });
       void qc.invalidateQueries({ queryKey: ["profiles"] });
     },
     onError: () => { void qc.invalidateQueries({ queryKey: ["state"] }); },
@@ -117,8 +118,8 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
   const showCV = useMutation({
     mutationFn: (item: CVAsset) => item.id === state?.cv_files.selected ? Promise.resolve(item) : api.selectCV(item.id),
     onSuccess: (asset) => {
+      if (asset.id !== state?.cv_files.selected) s.set({ useCv: true, summary: null, profileKey: null });
       cacheSelection(asset);
-      s.set({ useCv: true, summary: null, profileKey: null });
       void qc.invalidateQueries({ queryKey: ["profiles"] });
     },
   });
@@ -140,6 +141,7 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
     },
   });
   const deleteCV = useMutation({
+    meta: { syncLists: true }, // its tailored drafts leave the job cards
     mutationFn: (item: CVAsset) => api.deleteCV(item.id),
     onSuccess: (_, item) => {
       if (item.id === state?.cv_files.selected) {
@@ -561,7 +563,7 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
             type="button"
             className="btn-ghost flex min-w-0 items-center justify-center gap-1 px-2"
             title="Look online for a posting you found yourself (link, or title and company), to save it for CV and letter writing"
-            onClick={() => setFindingOneJob(true)}
+            onClick={() => showFindJob()}
           >
             <Search size={14} /> <span className="truncate">Find one job</span>
           </button>
@@ -578,9 +580,6 @@ export function Sidebar({ state, onShowSummary }: { state: AppState | undefined;
         </div>
         </Resizable>
       </details>
-      <Modal open={findingOneJob} title="Find one job" onClose={() => setFindingOneJob(false)} resizable>
-        <FindOneJob onSaved={() => setFindingOneJob(false)} />
-      </Modal>
       <SearchHistory />
       <TrackerPanel />
       <details className="card group p-3" open>

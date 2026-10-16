@@ -48,7 +48,14 @@ class Workspace:
             if self.settings.master_cv_path.exists()
             else None
         )
-        self.active_cv_id: str | None = "master" if self.master_cv is not None else None
+        # The CV the user selected stays selected across restarts (`remember_cv`); a library
+        # CV's structured copy is loaded by `cv_service.list_cvs` or `ensure_selected_cv`.
+        self.cv_selection_path = data / "selected_cv.json"
+        self.active_cv_id: str | None = self._saved_cv_id() or (
+            "master" if self.master_cv is not None else None
+        )
+        if self.active_cv_id != "master":
+            self.master_cv = None
         self.last_query: SearchQuery | None = None
         self.last_report: MatchReport | None = None
         self.last_models: str | None = None  # who judged last_report (`history.HistoryItem`)
@@ -206,6 +213,21 @@ class Workspace:
         mgr.save(cv, self.settings.master_cv_path)
         self.master_cv = cv
         self.active_cv_id = "master"
+        self.remember_cv()
+
+    def remember_cv(self) -> None:
+        """Save the selected CV's id, so a restart opens the same CV (and its pinned profile)."""
+        data = {"cv_id": self.active_cv_id}
+        self.cv_selection_path.parent.mkdir(parents=True, exist_ok=True)
+        self.cv_selection_path.write_text(json.dumps(data))
+
+    def _saved_cv_id(self) -> str | None:
+        try:
+            saved = json.loads(self.cv_selection_path.read_text())
+        except (OSError, ValueError):
+            return None
+        cv_id = saved.get("cv_id") if isinstance(saved, dict) else None
+        return cv_id if isinstance(cv_id, str) and cv_id else None
 
     # ---------------------------------------------------------------- results
 

@@ -73,6 +73,7 @@ export function SavedJobs({ hasCv, query }: { hasCv: boolean; query: UseQueryRes
               removeAtTop
               removing={remove.isPending && remove.variables === s.result.job.id}
               labelable={false}
+              refetchSaved
             />
           ))}
       </div>

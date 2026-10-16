@@ -271,6 +271,16 @@
 
 html, body, #root { height: 100%; }
 body { background: var(--bg); color: var(--text-primary); font-size: 13px; }
+/* Job cards and tailored CV results: every text size 2px larger, for easier reading. */
+.reading { font-size: 15px; }
+.reading .text-\[10px\], .reading.text-\[10px\] { font-size: 12px; }
+.reading .text-\[11px\], .reading.text-\[11px\] { font-size: 13px; }
+.reading .text-\[12px\], .reading.text-\[12px\] { font-size: 14px; }
+.reading .text-\[13px\], .reading.text-\[13px\] { font-size: 15px; }
+.reading .text-\[14px\], .reading.text-\[14px\] { font-size: 16px; }
+.reading .text-\[15px\], .reading.text-\[15px\] { font-size: 17px; }
+.reading .text-\[18px\], .reading.text-\[18px\] { font-size: 20px; }
+.reading .text-\[20px\], .reading.text-\[20px\] { font-size: 22px; }
 
 @layer components {
   .card { @apply rounded-[10px] border border-border bg-panel; }

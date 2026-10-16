@@ -1,6 +1,8 @@
 """Focused lookup of one posting online, from clues supplied by the user.
 
-For a job the user found on their own: the posting's link is read directly; otherwise one web
+For a job the user found on their own: the posting's link is read directly, once, even where
+robots.txt turns automated readers away (the user's own request for one page, user's decision
+2026-10-15); otherwise one web
 search (DuckDuckGo's HTML endpoint, allowed by its robots.txt) finds the posting's pages, which
 are read in parallel (JSON-LD, robots.txt kept; with an ID, only pages that show it count).
 Only when the web finds nothing are the named employer's own job feed and the fast board
@@ -25,7 +27,7 @@ from pydantic import BaseModel, Field
 from src.core import progress
 from src.core.config import Settings
 from src.jobs.fetcher import build_sources, dedupe, fetch_all
-from src.jobs.models import JobPosting, SearchQuery
+from src.jobs.models import JobPosting, SavedJob, SearchQuery
 from src.jobs.sources.base import (
     HttpFetcher,
     SourceError,
@@ -36,7 +38,7 @@ from src.jobs.sources.base import (
 )
 from src.jobs.sources.companies import CompanyCareersSource, load_companies
 from src.jobs.sources.job_boards import REED_DETAILS, ReedSource
-from src.services import search_service
+from src.services import saved, search_service
 from src.services.workspace import Workspace
 from src.tools.search_tools import company_key, same_employer, title_core
 
@@ -183,13 +185,14 @@ def _public_url(url: str) -> bool:
         return True  # a public hostname; the normal source robots check still applies
 
 
-def _read_public_page(ws: Workspace, url: str) -> str:
-    """Follow only public redirects; every page remains subject to robots.txt."""
+def _read_public_page(ws: Workspace, url: str, check_robots: bool = True) -> str:
+    """Follow only public redirects. Pages are subject to robots.txt, except the posting link
+    the user gave (`check_robots=False`): one page they asked for, read once."""
     http = HttpFetcher(ws.settings)
     for _ in range(5):
         if not _public_url(url):
             raise SourceError("Posting link redirects to a local or invalid address")
-        response = http.get(url, check_robots=True, follow_redirects=False)
+        response = http.get(url, check_robots=check_robots, follow_redirects=False)
         if not response.is_redirect:
             return response.text
         location = response.headers.get("location")
@@ -206,14 +209,13 @@ def _from_link(ws: Workspace, query: OneJobQuery, errors: dict[str, str]) -> lis
     linkedin = _LINKEDIN_VIEW.search(url)
     if not linkedin:
         try:
-            nodes = extract_jsonld_jobs(_read_public_page(ws, url))
+            nodes = extract_jsonld_jobs(_read_public_page(ws, url, check_robots=False))
         except SourceError as exc:
             errors["link"] = str(exc)
             nodes = []
-        jobs = [
-            posting_from_jsonld(node, source="manual", url=url).model_copy(update={"url": url})
-            for node in nodes
-        ]
+        host = (urlsplit(url).hostname or "unknown").removeprefix("www.")
+        jobs = [_named(posting_from_jsonld(node, source="manual", url=url), query, host, url)
+                for node in nodes]  # fmt: skip
         if jobs or "local" in errors.get("link", ""):
             return jobs
     stub = JobPosting(
@@ -225,16 +227,33 @@ def _from_link(ws: Workspace, query: OneJobQuery, errors: dict[str, str]) -> lis
     )
     read = search_service._enrich([stub], [], errors, _quick(ws)).get(stub.id)
     if read is None:
-        errors["link"] = (
-            "No readable posting at that link; paste the description under Saved → "
-            "Add a job you found"
-        )
+        errors["link"] = _unreadable_link(errors)
         return []
     errors.pop("link", None)
     host = (urlsplit(url).hostname or "unknown").removeprefix("www.")
     names = {"title": "Job posting" if read.title == "?" else read.title}
     names["company"] = host if read.company == "?" else read.company
     return [read.model_copy(update=names)]
+
+
+def _named(job: JobPosting, query: OneJobQuery, host: str, url: str) -> JobPosting:
+    """A posting from the user's link, applied for there; a page that leaves out the employer
+    is named by the company the user typed, else the site."""
+    company = job.company if not _unnamed(job.company) else query.company.strip() or host
+    return job.model_copy(update={"url": url, "company": company})
+
+
+def _unreadable_link(errors: dict[str, str]) -> str:
+    """Why the link gave no posting; a robots.txt refusal replaces the reader's own note."""
+    refused = [k for k, v in errors.items() if k.startswith("enrich ") and "robots.txt" in v]
+    for key in refused:
+        del errors[key]
+    if refused:
+        return (
+            "this site does not allow automated reading of its pages (its robots.txt), so "
+            "the app cannot open it; open the link and paste the job description"
+        )
+    return "no readable posting at that link; open it and paste the job description"
 
 
 class _Result(NamedTuple):
@@ -477,17 +496,33 @@ def _validate(query: OneJobQuery) -> None:
 
 
 _ID_IN_LINK = re.compile(r"(?<![A-Za-z0-9])([A-Za-z]{0,4}-?\d{4,})(?![A-Za-z0-9])")
+_ID_PARAM = re.compile(r"id|no|num|job|vacanc|req|ref", re.I)
+
+
+def _id_in_link(url: str) -> str:
+    """A posting ID in the link: in its path ("/jobs/R79349"), else a query parameter that
+    names one ("?vacancyNo=VN887")."""
+    parts = urlsplit(url)
+    in_path = _ID_IN_LINK.findall(parts.path)
+    if in_path:
+        return str(in_path[-1])
+    for key, values in parse_qs(parts.query).items():
+        value = values[0].strip() if values else ""
+        named = _ID_PARAM.search(key) and re.fullmatch(r"[A-Za-z0-9-]{3,24}", value)
+        if named and re.search(r"\d", value):
+            return value
+    return ""
 
 
 def _blocked_link(ws: Workspace, query: OneJobQuery, errors: dict[str, str]) -> list[JobPosting]:
     """A link whose page cannot be read in full (an employer site that blocks automated
     reads): search the web for the posting by the ID in the link, apply on the link."""
     url = query.url.strip()
-    path = urlsplit(url).path
-    job_id = query.job_id.strip() or next(iter(_ID_IN_LINK.findall(path)[::-1]), "")
-    if not job_id:
+    job_id = query.job_id.strip() or _id_in_link(url)
+    if not job_id and not query.title.strip():
         return []
-    progress.step(f"The page could not be read in full; searching the web for {job_id}")
+    clue = job_id or query.title.strip()
+    progress.step(f"The page could not be read in full; searching the web for {clue}")
     search = query.model_copy(update={"url": "", "job_id": job_id})
     found = find(ws, search)
     errors.update(found.errors)
@@ -538,3 +573,28 @@ def find(ws: Workspace, query: OneJobQuery) -> OneJobResults:
     # A posting that could not be opened is not an unavailable source.
     errors = {k: v for k, v in errors.items() if not k.startswith("enrich ")}
     return OneJobResults(jobs=hits[:15], errors=errors)
+
+
+def refresh_saved(ws: Workspace, job_id: str, description: str | None = None) -> SavedJob:
+    """Read a saved job's full posting again (its link, else the web by title and employer),
+    or use the `description` the user pasted; the saved copy is updated with it."""
+    item = next((i for i in ws.saved_jobs() if i.result.job.id == job_id), None)
+    if item is None:
+        raise ValueError("This job is not in Saved")
+    job = item.result.job
+    if description is not None:
+        text = description.strip()
+        if len(text) < 200:
+            raise ValueError("Paste the whole job description, requirements included")
+        return saved.update_posting(ws, job.model_copy(update={"description": text}))
+    query = OneJobQuery(title=job.title, company=job.company, url=job.url or "")
+    found = find(ws, query).jobs
+    if job.url and not any(len(j.description) > len(job.description) for j in found):
+        found = find(ws, query.model_copy(update={"url": ""})).jobs  # the link failed: the web
+    fuller = max(found, key=lambda j: len(j.description), default=None)
+    if fuller is None or len(fuller.description) <= len(job.description):
+        raise ValueError("No fuller posting could be read now; open it and paste the description")
+    missing = {k: getattr(fuller, k) for k in ("location", "posted_at") if not getattr(job, k)}
+    return saved.update_posting(
+        ws, job.model_copy(update={"description": fuller.description, **missing})
+    )

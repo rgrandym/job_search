@@ -278,10 +278,40 @@ def extract_jsonld_jobs(page_html: str) -> list[dict[str, Any]]:
     return found
 
 
+# schema.org JobPosting fields some sites fill instead of `description` (which may then hold
+# only the employer's boilerplate): appended to the description under their own heading.
+JSONLD_SECTIONS = {
+    "responsibilities": "Responsibilities",
+    "qualifications": "Qualifications",
+    "skills": "Skills",
+    "experienceRequirements": "Experience",
+    "educationRequirements": "Education",
+}
+
+
+def _section_text(value: Any) -> str:
+    """A JSON-LD section as text: a string, a list of them, or an object's own text."""
+    if isinstance(value, list):
+        return "\n".join(filter(None, (_section_text(v) for v in value)))
+    if isinstance(value, dict):
+        value = value.get("description") or value.get("name") or ""
+    return html_to_text(str(value)).strip() if value else ""
+
+
+def _jsonld_description(node: dict[str, Any]) -> str:
+    """The posting's description with the sections it does not already contain."""
+    description = html_to_text(str(node.get("description", "")))
+    for key, heading in JSONLD_SECTIONS.items():
+        text = _section_text(node.get(key))
+        if text and text[:200] not in description:
+            description += f"\n\n{heading}\n{text}"
+    return description
+
+
 def posting_from_jsonld(node: dict[str, Any], *, source: str, url: str | None) -> JobPosting:
     """Map a schema.org JobPosting dict to our `JobPosting`."""
     org = node.get("hiringOrganization") or {}
-    company = org.get("name", "unknown") if isinstance(org, dict) else str(org)
+    company = (org.get("name") if isinstance(org, dict) else str(org)) or "unknown"
     loc = node.get("jobLocation")
     loc = loc[0] if isinstance(loc, list) and loc else loc
     addr = (loc or {}).get("address", {}) if isinstance(loc, dict) else {}
@@ -293,7 +323,7 @@ def posting_from_jsonld(node: dict[str, Any], *, source: str, url: str | None) -
         )
         or None
     )
-    description = html_to_text(str(node.get("description", "")))
+    description = _jsonld_description(node)
     arrangement: WorkArrangement = (
         "remote"
         if node.get("jobLocationType") == "TELECOMMUTE"
