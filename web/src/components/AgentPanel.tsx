@@ -14,7 +14,7 @@ import { useSearch } from "../stores/searchStore";
 import { ActivityPanel } from "./ActivityPanel";
 import { ConnectionsPanel } from "./ConnectionsPanel";
 import { LimitOptions } from "./LimitOptions";
-import { Empty } from "./ui";
+import { Empty, Resizable } from "./ui";
 
 function Activity({ item }: { item: Extract<ChatItem, { kind: "activity" }> }) {
   return (
@@ -129,8 +129,12 @@ export function AgentPanel({ ready, llm, hasCv }: { ready: boolean; llm?: LLMVie
         </div>
       </header>
 
-      <ActivityPanel />
-      {llm && <ConnectionsPanel />}
+      {/* The divider under the status sections trades their height against the chat's; the
+          chat keeps room for its header, a few lines and its input (about 20rem). */}
+      <Resizable id="agent-status" ceiling="calc(100% - 20rem)" min={64}>
+        <ActivityPanel />
+        {llm && <ConnectionsPanel />}
+      </Resizable>
 
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto overflow-x-hidden p-3 scroll-thin [overflow-wrap:anywhere]">
         {chat.items.length === 0 ? (

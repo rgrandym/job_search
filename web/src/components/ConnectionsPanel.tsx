@@ -149,7 +149,7 @@ export function ConnectionsPanel() {
       </summary>
       {view.isError && <p className="mt-2 text-[11px] text-bad">Could not read the connections: {(view.error as Error).message}</p>}
       {data && (
-        <Resizable id="connections" className="mt-2 space-y-3" fit="max-h-[calc(var(--vh)*45)] overflow-y-auto scroll-thin">
+        <Resizable id="connections" className="mt-2 space-y-3">
           <div className="space-y-1 rounded-md bg-surface p-2">
             {data.roles.map((r) => <RoleLine key={r.role} r={r} />)}
           </div>

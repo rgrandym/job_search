@@ -1,5 +1,5 @@
 import { Maximize2, Minus, X } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type TextareaHTMLAttributes } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode, type TextareaHTMLAttributes } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "../lib/utils";
 
@@ -426,14 +426,17 @@ function saveHeight(id: string, height: number | null) {
 
 /** A section body whose height the user sets by dragging its bottom edge (or with the arrow
  *  keys on the edge); it then scrolls inside. The height is remembered per `id`; double-click
- *  the edge to fit the content again. */
-export function Resizable({ id, children, className, fit, min = 48 }: {
+ *  the edge to fit the content again. With `ceiling`, the height set is a maximum instead
+ *  (half the parent until one is set, never above `ceiling`, a CSS length): the body still
+ *  shrinks to short content, and the edge is drawn as a full-width divider. */
+export function Resizable({ id, children, className, fit, min = 48, ceiling }: {
   id: string;
   children: ReactNode;
   className?: string;
   /** Classes while the user has not set a height (e.g. a maximum before it scrolls). */
   fit?: string;
   min?: number;
+  ceiling?: string;
 }) {
   const [height, setHeight] = useState<number | null>(() => savedHeight(id));
   const body = useRef<HTMLDivElement>(null);
@@ -463,34 +466,57 @@ export function Resizable({ id, children, className, fit, min = 48 }: {
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
   };
+  let style: CSSProperties | undefined;
+  if (ceiling) style = { maxHeight: `min(${height === null ? "50%" : `${height}px`}, ${ceiling})` };
+  else if (height !== null) style = { height };
+  const scrolls = height !== null || !!ceiling;
   return (
     <>
-      <div
-        ref={body}
-        style={height === null ? undefined : { height }}
-        className={cn(height !== null ? "overflow-y-auto overflow-x-hidden scroll-thin" : fit, className)}
-      >
+      <div ref={body} style={style} className={cn(scrolls ? "overflow-y-auto overflow-x-hidden scroll-thin" : fit, className)}>
         {children}
       </div>
-      <div
-        role="separator"
-        aria-orientation="horizontal"
-        aria-label="Resize this section"
-        tabIndex={0}
-        title="Drag to resize; double-click to fit the content"
+      <Edge
+        divider={!!ceiling}
         onPointerDown={drag}
         onDoubleClick={() => set(null)}
-        onKeyDown={(e) => {
-          if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
-          e.preventDefault();
-          const current = height ?? body.current?.offsetHeight ?? min;
-          set(current + (e.key === "ArrowDown" ? 24 : -24));
-        }}
-        className="group/edge -mx-1 mt-1 flex h-2 cursor-row-resize items-center justify-center focus-visible:outline-none"
-      >
-        <span className="h-1 w-8 rounded-full bg-border transition-colors group-hover/edge:w-full group-hover/edge:bg-accent group-focus-visible/edge:w-full group-focus-visible/edge:bg-accent" />
-      </div>
+        onStep={(delta) => set((height ?? body.current?.offsetHeight ?? min) + delta)}
+      />
     </>
+  );
+}
+
+/** The drag edge under a `Resizable`: a short grip, or a full-width divider between areas. */
+function Edge({ divider, onPointerDown, onDoubleClick, onStep }: {
+  divider: boolean;
+  onPointerDown: (e: ReactPointerEvent<HTMLDivElement>) => void;
+  onDoubleClick: () => void;
+  onStep: (delta: number) => void;
+}) {
+  return (
+    <div
+      role="separator"
+      aria-orientation="horizontal"
+      aria-label="Resize this section"
+      tabIndex={0}
+      title={divider ? "Drag to resize; double-click to reset" : "Drag to resize; double-click to fit the content"}
+      onPointerDown={onPointerDown}
+      onDoubleClick={onDoubleClick}
+      onKeyDown={(e) => {
+        if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+        e.preventDefault();
+        onStep(e.key === "ArrowDown" ? 24 : -24);
+      }}
+      className={cn(
+        "group/edge flex shrink-0 cursor-row-resize items-center justify-center focus-visible:outline-none",
+        divider ? "h-1.5 bg-border transition-colors hover:bg-accent focus-visible:bg-accent" : "-mx-1 mt-1 h-2",
+      )}
+    >
+      {divider ? (
+        <span className="h-0.5 w-10 rounded-full bg-faint/60 group-hover/edge:bg-panel" />
+      ) : (
+        <span className="h-1 w-8 rounded-full bg-border transition-colors group-hover/edge:w-full group-hover/edge:bg-accent group-focus-visible/edge:w-full group-focus-visible/edge:bg-accent" />
+      )}
+    </div>
   );
 }
 

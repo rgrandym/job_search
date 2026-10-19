@@ -388,7 +388,7 @@ export function ActivityPanel() {
           </span>
         )}
       </summary>
-      <Resizable id="activity" className="mt-2 space-y-3" fit="max-h-[calc(var(--vh)*50)] overflow-y-auto scroll-thin">
+      <Resizable id="activity" className="mt-2 space-y-3" fit="max-h-[calc(var(--vh)*35)] overflow-y-auto scroll-thin">
         <WaitingBanner />
         {steps ? <Stepper {...steps} walker={walker} /> : <p className="text-[11px] text-faint">No task yet. Searches, documents and assistant turns show here while they run.</p>}
         {shown.length > 0 && (mode === "lanes" ? <Lanes rows={shown} now={now} /> : <Cards rows={shown} now={now} />)}
