@@ -441,6 +441,45 @@ def test_company_ats_sources(settings: Settings) -> None:
         src.fetch(SearchQuery(exclude_boards=[c.key for c in companies]))
 
 
+def test_an_ashby_town_abroad_carries_its_country_and_fails_the_location_rule(
+    settings: Settings,
+) -> None:
+    from src.jobs.matcher import profile_from_query
+
+    boston = {"addressLocality": "Boston", "addressRegion": "Massachusetts"}
+    feed = {
+        "jobs": [
+            {  # Basecamp Research's posting as its feed gives it (2026-10-19)
+                "id": "t",
+                "title": "Senior Scientist, T Cell Immunology",
+                "location": "Boston",
+                "address": {"postalAddress": {**boston, "addressCountry": "United States"}},
+                "secondaryLocations": [],
+                "workplaceType": "OnSite",
+                "descriptionPlain": "T cells",
+            },
+            {  # also offered elsewhere: one location may be in reach, so it stays plain
+                "id": "m",
+                "title": "Scientist",
+                "location": "Boston",
+                "address": {"postalAddress": {**boston, "addressCountry": "United States"}},
+                "secondaryLocations": [{"location": "London"}],
+                "descriptionPlain": "Cells",
+            },
+        ]
+    }
+    http = _http(settings, {"/posting-api/job-board/bc": feed})
+    src = CompanyCareersSource([CompanyBoard(name="BC", ats="ashby", token="bc")], http, settings)
+    jobs = {j.id: j for j in src.fetch(SearchQuery())}
+
+    abroad, multi = jobs["ashby:bc:t"], jobs["ashby:bc:m"]
+    assert abroad.location == "Boston, Massachusetts, United States"
+    assert multi.location == "Boston"
+    oxford = profile_from_query(SearchQuery(locations=["Oxford"], country="United Kingdom"))
+    assert any("location mismatch" in r for r in scorer.hard_exclusions(oxford, abroad))
+    assert scorer.hard_exclusions(oxford, multi) == []
+
+
 JSONLD_PAGE = """<html><head><script type="application/ld+json">
 {"@context": "https://schema.org", "@type": "JobPosting", "title": "Platform Engineer",
  "hiringOrganization": {"@type": "Organization", "name": "Example Corp"},

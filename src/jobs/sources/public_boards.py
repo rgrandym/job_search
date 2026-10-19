@@ -47,6 +47,7 @@ from src.jobs.sources.base import (
     pause,
     posting_from_jsonld,
     slow_down_status,
+    transient,
 )
 from src.jobs.sources.job_boards import uk_only
 
@@ -54,6 +55,15 @@ LINKEDIN_SEARCH = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostin
 LINKEDIN_POSTING = "https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{id}"
 LINKEDIN_VIEW = "https://www.linkedin.com/jobs/view/{id}"
 TOTALJOBS = "https://www.totaljobs.com"
+# Totaljobs now and then stalls or drops a connection: retry a page once, skip a search that
+# still fails, and stop after this many in a row (the site is not answering for now).
+TOTALJOBS_RETRY_S = 3.0
+TOTALJOBS_FAILED_IN_ROW = 2
+# The radii its search form offers: any other value (25, 50, 80, checked 2026-10-19) hangs
+# until the timeout, so a wider search asks for the widest. Should a radius still fail, the
+# search is sent without one (the site's default, 10 miles) and the rest of that search follows.
+TOTALJOBS_RADII = (0, 5, 10, 20, 30)
+TOTALJOBS_DEFAULT_RADIUS = 10
 JOBS_AC_UK = "https://www.jobs.ac.uk"
 NHS_SEARCH = "https://www.jobs.nhs.uk/api/v1/search_xml"
 LINKEDIN_PAGE = 10  # cards per LinkedIn page
@@ -273,25 +283,68 @@ class TotaljobsSource:
         self.settings = settings or get_settings()
         self.http = http or HttpFetcher(self.settings)
         self._blocked = False
+        self._radius_ok = True
+        self.errors: dict[str, str] = {}
 
     def fetch(self, query: SearchQuery) -> list[JobPosting]:
+        """Every term in every place; a search that does not answer is skipped, not fatal."""
         uk_only("Totaljobs", query)
         self._blocked = False
+        self._radius_ok = True
+        self.errors = {}
         jobs: dict[str, JobPosting] = {}
         places: list[str | None] = [*query.locations] or [None]
-        for term in query.search_terms():
-            for place in places:
-                path = f"/jobs/{_slug(term)}" if term else "/jobs"
-                params: dict[str, Any] = {}
-                if place:
-                    path += f"/in-{_slug(place)}"
-                    if query.distance_miles is not None:
-                        params["radius"] = query.distance_miles
-                page = self.http.get(f"{TOTALJOBS}{path}", params=params, check_robots=True).text
-                for job in parse_totaljobs(page):
-                    job.within_search_area = bool(place)
-                    jobs.setdefault(job.id, job)
+        searches = [(term, place) for term in query.search_terms() for place in places]
+        failed: list[str] = []
+        answered = in_row = 0
+        for term, place in searches:
+            try:
+                page = self._page(term, place, query)
+            except SourceError as exc:
+                if not transient(exc):
+                    raise
+                failed.append(str(exc))
+                in_row += 1
+                if in_row >= TOTALJOBS_FAILED_IN_ROW:
+                    break
+                continue
+            answered, in_row = answered + 1, 0
+            for job in parse_totaljobs(page):
+                job.within_search_area = bool(place)
+                jobs.setdefault(job.id, job)
+        if failed and not answered:
+            raise SourceError(failed[-1])
+        if failed:
+            self.errors["search"] = (
+                f"{len(searches) - answered} of {len(searches)} searches skipped "
+                f"(Totaljobs did not answer): {failed[-1]}"
+            )
         return list(jobs.values())[: query.limit]
+
+    def _page(self, term: str, place: str | None, query: SearchQuery) -> str:
+        """One search's results page, tried again once after a timeout or server error: at
+        once without the radius when one was sent, else after a pause."""
+        path = f"/jobs/{_slug(term)}" if term else "/jobs"
+        params: dict[str, Any] = {}
+        if place:
+            path += f"/in-{_slug(place)}"
+            miles = query.distance_miles
+            if miles is not None and self._radius_ok:
+                params["radius"] = next((r for r in TOTALJOBS_RADII if r >= miles), 30)
+        try:
+            return self.http.get(f"{TOTALJOBS}{path}", params=params, check_robots=True).text
+        except SourceError as exc:
+            if not transient(exc):
+                raise
+            if params.pop("radius", None) is not None:
+                self._radius_ok = False
+                self.errors["radius"] = (
+                    f"Totaljobs failed on a {query.distance_miles:g}-mile radius, so it searched "
+                    f"its default {TOTALJOBS_DEFAULT_RADIUS} miles around each place"
+                )
+            else:
+                pause(TOTALJOBS_RETRY_S)
+        return self.http.get(f"{TOTALJOBS}{path}", params=params, check_robots=True).text
 
     def enrich(self, job: JobPosting) -> JobPosting:
         """Full text from the posting's JSON-LD; after one refusal, keep the snippets."""

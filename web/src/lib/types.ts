@@ -232,6 +232,10 @@ export interface JobPosting {
   posted_at: string | null;
   /** Last day to apply, when the source states one. Closed postings are excluded. */
   closes_at?: string | null;
+  /** The stated town against the search radius (place lookup); null: unchecked or not placeable. */
+  area_check?: "inside" | "outside" | "abroad" | null;
+  /** Miles from the nearest searched place to the stated town. */
+  distance_miles?: number | null;
   source: string;
 }
 

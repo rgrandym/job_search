@@ -432,7 +432,7 @@ class CompanyCareersSource(CareerSiteFeeds):
                     id=f"ashby:{c.token}:{j['id']}",
                     title=j.get("title", ""),
                     company=c.name,
-                    location=j.get("location"),
+                    location=_ashby_location(j),
                     work_arrangement=arrangement,
                     description=j.get("descriptionPlain")
                     or html_to_text(j.get("descriptionHtml", "")),
@@ -842,6 +842,22 @@ def _pick_location(locations: list[str], places: list[str]) -> str | None:
             if in_places(loc):
                 return loc
     return locations[0] if locations else None
+
+
+def _ashby_location(job: dict[str, Any]) -> str | None:
+    """Ashby's location with the region and country its address states ("Boston" ->
+    "Boston, Massachusetts, United States"), so a town abroad is not taken for one nearby.
+    A posting with secondary locations keeps its plain location: one of them may be in reach."""
+    location = str(job.get("location") or "").strip()
+    address = (job.get("address") or {}).get("postalAddress") or {}
+    country = str(address.get("addressCountry") or "").strip()
+    if not location or not country or job.get("secondaryLocations"):
+        return location or None
+    if country.lower() in location.lower():
+        return location
+    region = str(address.get("addressRegion") or "").strip()
+    extra = [region] if region and region.lower() not in location.lower() else []
+    return ", ".join([location, *extra, country])
 
 
 _TT = "https://teamtailor.com/locations"  # namespace of Teamtailor's RSS location fields

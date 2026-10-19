@@ -142,6 +142,38 @@
           "title": "Within Search Area",
           "type": "boolean"
         },
+        "area_check": {
+          "anyOf": [
+            {
+              "enum": [
+                "inside",
+                "outside",
+                "abroad"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The stated town against the search radius (place lookup); None: unchecked or not placeable (no town, a county, a lookup failure)",
+          "title": "Area Check"
+        },
+        "distance_miles": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Miles from the nearest searched place to the stated town",
+          "title": "Distance Miles"
+        },
         "url": {
           "anyOf": [
             {

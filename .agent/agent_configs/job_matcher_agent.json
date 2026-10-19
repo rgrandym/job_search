@@ -1,13 +1,13 @@
 {
   "$comment": "Runtime: src/jobs/screener.py (MATCHER_SYSTEM). Runs inside the search pipeline (services/search_service.run_search); not a chat agent.",
   "name": "job_matcher",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "description": "Semantic screening: judges each shortlisted posting against the profile summary (realistic role families only) and the career intent, and returns a verdict.",
   "model_role": "screening (first pass); quality (second opinions on every match and near the threshold)",
   "input": [
     "Saved ProfileSummary, or one built with the search quality model from the original CV document and its structured extract (capabilities, publication record, what sets the level, role families with CV or [src-N] document evidence; families code rejected are removed; the pitch, expansion routes and family positioning are presentation and are left out), with the preferences the user accepted from their labels (services.learning)",
     "career intent (optional)",
-    "candidate home location + search constraints and confirmed languages (a country-only search is nationwide, with no inferred commute limit; job-level exclusions only when the user sets a minimum or maximum)",
+    "candidate home location + search constraints and confirmed languages (a country-only search is nationwide, with no inferred commute limit; job-level exclusions only when the user sets a minimum or maximum); non-remote postings whose stated town code measured outside the radius or abroad never reach the matcher (scorer.hard_exclusions, places.check_area)",
     "posting digests (batch of 3, or 1 for a second opinion); long descriptions keep their requirements section (3000 chars)"
   ],
   "output": "JobAssessment {job_id, fit_summary, reasons, transferable, gaps, essential_unmet, unknowns, dealbreakers, alignment (against|neutral|aligned), alignment_note, ratings {function, domain, seniority, leadership, sector, practicality: level 0-4}} -> screener.finalize -> JobVerdict {+ dimensions (points: level/4 of weights 30/20/20/10/10/10), fit_score, band, priority, match, borderline, cap_reason, reviewed, from_memory}",

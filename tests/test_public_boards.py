@@ -14,6 +14,7 @@ from src.core.config import Settings
 from src.jobs import fetcher, scorer
 from src.jobs.matcher import profile_from_query
 from src.jobs.models import JobPosting, SearchQuery
+from src.jobs.sources import public_boards
 from src.jobs.sources.base import HttpFetcher, SourceError, posting_from_jsonld
 from src.jobs.sources.public_boards import (
     JobsAcUkSource,
@@ -217,6 +218,89 @@ def test_totaljobs_reads_the_embedded_result_list(settings: Settings) -> None:
     assert first.salary_max == 42000 and first.within_search_area
     assert first.url == "https://www.totaljobs.com/job/analytical-chemist/manpower-uk-job108066339"
     assert jobs[1].salary_range is None  # an hourly rate is not an annual salary
+
+
+def _stalling_totaljobs(stalls: dict[str, int], paths: list[str]) -> Any:
+    """A Totaljobs that times out `stalls[slug]` times on a search before answering."""
+    state = {"searchResults": {"items": [{"id": 7, "title": "Scientist", "url": "/job/x-job7"}]}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /jobs\n")
+        slug = request.url.path.split("/")[2]
+        paths.append(slug)
+        if stalls.get(slug, 0) > 0:
+            stalls[slug] -= 1
+            raise httpx.ReadTimeout("The read operation timed out", request=request)
+        return httpx.Response(200, text=TOTALJOBS_PAGE % json.dumps(state))
+
+    return handler
+
+
+def test_a_stalled_totaljobs_page_is_tried_again_once(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(public_boards, "TOTALJOBS_RETRY_S", 0.0)
+    paths: list[str] = []
+    handler = _stalling_totaljobs({"cell-therapy": 1}, paths)
+    source = TotaljobsSource(HttpFetcher(settings, _client(handler)), settings)
+
+    jobs = source.fetch(
+        SearchQuery(titles=["Cell Therapy"], locations=["Oxford"], distance_miles=None)
+    )
+
+    assert paths == ["cell-therapy", "cell-therapy"] and [j.id for j in jobs] == ["totaljobs:7"]
+    assert source.errors == {}
+
+
+def test_a_totaljobs_search_that_never_answers_is_skipped_not_fatal(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(public_boards, "TOTALJOBS_RETRY_S", 0.0)
+    paths: list[str] = []
+    handler = _stalling_totaljobs({"a": 9}, paths)
+    source = TotaljobsSource(HttpFetcher(settings, _client(handler)), settings)
+
+    jobs = source.fetch(SearchQuery(titles=["A", "B"], locations=["Oxford"], distance_miles=None))
+
+    assert paths == ["a", "a", "b"] and [j.id for j in jobs] == ["totaljobs:7"]
+    assert "1 of 2 searches skipped" in source.errors["search"]
+
+
+def test_totaljobs_stops_after_two_searches_in_a_row_fail(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(public_boards, "TOTALJOBS_RETRY_S", 0.0)
+    paths: list[str] = []
+    handler = _stalling_totaljobs({"a": 9, "b": 9, "c": 9}, paths)
+    source = TotaljobsSource(HttpFetcher(settings, _client(handler)), settings)
+
+    with pytest.raises(SourceError, match="timed out"):
+        source.fetch(SearchQuery(titles=["A", "B", "C"], locations=["Oxford"], distance_miles=None))
+    assert paths == ["a", "a", "b", "b"]  # the third search is not tried
+
+
+def test_a_totaljobs_radius_it_cannot_serve_falls_back_to_its_default(
+    settings: Settings,
+) -> None:
+    sent: list[str] = []
+    state = {"searchResults": {"items": [{"id": 7, "title": "Scientist", "url": "/job/x-job7"}]}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /jobs\n")
+        sent.append(f"{request.url.path.split('/')[2]}?{request.url.query.decode()}")
+        if "radius" in request.url.params:  # a radius the site still fails on
+            raise httpx.ReadTimeout("The read operation timed out", request=request)
+        return httpx.Response(200, text=TOTALJOBS_PAGE % json.dumps(state))
+
+    source = TotaljobsSource(HttpFetcher(settings, _client(handler)), settings)
+    jobs = source.fetch(SearchQuery(titles=["A", "B"], locations=["Oxford"], distance_miles=80))
+
+    # 80 miles is sent as the form's widest (30); after it fails, no radius for the rest
+    assert sent == ["a?radius=30", "a?", "b?"] and [j.id for j in jobs] == ["totaljobs:7"]
+    assert "default 10 miles" in source.errors["radius"] and "search" not in source.errors
+    assert jobs[0].within_search_area
 
 
 def test_annual_salary_drops_rates_and_placeholders() -> None:

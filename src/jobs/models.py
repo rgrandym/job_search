@@ -143,6 +143,14 @@ class JobPosting(_Strict):
     within_search_area: bool = Field(
         False, description="Source applied the location/distance filter server-side"
     )
+    area_check: Literal["inside", "outside", "abroad"] | None = Field(
+        None,
+        description="The stated town against the search radius (place lookup); None: unchecked "
+        "or not placeable (no town, a county, a lookup failure)",
+    )
+    distance_miles: float | None = Field(
+        None, ge=0, description="Miles from the nearest searched place to the stated town"
+    )
     url: str | None = None
     apply_url: str | None = Field(
         None, description="The employer's own application link, when the source names one"

@@ -89,6 +89,15 @@ def _no_company_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_place_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Searches would ask postcodes.io where each stated town is; `tests/test_places.py`
+    tests the lookup with a mocked API."""
+    from src.jobs.places import PlaceLookup
+
+    monkeypatch.setattr(PlaceLookup, "find", lambda self, name: None)
+
+
+@pytest.fixture(autouse=True)
 def _title_only_postings_are_readable(monkeypatch: pytest.MonkeyPatch) -> None:
     """Most fixtures are title-only postings that test other behaviour; the rule that a
     posting without readable requirements is never a match is tested with `CHECKABLE_CHARS`

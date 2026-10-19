@@ -49,6 +49,15 @@ def pause(seconds: float) -> None:
     _check_stopped()
 
 
+def transient(exc: Exception) -> bool:
+    """A failed request worth one more try: a timeout, a dropped connection or a server
+    error. A refusal, a missing page or a stopped search is not."""
+    cause = exc.__cause__
+    if isinstance(cause, httpx.HTTPStatusError):
+        return cause.response.status_code >= 500
+    return isinstance(cause, httpx.TransportError)
+
+
 def slow_down_status(exc: Exception) -> tuple[int, float | None] | None:
     """(status, Retry-After seconds) when a failed request was the site asking us to slow
     down (429, or LinkedIn's 999); None for any other failure."""

@@ -108,7 +108,7 @@ def _loc_tokens(part: str) -> set[str]:
 def location_match(candidate_locations: list[str], job: JobPosting) -> float:
     """1.0 same town or county / source-verified radius · 0.4 same country · 0.7 unknown ·
     0.3 unplaced town (distance unverified) · 0 a different, known country."""
-    if job.within_search_area:
+    if job.within_search_area or job.area_check == "inside":
         return LOC_SAME_CITY
     if not job.location or not candidate_locations:
         return LOC_UNKNOWN
@@ -160,13 +160,16 @@ def hard_exclusions(
     if profile.work_arrangements and job.work_arrangement not in profile.work_arrangements:
         reasons.append(f"work arrangement '{job.work_arrangement}' not accepted")
 
-    if (
-        job.work_arrangement != "remote"
-        and profile.locations
-        and not profile.willing_to_relocate
-        and location_match(profile.locations, job) == 0.0
-    ):
-        reasons.append(f"location mismatch: {job.location} (no relocation)")
+    if job.work_arrangement != "remote" and not profile.willing_to_relocate:
+        if profile.locations and location_match(profile.locations, job) == 0.0:
+            reasons.append(f"location mismatch: {job.location} (no relocation)")
+        elif job.area_check == "outside":  # `places.check_area`: the stated town, measured
+            reasons.append(
+                f"outside the search radius: {job.location} is about "
+                f"{job.distance_miles or 0:.0f} miles away (no relocation)"
+            )
+        elif job.area_check == "abroad":
+            reasons.append(f"location mismatch: {job.location} is not a UK place (no relocation)")
 
     if profile.salary_min and job.salary_max and job.salary_max < profile.salary_min:
         reasons.append(

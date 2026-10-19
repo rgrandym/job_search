@@ -40,6 +40,8 @@ from src.jobs.models import (
     SearchIntent,
     SearchQuery,
 )
+from src.jobs.places import FILE as PLACES_FILE
+from src.jobs.places import LOOKUP_DELAY_S, PlaceLookup, check_area
 from src.jobs.profile_memory import (
     ProfileMemory,
     ProfileRecord,
@@ -54,7 +56,7 @@ from src.jobs.profile_memory import (
     summarize_profile,
 )
 from src.jobs.screener import VerdictCache, apply_verdicts, screen_jobs
-from src.jobs.sources.base import SourceError
+from src.jobs.sources.base import HttpFetcher, SourceError
 from src.jobs.sources.browser import BrowserFetcher
 from src.jobs.sources.companies import EmployerFeedReader
 from src.jobs.sources.gmail_alerts import GmailAlertSource, GmailAuth
@@ -923,6 +925,22 @@ def _attribute(report: MatchReport, widen: bool) -> dict[str, str]:
 _RULES = "location, arrangement, salary, certifications, languages, optional job-level range"
 
 
+async def _check_area(
+    ws: Workspace, jobs: list[JobPosting], query: SearchQuery, emit: Emit
+) -> list[JobPosting]:
+    """Measure each non-remote posting's stated town against the radius (`places`)."""
+    http = HttpFetcher(ws.settings, delay_s=LOOKUP_DELAY_S)
+    lookup = PlaceLookup(http, ws.settings.data_dir / PLACES_FILE)
+    checked = await asyncio.to_thread(check_area, jobs, query, lookup)
+    outside = sum(j.area_check == "outside" for j in checked)
+    abroad = sum(j.area_check == "abroad" for j in checked)
+    if outside or abroad:
+        radius = f"{query.distance_miles:g}-mile radius"
+        line = f"Location check: {outside} posting(s) outside the {radius}, {abroad} abroad"
+        await _say(emit, "prefilter", f"{line} (not remote)")
+    return checked
+
+
 def _note_limits(ws: Workspace, outcome: SearchOutcome) -> None:
     """Record tasks the other plan took over, and a spent plan that left jobs unjudged."""
     outcome.handovers = connections.handovers(ws)
@@ -949,6 +967,7 @@ async def _match(
     """Pre-filter, enrich the shortlist, then screen it with the job_matcher."""
     req, cv, query = ctx.req, ctx.cv, ctx.query
     settings = ws.settings
+    jobs = await _check_area(ws, jobs, query, emit)
     threshold = settings.score_threshold if req.threshold is None else req.threshold
     matcher = JobMatcher(settings=settings)
     first = 0 if req.smart else threshold
