@@ -284,15 +284,17 @@ export function Modal({
     if (e.button !== 0 || !box.current) return;
     e.preventDefault();
     e.stopPropagation();
-    const rect = box.current.getBoundingClientRect();
+    const el = box.current;
+    const scale = screenScale(el);
+    const start = { w: el.offsetWidth, h: el.offsetHeight };
     const [x0, y0] = [e.clientX, e.clientY];
     const sx = edge.includes("e") ? 2 : edge.includes("w") ? -2 : 0;
     const sy = edge.includes("s") ? 2 : edge.includes("n") ? -2 : 0;
-    let last = { w: rect.width, h: rect.height };
+    let last = start;
     const move = (ev: PointerEvent) => {
       last = {
-        w: Math.min(window.innerWidth - 16, Math.max(MIN_W, rect.width + sx * (ev.clientX - x0))),
-        h: Math.min(window.innerHeight - 16, Math.max(MIN_H, rect.height + sy * (ev.clientY - y0))),
+        w: Math.min(window.innerWidth / scale - 16, Math.max(MIN_W, start.w + (sx * (ev.clientX - x0)) / scale)),
+        h: Math.min(window.innerHeight / scale - 16, Math.max(MIN_H, start.h + (sy * (ev.clientY - y0)) / scale)),
       };
       setSize(last);
     };
@@ -330,7 +332,7 @@ export function Modal({
       <div
         role="dialog"
         aria-label={title}
-        className="card fixed bottom-3 right-3 z-50 flex w-72 max-w-[calc(100vw-1.5rem)] items-center justify-between gap-3 px-3 py-2 shadow-2xl"
+        className="card fixed bottom-3 right-3 z-50 flex w-72 max-w-[calc(var(--vw)*100_-_1.5rem)] items-center justify-between gap-3 px-3 py-2 shadow-2xl"
         onDoubleClick={() => setMinimised(false)}
       >
         <h2 className="truncate text-[13px] font-semibold">{title}</h2>
@@ -341,7 +343,7 @@ export function Modal({
   }
   const header = (
     <div
-      className={cn("flex items-center justify-between gap-3 bg-panel", isDocument ? "border-b border-border px-4 py-2.5" : "sticky top-0 z-10 mb-4 pb-2")}
+      className={cn("flex items-center justify-between gap-3 bg-panel", isDocument ? "border-b border-border px-4 py-2.5" : "sticky -top-5 z-10 -mx-5 -mt-5 mb-4 px-5 pb-2 pt-5")}
       onDoubleClick={(e) => e.target === e.currentTarget && setMinimised(true)}
     >
       <h2 className="truncate text-[15px] font-semibold" onDoubleClick={() => setMinimised(true)}>{title}</h2>
@@ -354,13 +356,13 @@ export function Modal({
         ref={box}
         role="dialog"
         aria-label={title}
-        style={size ? { width: size.w, height: size.h, maxWidth: "calc(100vw - 1rem)", maxHeight: "calc(100vh - 1rem)" } : undefined}
+        style={size ? { width: size.w, height: size.h, maxWidth: "calc(var(--vw) * 100 - 1rem)", maxHeight: "calc(var(--vh) * 100 - 1rem)" } : undefined}
         className={cn(
           "relative flex flex-col",
-          isDocument && !size && "h-[96vh] w-[min(1180px,100%)]",
+          isDocument && !size && "h-[calc(var(--vh)*96)] w-[min(1180px,100%)]",
           !isDocument && !size && (resizable
-            ? "h-[70vh] w-[92vw] max-w-[calc(100vw-2rem)]"
-            : cn("max-h-[85vh] w-full", wide ? "max-w-2xl" : "max-w-md")),
+            ? "h-[calc(var(--vh)*70)] w-[calc(var(--vw)*92)] max-w-[calc(var(--vw)*100_-_2rem)]"
+            : cn("max-h-[calc(var(--vh)*85)] w-full", wide ? "max-w-2xl" : "max-w-md")),
         )}
         onMouseDown={(e) => e.stopPropagation()}
       >
@@ -393,6 +395,13 @@ export function Modal({
     </div>,
     document.body,
   );
+}
+
+/** Screen pixels per CSS pixel of `el`: the app's CSS zoom in a browser tab, 1 in the Dock app
+ *  (native zoom). Pointer positions are in screen pixels, sizes set in CSS pixels. */
+function screenScale(el: HTMLElement): number {
+  const ratio = el.getBoundingClientRect().width / (el.offsetWidth || 1);
+  return ratio > 0 ? ratio : 1;
 }
 
 const HEIGHT_KEY = "jobsearch.height.";
@@ -437,10 +446,11 @@ export function Resizable({ id, children, className, fit, min = 48 }: {
     if (e.button !== 0 || !body.current) return;
     e.preventDefault();
     const startY = e.clientY;
-    const startHeight = body.current.getBoundingClientRect().height;
+    const scale = screenScale(body.current);
+    const startHeight = body.current.offsetHeight;
     let last = startHeight;
     const move = (ev: PointerEvent) => {
-      last = Math.max(min, startHeight + ev.clientY - startY);
+      last = Math.max(min, startHeight + (ev.clientY - startY) / scale);
       setHeight(last);
     };
     const up = () => {
@@ -473,7 +483,7 @@ export function Resizable({ id, children, className, fit, min = 48 }: {
         onKeyDown={(e) => {
           if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
           e.preventDefault();
-          const current = height ?? body.current?.getBoundingClientRect().height ?? min;
+          const current = height ?? body.current?.offsetHeight ?? min;
           set(current + (e.key === "ArrowDown" ? 24 : -24));
         }}
         className="group/edge -mx-1 mt-1 flex h-2 cursor-row-resize items-center justify-center focus-visible:outline-none"

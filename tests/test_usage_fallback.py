@@ -165,7 +165,7 @@ def test_claude_windows_are_read_from_usage_and_again_after_a_call(
 
     reads: list[int] = []
 
-    def text() -> str:
+    def text(config_dir: str | None = None) -> str:
         reads.append(1)
         return f"Current session: {10 * len(reads)}% used · resets 11:59pm (UTC)"
 
@@ -173,8 +173,8 @@ def test_claude_windows_are_read_from_usage_and_again_after_a_call(
     first = usage.plan_windows("claude_code")
     assert first is not None and first.windows[0].used_percent == 10.0
     assert usage.plan_windows("claude_code").windows[0].used_percent == 10.0  # type: ignore[union-attr]
-    usage.record_spend("claude_code", "opus", 10, 1)
-    usage._claude_cli["at"] -= usage.CODEX_STALE_S
+    usage.record_account_tokens("default", 10, 1)
+    usage._claude_cli["default"]["at"] -= usage.CODEX_STALE_S
     assert usage.plan_windows("claude_code").windows[0].used_percent == 20.0  # type: ignore[union-attr]
     assert len(reads) == 2
 
@@ -191,7 +191,7 @@ def test_plan_windows_count_this_apps_tokens_inside_each_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = time.time()
-    usage.record_spend("claude_code", "opus", 1000, 100)
+    usage.record_account_tokens("default", 1000, 100)
     usage.record_spend("anthropic", "opus", 999, 999)  # billed per token: not a plan window
     resets = now + 3600
     usage.record_claude_limit(
@@ -201,7 +201,7 @@ def test_plan_windows_count_this_apps_tokens_inside_each_window(
         {"rateLimitType": "seven_day", "status": "allowed", "resetsAt": now + 86400}
     )
     with usage._lock:  # an older call: inside the 7-day window, before this 5-hour one
-        usage._recent["claude_code"].insert(0, [now - 6 * 3600, 5000, 0])
+        usage._recent["claude_code@default"].insert(0, [now - 6 * 3600, 5000, 0])
     windows = {w.name: w.tokens for w in usage.plan_windows("claude_code").windows}  # type: ignore[union-attr]
     assert windows == {"5h": 1100, "7d": 6100}
     assert usage.window_tokens("claude_code", usage.UsageWindow(name="other")) is None

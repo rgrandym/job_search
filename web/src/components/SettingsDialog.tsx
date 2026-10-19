@@ -1,14 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Loader2 } from "lucide-react";
+import { KeyRound, Loader2, LogIn, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
-import type { Effort, LLMView, ModelInfo, Provider } from "../lib/types";
+import type { Effort, LLMView, ModelInfo, Provider, SignInStart } from "../lib/types";
+import { ClaudeAccounts } from "./ClaudeAccounts";
+import { SignInHelp } from "./SignInHelp";
 import { Field, Modal } from "./ui";
 
+// In the order Settings lists them: the plans first (signed in through their CLIs), then keys.
 const PROVIDERS: { value: Provider; label: string; hint: string }[] = [
-  { value: "anthropic", label: "Claude", hint: "Anthropic API key (or ANTHROPIC_API_KEY in .env)" },
-  { value: "claude_code", label: "Claude Code (Pro/Max)", hint: "Uses your Claude plan through the local Claude Code CLI" },
-  { value: "codex", label: "Codex (ChatGPT)", hint: "Uses your ChatGPT plan through the local Codex CLI" },
+  { value: "claude_code", label: "Claude Code (Pro/Max)", hint: "Your Claude plan through the local Claude Code CLI; several accounts are used in turn" },
+  { value: "codex", label: "Codex (ChatGPT)", hint: "Your ChatGPT plan through the local Codex CLI" },
+  { value: "anthropic", label: "Claude API", hint: "Anthropic API key (or ANTHROPIC_API_KEY in .env), billed per token" },
   { value: "openai", label: "OpenAI API", hint: "OpenAI API key; billed separately from ChatGPT" },
   { value: "openrouter", label: "OpenRouter", hint: "One key for open-source models (Llama, Qwen, DeepSeek…)" },
 ];
@@ -138,6 +141,7 @@ const isCliProvider = (p: Provider) => p === "codex" || p === "claude_code";
 const hasEffort = (p: Provider) => p === "anthropic" || isCliProvider(p);
 const planName = (p: Provider) => (p === "codex" ? "ChatGPT" : "Claude");
 const providerLabel = (p: Provider) => PROVIDERS.find((item) => item.value === p)?.label ?? p;
+type Readiness = Partial<Record<Provider, { ready: boolean; key_saved: boolean }>>;
 
 function useModels(provider: Provider, open: boolean) {
   return useQuery({
@@ -149,71 +153,123 @@ function useModels(provider: Provider, open: boolean) {
   });
 }
 
-function useCliStatus(provider: Provider, enabled: boolean) {
-  return useQuery({
-    queryKey: ["cli-status", provider],
-    queryFn: provider === "codex" ? api.codexStatus : api.claudeCodeStatus,
-    enabled: enabled && isCliProvider(provider),
-    refetchInterval: 2_000,
-  });
+function useProviders(open: boolean) {
+  return useQuery({ queryKey: ["llm-providers"], queryFn: api.llmProviders, enabled: open, refetchInterval: 3_000 });
 }
 
-/** Sign-in for a CLI provider, or the API key field for an API provider. */
-function ProviderAccess({
-  provider,
-  open,
-  apiKey,
-  onKey,
-  keySaved,
-  label = "API key",
-}: {
-  provider: Provider;
-  open: boolean;
-  apiKey: string;
-  onKey: (key: string) => void;
-  keySaved: boolean;
-  label?: string;
-}) {
-  const cli = useCliStatus(provider, open);
-  const login = useMutation({
-    mutationFn: () => (provider === "codex" ? api.loginCodex() : api.loginClaudeCode()),
-    onSuccess: () => cli.refetch(),
-  });
-  const plan = planName(provider);
-  if (!isCliProvider(provider)) {
-    return (
-      <Field label={label} hint={PROVIDERS.find((p) => p.value === provider)?.hint}>
+/** Provider names in a picker: the ones not connected yet say so. */
+function ProviderOptions({ ready, exclude }: { ready: Readiness; exclude?: Provider }) {
+  return (
+    <>
+      {PROVIDERS.filter((p) => p.value !== exclude).map((p) => (
+        <option key={p.value} value={p.value}>
+          {p.label}
+          {ready[p.value]?.ready === false ? " (not connected)" : ""}
+        </option>
+      ))}
+    </>
+  );
+}
+
+function Dot({ ok }: { ok: boolean | undefined }) {
+  return <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${ok ? "bg-good" : ok === false ? "bg-bad" : "bg-border"}`} />;
+}
+
+/** Codex: one ChatGPT sign-in through the Codex CLI. */
+function CodexCard({ open, ready }: { open: boolean; ready: boolean | undefined }) {
+  const status = useQuery({ queryKey: ["cli-status", "codex"], queryFn: api.codexStatus, enabled: open, refetchInterval: 3_000 });
+  const [start, setStart] = useState<SignInStart | null>(null);
+  const login = useMutation({ mutationFn: api.loginCodex, onSuccess: setStart });
+  const signedIn = !!status.data?.logged_in;
+  useEffect(() => {
+    if (signedIn) setStart(null); // approved: the prompt has done its job
+  }, [signedIn]);
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-2 text-[12px]">
+        {status.isPending && <span className="text-muted">Checking the ChatGPT sign-in…</span>}
+        {status.data && <span className={signedIn ? "text-good" : "text-muted"}>{signedIn ? "Signed in with ChatGPT." : status.data.message || "Not signed in."}</span>}
+        {status.isError && <span className="text-bad">{(status.error as Error).message}</span>}
+        {(status.data?.installed ?? true) && (
+          <button type="button" className="btn-ghost ml-auto px-2 py-1 text-[12px]" disabled={login.isPending} onClick={() => login.mutate()}>
+            {login.isPending ? <Loader2 size={12} className="animate-spin" /> : <LogIn size={12} />} {signedIn ? "Sign in again" : "Sign in"}
+          </button>
+        )}
+      </div>
+      {start && !signedIn && <SignInHelp start={start} plan="ChatGPT" />}
+      {login.isError && <p className="text-[11px] text-bad">{(login.error as Error).message}</p>}
+      {ready === false && signedIn && <p className="text-[11px] text-faint">Checking the new sign-in…</p>}
+    </div>
+  );
+}
+
+/** An API provider: its key, saved locally, with save and remove. */
+function KeyCard({ provider, keySaved, ready }: { provider: Provider; keySaved: boolean; ready: boolean | undefined }) {
+  const qc = useQueryClient();
+  const [key, setKey] = useState("");
+  const [note, setNote] = useState("");
+  const done = (text: string) => {
+    setKey("");
+    setNote(text);
+    void qc.invalidateQueries({ queryKey: ["llm-providers"] });
+    void qc.invalidateQueries({ queryKey: ["models", provider] });
+    void qc.invalidateQueries({ queryKey: ["state"] });
+  };
+  const save = useMutation({ mutationFn: () => api.saveApiKey(provider, key.trim()), onSuccess: () => done("Key saved.") });
+  const remove = useMutation({ mutationFn: () => api.removeApiKey(provider), onSuccess: () => done("Key removed.") });
+  const status = keySaved ? "Key saved in the app." : ready ? "Using the key from .env or your sign-in." : "No key yet.";
+  return (
+    <div className="space-y-1.5">
+      <p className={`text-[12px] ${ready ? "text-good" : "text-muted"}`}>{status}</p>
+      <div className="flex gap-1">
         <input
           className="input"
           type="password"
           autoComplete="off"
-          placeholder={keySaved ? "•••••••• saved (leave blank to keep)" : "Paste key"}
-          value={apiKey}
-          onChange={(e) => onKey(e.target.value)}
+          placeholder={keySaved ? "Paste a new key to replace it" : "Paste key"}
+          value={key}
+          onChange={(e) => setKey(e.target.value)}
         />
-      </Field>
-    );
-  }
-  return (
-    <div className="rounded-md border border-border bg-surface p-3 text-[12px]">
-      {cli.isPending && <span className="text-muted">Checking {plan} sign-in…</span>}
-      {cli.data?.logged_in && (
-        <span className="text-good">
-          {provider === "codex" ? "Connected to ChatGPT." : cli.data.message} Usage comes from your {plan} plan.
-        </span>
-      )}
-      {cli.data && !cli.data.logged_in && (
-        <div className="space-y-2">
-          <p className="text-muted">{cli.data.message || `Sign in with ${plan}.`}</p>
-          {cli.data.installed && (
-            <button type="button" className="btn-primary" disabled={login.isPending} onClick={() => login.mutate()}>
-              {login.isPending && <Loader2 size={14} className="animate-spin" />} Continue with {plan}
-            </button>
-          )}
-        </div>
-      )}
-      {(cli.isError || login.isError) && <p className="text-bad">{((cli.error || login.error) as Error).message}</p>}
+        <button type="button" className="btn-primary" disabled={!key.trim() || save.isPending} onClick={() => save.mutate()}>
+          {save.isPending ? <Loader2 size={13} className="animate-spin" /> : <KeyRound size={13} />} Save
+        </button>
+        <button type="button" className="btn-ghost text-bad" disabled={!keySaved || remove.isPending} onClick={() => remove.mutate()} title="Remove the key saved in the app">
+          <Trash2 size={13} />
+        </button>
+      </div>
+      {note && <p className="text-[11px] text-good">{note}</p>}
+      {(save.error || remove.error) && <p className="text-[11px] text-bad">{((save.error || remove.error) as Error).message}</p>}
     </div>
+  );
+}
+
+/** Top of Settings: every provider, connected or not, and its accounts or key. */
+function ProvidersSection({ open, ready }: { open: boolean; ready: Readiness }) {
+  return (
+    <section className="space-y-2">
+      <div>
+        <p className="label">Providers and accounts</p>
+        <p className="text-[11px] text-faint">
+          Connect the providers you want to use. When a plan account runs out or its session expires, work moves to the next Claude account, then
+          to the other plan.
+        </p>
+      </div>
+      {PROVIDERS.map((p) => (
+        <details key={p.value} className="rounded-md border border-border p-2" open={p.value === "claude_code" || undefined}>
+          <summary className="flex cursor-pointer list-none items-center gap-2 text-[12px]">
+            <Dot ok={ready[p.value]?.ready} />
+            <span className="font-medium text-fg">{p.label}</span>
+            <span className="ml-auto truncate text-[11px] text-faint">{ready[p.value]?.ready ? "connected" : "not connected"}</span>
+          </summary>
+          <div className="mt-2 space-y-1">
+            <p className="text-[11px] text-faint">{p.hint}</p>
+            {p.value === "claude_code" && <ClaudeAccounts open={open} />}
+            {p.value === "codex" && <CodexCard open={open} ready={ready.codex?.ready} />}
+            {!isCliProvider(p.value) && <KeyCard provider={p.value} keySaved={!!ready[p.value]?.key_saved} ready={ready[p.value]?.ready} />}
+          </div>
+        </details>
+      ))}
+    </section>
   );
 }
 
@@ -293,13 +349,10 @@ function ModelPicker({
 /** A task with its own model, optionally on another provider (profile, CV, letter). */
 function OwnModelSection({
   role,
-  open,
   provider,
   own,
   onOwn,
-  apiKey,
-  onKey,
-  keySaved,
+  ready,
   effort,
   qualityEffort,
   onEffort,
@@ -307,13 +360,10 @@ function OwnModelSection({
   models,
 }: {
   role: OwnRole;
-  open: boolean;
   provider: Provider;
   own: ProfileDraft;
   onOwn: (own: ProfileDraft) => void;
-  apiKey: string;
-  onKey: (key: string) => void;
-  keySaved: boolean;
+  ready: Readiness;
   effort: Effort;
   qualityEffort: Effort;
   onEffort: (effort: Effort) => void;
@@ -323,38 +373,28 @@ function OwnModelSection({
 }) {
   const ownProvider: Provider = own.provider || provider;
   const separate = ownProvider !== provider;
-  const name = { profile: "Profile", cv: "CV writing", letter: "Cover letter" }[role];
+  const name = { profile: "Profile", cv: "CV writing", letter: "Cover letters" }[role];
   return (
     <div className="space-y-2 rounded-md border border-border p-3">
-      <Field label={`${name} provider`} hint={ROLE_HINT[role]}>
-        <select
-          className="input"
-          value={own.provider}
-          onChange={(e) => {
-            const value = e.target.value as Provider | "";
-            onOwn({ provider: value === provider ? "" : value, model: "" });
-          }}
-        >
-          <option value="">Same as above ({providerLabel(provider)})</option>
-          {PROVIDERS.filter((p) => p.value !== provider).map((p) => (
-            <option key={p.value} value={p.value}>
-              {p.label}
-            </option>
-          ))}
-        </select>
-      </Field>
-      {separate && (
-        <ProviderAccess
-          provider={ownProvider}
-          open={open}
-          apiKey={apiKey}
-          onKey={onKey}
-          keySaved={keySaved}
-          label={`${providerLabel(ownProvider)} API key`}
-        />
-      )}
-      <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_110px]">
-        <Field label={ROLE_LABEL[role]}>
+      <div>
+        <p className="text-[12px] font-medium text-fg">{name}</p>
+        <p className="text-[11px] text-faint">{ROLE_HINT[role]}</p>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_110px]">
+        <Field label="Provider">
+          <select
+            className="input"
+            value={own.provider}
+            onChange={(e) => {
+              const value = e.target.value as Provider | "";
+              onOwn({ provider: value === provider ? "" : value, model: "" });
+            }}
+          >
+            <option value="">Same as search ({providerLabel(provider)})</option>
+            <ProviderOptions ready={ready} exclude={provider} />
+          </select>
+        </Field>
+        <Field label="Model">
           <ModelPicker
             value={own.model}
             onChange={(model) => onOwn({ ...own, model })}
@@ -373,9 +413,10 @@ function OwnModelSection({
           />
         )}
       </div>
-      {separate && !own.model && (
-        <p className="text-[11px] text-faint">Choose a model, or this stays with the {fallback.split(" (")[0]}.</p>
+      {separate && ready[ownProvider]?.ready === false && (
+        <p className="text-[11px] text-warn">{providerLabel(ownProvider)} is not connected yet: connect it above.</p>
       )}
+      {separate && !own.model && <p className="text-[11px] text-faint">Choose a model, or this stays with the {fallback.split(" (")[0]}.</p>}
     </div>
   );
 }
@@ -386,8 +427,6 @@ export function SettingsDialog({ open, onClose, llm }: { open: boolean; onClose:
   const [drafts, setDrafts] = useState<Partial<Record<Provider, ModelDraft>>>({});
   const [efforts, setEfforts] = useState<Efforts>(DEFAULT_EFFORTS);
   const [owns, setOwns] = useState<Record<OwnRole, ProfileDraft>>(NO_OWN);
-  const [key, setKey] = useState("");
-  const [ownKeys, setOwnKeys] = useState<Record<OwnRole, string>>({ profile: "", cv: "", letter: "" });
 
   const draft = drafts[provider] ?? emptyDraft(provider);
   const setDraft = (update: Partial<ModelDraft>) =>
@@ -402,17 +441,16 @@ export function SettingsDialog({ open, onClose, llm }: { open: boolean; onClose:
     setDrafts({ [llm.provider]: draftOf(llm) });
     setEfforts(effortsOf(llm));
     setOwns(ownsOf(llm));
-    setKey("");
-    setOwnKeys({ profile: "", cv: "", letter: "" });
   }, [open, llm]);
 
+  const providers = useProviders(open);
+  const ready: Readiness = providers.data ?? {};
   const models = useModels(provider, open);
   const ownModels: Record<OwnRole, ReturnType<typeof useModels>> = {
     profile: useModels(ownProvider("profile"), open),
     cv: useModels(ownProvider("cv"), open),
     letter: useModels(ownProvider("letter"), open),
   };
-  const cli = useCliStatus(provider, open);
 
   useEffect(() => {
     const available = models.data ?? [];
@@ -448,13 +486,10 @@ export function SettingsDialog({ open, onClose, llm }: { open: boolean; onClose:
         letter_model: owns.letter.model,
         letter_effort: efforts.letter,
         letter_provider: separate("letter") && owns.letter.model ? ownProvider("letter") : null,
-        api_key: key || undefined,
-        profile_api_key: separate("profile") ? ownKeys.profile || undefined : undefined,
-        cv_api_key: separate("cv") ? ownKeys.cv || undefined : undefined,
-        letter_api_key: separate("letter") ? ownKeys.letter || undefined : undefined,
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["state"] });
+      qc.invalidateQueries({ queryKey: ["connections"] });
       onClose();
     },
   });
@@ -475,10 +510,7 @@ export function SettingsDialog({ open, onClose, llm }: { open: boolean; onClose:
     });
   };
 
-  const keySaved = llm?.provider === provider && llm.key_set;
   const isOwn = (role: Role): role is OwnRole => (OWN_ROLES as Role[]).includes(role);
-  const keySavedFor = (role: OwnRole) =>
-    !!llm && llm[OWN_FIELDS[role].provider] === ownProvider(role) && llm[OWN_FIELDS[role].ready];
   const modelsFor = (role: Role) => (isOwn(role) ? ownModels[role] : models);
   const recommendationFor = (role: Role) => RECOMMENDATIONS[isOwn(role) ? ownProvider(role) : provider];
   const recommendation = RECOMMENDATIONS[provider];
@@ -489,96 +521,92 @@ export function SettingsDialog({ open, onClose, llm }: { open: boolean; onClose:
     role === "letter" && owns.cv.model
       ? `CV writing model (${owns.cv.model})`
       : `quality model (${draft.quality || "not set"})`;
+  const searchReady = ready[provider]?.ready;
 
   return (
-    <Modal open={open} onClose={onClose} title="LLM settings">
-      <div className="space-y-4">
-        <div className="grid grid-cols-2 gap-1">
-          {PROVIDERS.map((p) => (
-            <button
-              type="button"
-              key={p.value}
-              onClick={() => switchProvider(p.value)}
-              className={`rounded-md border px-2 py-2 text-[12px] ${
-                provider === p.value ? "border-accent bg-accent-bg text-fg" : "border-border text-muted"
-              }`}
-            >
-              {p.label}
-            </button>
-          ))}
-        </div>
-        <ProviderAccess provider={provider} open={open} apiKey={key} onKey={setKey} keySaved={keySaved} />
-        {OWN_ROLES.map((role) => (
-          <OwnModelSection
-            key={role}
-            role={role}
-            open={open}
-            provider={provider}
-            own={owns[role]}
-            onOwn={(own) => setOwn(role, own)}
-            apiKey={ownKeys[role]}
-            onKey={(value) => setOwnKeys((current) => ({ ...current, [role]: value }))}
-            keySaved={keySavedFor(role)}
-            effort={efforts[role]}
-            qualityEffort={efforts.quality}
-            onEffort={(effort) => setEfforts({ ...efforts, [role]: effort })}
-            fallback={fallbackFor(role)}
-            models={ownModels[role]}
-          />
-        ))}
-        {(["quality", "screening"] as const).map((role) => (
-          <div key={role} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_110px]">
-            <Field label={ROLE_LABEL[role]} hint={ROLE_HINT[role]}>
-              <ModelPicker
-                value={draft[role]}
-                onChange={(model) => setDraft({ [role]: model })}
-                models={models.data ?? []}
-                loading={models.isPending}
-                unavailable={models.isError}
-              />
+    <Modal open={open} onClose={onClose} title="LLM settings" wide>
+      <div className="space-y-5">
+        <ProvidersSection open={open} ready={ready} />
+        {providers.isError && <p className="text-[11px] text-bad">Could not check the providers: {(providers.error as Error).message}</p>}
+
+        <section className="space-y-3">
+          <div>
+            <p className="label">Models for each task</p>
+            <p className="text-[11px] text-faint">Pick a provider and a model per task. Plans hand over to each other when they run out (Models &amp; usage).</p>
+          </div>
+          <div className="space-y-2 rounded-md border border-border p-3">
+            <p className="text-[12px] font-medium text-fg">Search and matching</p>
+            <Field label="Provider" hint="Used by the quality and screening models, and by any task left on “Same as search”">
+              <select className="input" value={provider} onChange={(e) => switchProvider(e.target.value as Provider)}>
+                <ProviderOptions ready={ready} />
+              </select>
             </Field>
-            {hasEffort(provider) && (
-              <EffortSelect value={efforts[role]} onChange={(effort) => setEfforts({ ...efforts, [role]: effort })} />
-            )}
+            {searchReady === false && <p className="text-[11px] text-warn">{providerLabel(provider)} is not connected yet: connect it above.</p>}
+            {(["quality", "screening"] as const).map((role) => (
+              <div key={role} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_110px]">
+                <Field label={ROLE_LABEL[role]} hint={ROLE_HINT[role]}>
+                  <ModelPicker
+                    value={draft[role]}
+                    onChange={(model) => setDraft({ [role]: model })}
+                    models={models.data ?? []}
+                    loading={models.isPending}
+                    unavailable={models.isError}
+                  />
+                </Field>
+                {hasEffort(provider) && (
+                  <EffortSelect value={efforts[role]} onChange={(effort) => setEfforts({ ...efforts, [role]: effort })} />
+                )}
+              </div>
+            ))}
           </div>
-        ))}
-        {(models.isError || OWN_ROLES.some((role) => ownModels[role].isError)) && (
-          <p className="text-[11px] text-faint">Model list unavailable: type a model id.</p>
-        )}
-        {recommendation && (models.data ?? []).length > 0 && (
-          <div className="space-y-2 rounded-md border border-border bg-surface p-3 text-[11px]">
-            <p className="font-medium text-fg">Recommended setup</p>
-            {ROLES.map((role) => {
-              const rec = recommendationFor(role);
-              const available = modelsFor(role).data ?? [];
-              if (!rec || !available.length) return null;
-              const model = preferredModel(available, rec[role].prefer);
-              const use = () => {
-                setRoleModel(role, model);
-                if (isOwn(role)) setEfforts({ ...efforts, [role]: "high" });
-              };
-              return (
-                <div key={role} className="flex items-start justify-between gap-3">
-                  <span className="text-muted">
-                    <strong className="text-fg">{ROLE_LABEL[role]}:</strong> {model} {rec[role].why}
-                  </span>
-                  <button type="button" className="text-accent" disabled={roleModel(role) === model} onClick={use}>
-                    Use
-                  </button>
-                </div>
-              );
-            })}
-            <p className="text-faint">{recommendation.footnote}</p>
-          </div>
-        )}
+          {OWN_ROLES.map((role) => (
+            <OwnModelSection
+              key={role}
+              role={role}
+              provider={provider}
+              own={owns[role]}
+              onOwn={(own) => setOwn(role, own)}
+              ready={ready}
+              effort={efforts[role]}
+              qualityEffort={efforts.quality}
+              onEffort={(effort) => setEfforts({ ...efforts, [role]: effort })}
+              fallback={fallbackFor(role)}
+              models={ownModels[role]}
+            />
+          ))}
+          {(models.isError || OWN_ROLES.some((role) => ownModels[role].isError)) && (
+            <p className="text-[11px] text-faint">Model list unavailable: type a model id.</p>
+          )}
+          {recommendation && (models.data ?? []).length > 0 && (
+            <div className="space-y-2 rounded-md border border-border bg-surface p-3 text-[11px]">
+              <p className="font-medium text-fg">Recommended setup</p>
+              {ROLES.map((role) => {
+                const rec = recommendationFor(role);
+                const available = modelsFor(role).data ?? [];
+                if (!rec || !available.length) return null;
+                const model = preferredModel(available, rec[role].prefer);
+                const use = () => {
+                  setRoleModel(role, model);
+                  if (isOwn(role)) setEfforts({ ...efforts, [role]: "high" });
+                };
+                return (
+                  <div key={role} className="flex items-start justify-between gap-3">
+                    <span className="text-muted">
+                      <strong className="text-fg">{ROLE_LABEL[role]}:</strong> {model} {rec[role].why}
+                    </span>
+                    <button type="button" className="text-accent" disabled={roleModel(role) === model} onClick={use}>
+                      Use
+                    </button>
+                  </div>
+                );
+              })}
+              <p className="text-faint">{recommendation.footnote}</p>
+            </div>
+          )}
+        </section>
         <p className="text-[11px] text-faint">
-          {[...new Set([provider, ...OWN_ROLES.filter((role) => separate(role) && owns[role].model).map(ownProvider)])]
-            .map((p) =>
-              isCliProvider(p)
-                ? `${providerLabel(p)} runs through its local CLI; the app never reads your ${planName(p)} credentials.`
-                : `${providerLabel(p)} keys are stored locally in data/llm_config.json (git-ignored).`,
-            )
-            .join(" ")}
+          Claude Code and Codex run through their local CLIs; the app never reads your {planName("claude_code")} or {planName("codex")} credentials.
+          API keys are stored locally in data/llm_config.json (git-ignored).
         </p>
         {save.error && <p className="text-[12px] text-bad">{(save.error as Error).message}</p>}
         <div className="flex justify-end gap-2">
@@ -588,15 +616,11 @@ export function SettingsDialog({ open, onClose, llm }: { open: boolean; onClose:
           <button
             className="btn-primary"
             type="button"
-            disabled={
-              !draft.quality ||
-              !draft.screening ||
-              save.isPending ||
-              (isCliProvider(provider) && !cli.data?.logged_in)
-            }
+            title={searchReady === false ? `Connect ${providerLabel(provider)} above first` : undefined}
+            disabled={!draft.quality || !draft.screening || save.isPending || searchReady === false}
             onClick={() => save.mutate()}
           >
-            {save.isPending && <Loader2 size={14} className="animate-spin" />} Save
+            {save.isPending && <Loader2 size={14} className="animate-spin" />} Save models
           </button>
         </div>
       </div>

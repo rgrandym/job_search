@@ -181,7 +181,7 @@ function CompanyBoardList({ searching }: { searching: boolean }) {
               {filter ? "Shown off" : "All off"}
             </button>
           </div>
-          <div className="max-h-[45vh] space-y-1.5 overflow-y-auto pr-1 scroll-thin">
+          <div className="max-h-[calc(var(--vh)*45)] space-y-1.5 overflow-y-auto pr-1 scroll-thin">
             {shown.map((b) => (
               <div key={b.key}>
                 <Toggle

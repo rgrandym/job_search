@@ -79,6 +79,16 @@ def test_status_reports_plan_without_email(monkeypatch: pytest.MonkeyPatch) -> N
     assert "person@example.com" not in json.dumps(status)
 
 
+def test_account_list_status_names_who_is_signed_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    info = {"loggedIn": True, "authMethod": "claude.ai", "email": "me@example.com", "orgId": "o"}
+    _fake_status(monkeypatch, {**info, "subscriptionType": "pro"})
+
+    status = backend.claude_code_status(with_email=True)
+
+    assert status["email"] == "me@example.com"
+    assert "o" not in status.values()  # never the org
+
+
 def test_status_rejects_api_account_login(monkeypatch: pytest.MonkeyPatch) -> None:
     _fake_status(monkeypatch, {"loggedIn": True, "authMethod": "console"})
 

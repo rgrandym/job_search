@@ -18,6 +18,7 @@ from src.agents.definitions import ASSISTANT
 from src.agents.runtime import AgentContext, run_agent
 from src.core.config import ScoringWeights, Settings
 from src.core.llm import ChatMessage, ChatResponse, ToolCall, ToolSpec
+from src.core.llm.signin import SignInStart
 from src.cv.models import MasterCV
 from src.jobs import scorer
 from src.jobs.matcher import build_profile, profile_from_query
@@ -1129,10 +1130,12 @@ def test_api_codex_login_and_status(client: TestClient, monkeypatch: pytest.Monk
             "message": "Logged in using ChatGPT",
         },
     )
-    monkeypatch.setattr(webapp, "start_login", lambda: started.append(True))
+    monkeypatch.setattr(
+        webapp, "start_login", lambda: started.append(True) or SignInStart(url="https://x")
+    )
 
     assert client.get("/api/codex/status").json()["logged_in"] is True
-    assert client.post("/api/codex/login").json() == {"started": True}
+    assert client.post("/api/codex/login").json()["url"] == "https://x"
     assert started == [True]
 
 
@@ -1176,11 +1179,13 @@ def test_api_claude_code_provider(client: TestClient, monkeypatch: pytest.Monkey
         "subscription": "pro",
         "message": "Signed in with Claude Pro.",
     }
-    monkeypatch.setattr(claude_code_backend, "claude_code_status", lambda: status)
-    monkeypatch.setattr(claude_code_backend, "start_login", lambda: started.append(True))
+    monkeypatch.setattr(claude_code_backend, "claude_code_status", lambda *_, **__: status)
+    monkeypatch.setattr(
+        claude_code_backend, "start_login", lambda *_: started.append(True) or SignInStart()
+    )
 
-    assert client.get("/api/claude-code/status").json() == status
-    assert client.post("/api/claude-code/login").json() == {"started": True}
+    assert client.get("/api/claude-code/status").json().items() >= status.items()
+    assert client.post("/api/claude-code/login").json()["started"] is True
     assert started == [True]
 
     llm = client.put(
@@ -2091,3 +2096,16 @@ def test_the_gmail_alert_cache_keeps_listed_then_newest_emails(
     monkeypatch.setattr(gmail_alerts, "MAX_CACHED_ALERTS", 3)
     gmail_alerts._keep_newest(cache, {"m0"})
     assert list(cache.messages) == ["m0", "m4", "m5"]
+
+
+def test_api_keys_are_saved_and_removed_per_provider(client: TestClient, ws: Workspace) -> None:
+    assert client.put("/api/llm/keys/openrouter", json={"api_key": " sk-or "}).json() == {
+        "saved": True
+    }
+    assert ws.saved_key("openrouter") == "sk-or"
+    providers = client.get("/api/llm/providers").json()
+    assert providers["openrouter"] == {"ready": True, "key_saved": True}
+    assert client.put("/api/llm/keys/codex", json={"api_key": "x"}).status_code == 400
+    assert client.delete("/api/llm/keys/openrouter").json() == {"removed": True}
+    assert ws.saved_key("openrouter") is None
+    assert "sk-or" not in ws.llm_config_path.read_text()

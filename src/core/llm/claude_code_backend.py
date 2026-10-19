@@ -11,6 +11,9 @@ endpoint, and each chat resumes its CLI session, so the model keeps every earlie
 `chat` (one emulated `{message, tool_calls[]}` turn, as in the Codex backend) remains for
 callers without that endpoint.
 
+Several Claude accounts may be signed in, each in its own config folder: calls run on the
+first one whose limit is not spent and move to the next when it is (`claude_accounts`).
+
 For personal, local use: the app drives the user's own signed-in CLI on their machine.
 """
 
@@ -29,9 +32,10 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from src.core.llm import usage
-from src.core.llm.anthropic_backend import NO_EFFORT, NO_XHIGH, subscription_env
+from src.core.llm import claude_accounts, signin, usage
+from src.core.llm.anthropic_backend import NO_EFFORT, NO_XHIGH
 from src.core.llm.calls import run_cli
+from src.core.llm.claude_accounts import DEFAULT_ID, ClaudeAccount
 from src.core.llm.codex_backend import parse_turn, render_turn, turn_schema
 from src.core.llm.native import MCP_SERVER, NATIVE_TIMEOUT_S, TextRelay, run_streaming
 from src.core.llm.types import (
@@ -86,9 +90,15 @@ def no_chrome(binary: str) -> tuple[str, ...]:
     return ("--no-chrome",) if "--no-chrome" in out.stdout else ()
 
 
-def claude_usage_text() -> str:
+def _folder_env(config_dir: str | None) -> dict[str, str]:
+    """The CLI's environment for the account signed in to `config_dir` (None: default)."""
+    return claude_accounts.env(ClaudeAccount(id="", label="", config_dir=config_dir))
+
+
+def claude_usage_text(config_dir: str | None = None) -> str:
     """The plan usage Claude Code reports for `/usage` (its share of each window and when it
-    resets). A local command: `claude -p /usage` answers without a model call or tokens."""
+    resets) for the account in `config_dir`. A local command: `claude -p /usage` answers
+    without a model call or tokens."""
     binary = claude_binary()
     if binary is None:
         raise LLMError("Claude Code CLI not found")
@@ -102,7 +112,7 @@ def claude_usage_text() -> str:
                 text=True,
                 timeout=USAGE_TIMEOUT_S,
                 cwd=workdir,
-                env=subscription_env(),
+                env=_folder_env(config_dir),
                 stdin=subprocess.DEVNULL,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -116,8 +126,10 @@ def claude_usage_text() -> str:
     return str(data["result"])
 
 
-def claude_code_status() -> dict[str, Any]:
-    """Installed? Signed in with a Claude plan? (No email or org is returned.)"""
+def claude_code_status(config_dir: str | None = None, with_email: bool = False) -> dict[str, Any]:
+    """Installed? Is the account in `config_dir` signed in with a Claude plan? No org or token
+    is returned; the email only `with_email`, for the Claude accounts list, where it is how the
+    user tells their accounts apart."""
     binary = claude_binary()
     if binary is None:
         return {
@@ -133,12 +145,15 @@ def claude_code_status() -> dict[str, Any]:
             capture_output=True,
             text=True,
             timeout=20,
-            env=subscription_env(),
+            env=_folder_env(config_dir),
         )
         info: dict[str, Any] = json.loads(out.stdout or "{}")
     except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
         info = {"error": str(exc)}
-    return {"installed": True, "path": binary, **_status_view(info)}
+    view = _status_view(info)
+    if with_email and view["logged_in"] and isinstance(info.get("email"), str):
+        view["email"] = info["email"]
+    return {"installed": True, "path": binary, **view}
 
 
 def _status_view(info: dict[str, Any]) -> dict[str, Any]:
@@ -157,19 +172,19 @@ def _status_view(info: dict[str, Any]) -> dict[str, Any]:
     return {"logged_in": True, "subscription": plan, "message": f"Signed in with {label}."}
 
 
-def start_login() -> None:
-    """Launch `claude auth login --claudeai` (opens the claude.ai sign-in page)."""
+def start_login(config_dir: str | None = None, key: str = DEFAULT_ID) -> signin.SignInStart:
+    """Start `claude auth login --claudeai` for the account in `config_dir` (it opens the
+    claude.ai sign-in page); `key` names the sign-in a pasted code goes to."""
     binary = claude_binary()
     if binary is None:
         raise LLMError("Claude Code CLI not found")
-    subprocess.Popen(
-        [binary, "auth", "login", "--claudeai"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-        env=subscription_env(),
-    )
+    cmd = [binary, "auth", "login", "--claudeai"]
+    return signin.start(f"claude:{key}", cmd, _folder_env(config_dir))
+
+
+def send_login_code(key: str, code: str) -> None:
+    """The code claude.ai showed after approving, for the sign-in started under `key`."""
+    signin.send_code(f"claude:{key}", code)
 
 
 # ------------------------------------------------------------------ exec
@@ -224,24 +239,28 @@ def _events(stdout: str) -> list[dict[str, Any]]:
     return events
 
 
-def _record_limits(events: list[dict[str, Any]]) -> float | None:
-    """Store the plan windows the call reported (`usage.record_claude_limit`); returns the
-    reset time of a window that refused the call, if one did."""
+def _record_limits(events: list[dict[str, Any]], account_id: str = DEFAULT_ID) -> float | None:
+    """Store the plan windows the call reported for its account (`usage.record_claude_limit`);
+    returns the reset time of a window that refused the call, if one did."""
     rejected = None
     for event in events:
         info = event.get("rate_limit_info") if event.get("type") == "rate_limit_event" else None
         if isinstance(info, dict) and info.get("rateLimitType"):
-            usage.record_claude_limit(info)
+            usage.record_claude_limit(info, account_id)
             if info.get("status") == "rejected" and info.get("resetsAt"):
                 rejected = float(info["resetsAt"])
     return rejected
 
 
 def _error(
-    events: list[dict[str, Any]], data: dict[str, Any] | None, code: int, tail: str
+    events: list[dict[str, Any]],
+    data: dict[str, Any] | None,
+    code: int,
+    tail: str,
+    account_id: str = DEFAULT_ID,
 ) -> LLMError:
     """The error of a failed call; a refusing plan window makes it a limit with its reset."""
-    rejected = _record_limits(events)
+    rejected = _record_limits(events, account_id)
     if data is None:
         message = f"claude -p failed (exit {code}): {tail}"
     else:
@@ -252,15 +271,18 @@ def _error(
     return LLMError(message)
 
 
-def _result(returncode: int, stdout: str, stderr: str) -> dict[str, Any]:
+def _result(
+    returncode: int, stdout: str, stderr: str, account_id: str = DEFAULT_ID
+) -> dict[str, Any]:
     """Parse `--output-format stream-json`: the final `result` event holds the answer in
-    `structured_output`; `rate_limit_event`s update the plan usage view."""
+    `structured_output`; `rate_limit_event`s update the account's plan usage view."""
     events = _events(stdout)
     data = next((e for e in reversed(events) if e.get("type") == "result"), None)
     if data is None or data.get("is_error") or data.get("subtype") != "success":
         tail = "\n".join((stdout + stderr).strip().splitlines()[-8:])
-        raise _error(events, data, returncode, tail)
-    _record_limits(events)
+        raise _error(events, data, returncode, tail, account_id)
+    _record_limits(events, account_id)
+    usage.record_account_tokens(account_id, *_tokens(data))
     if data.get("structured_output") is None:
         raise LLMError("Claude Code returned no structured output")
     return data
@@ -269,22 +291,28 @@ def _result(returncode: int, stdout: str, stderr: str) -> dict[str, Any]:
 def run_claude(
     cfg: LLMConfig, model: str, system: str, prompt: str, schema: dict[str, Any]
 ) -> dict[str, Any]:
-    """Blocking `claude -p` returning the full JSON result."""
+    """Blocking `claude -p` returning the full JSON result, on the first Claude account whose
+    limit is not spent."""
     binary = claude_binary()
     if binary is None:
         raise LLMError("Claude Code CLI not found")
-    with tempfile.TemporaryDirectory(prefix="jobsearch-claude-") as workdir:
-        try:
-            proc = run_cli(  # cancellable by the search that started it
-                _command(binary, cfg, model, system, schema),
-                input=prompt,
-                timeout=TIMEOUT_S,
-                cwd=workdir,
-                env=subscription_env(),
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise LLMError(f"claude -p timed out after {TIMEOUT_S}s") from exc
-    return _result(proc.returncode, proc.stdout, proc.stderr)
+    command = _command(binary, cfg, model, system, schema)
+
+    def on(account: ClaudeAccount) -> dict[str, Any]:
+        with tempfile.TemporaryDirectory(prefix="jobsearch-claude-") as workdir:
+            try:
+                proc = run_cli(  # cancellable by the search that started it
+                    command,
+                    input=prompt,
+                    timeout=TIMEOUT_S,
+                    cwd=workdir,
+                    env=claude_accounts.env(account),
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise LLMError(f"claude -p timed out after {TIMEOUT_S}s") from exc
+        return _result(proc.returncode, proc.stdout, proc.stderr, account.id)
+
+    return claude_accounts.call(on)
 
 
 async def run_claude_async(
@@ -294,21 +322,27 @@ async def run_claude_async(
     binary = claude_binary()
     if binary is None:
         raise LLMError("Claude Code CLI not found")
-    with tempfile.TemporaryDirectory(prefix="jobsearch-claude-") as workdir:
-        proc = await asyncio.create_subprocess_exec(
-            *_command(binary, cfg, model, system, schema),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=workdir,
-            env=subscription_env(),
-        )
-        try:
-            out, err = await asyncio.wait_for(proc.communicate(prompt.encode()), TIMEOUT_S)
-        except (TimeoutError, asyncio.CancelledError):
-            proc.kill()
-            raise
-    return _result(proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace"))
+    command = _command(binary, cfg, model, system, schema)
+
+    async def on(account: ClaudeAccount) -> dict[str, Any]:
+        with tempfile.TemporaryDirectory(prefix="jobsearch-claude-") as workdir:
+            proc = await asyncio.create_subprocess_exec(
+                *command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=workdir,
+                env=claude_accounts.env(account),
+            )
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(prompt.encode()), TIMEOUT_S)
+            except (TimeoutError, asyncio.CancelledError):
+                proc.kill()
+                raise
+        stdout, stderr = out.decode(errors="replace"), err.decode(errors="replace")
+        return _result(proc.returncode or 0, stdout, stderr, account.id)
+
+    return await claude_accounts.acall(on)
 
 
 def _tokens(data: dict[str, Any]) -> tuple[int, int]:
@@ -459,18 +493,29 @@ def claude_events(
     return on_event
 
 
-def _native_result(events: list[dict[str, Any]], code: int, stderr: str) -> NativeTurn:
+def _native_result(
+    events: list[dict[str, Any]], code: int, stderr: str, account_id: str = DEFAULT_ID
+) -> NativeTurn:
     data = next((e for e in reversed(events) if e.get("type") == "result"), None)
     if data is None or data.get("is_error") or data.get("subtype") != "success":
-        raise _error(events, data, code, "\n".join(stderr.strip().splitlines()[-8:]))
-    _record_limits(events)
+        tail = "\n".join(stderr.strip().splitlines()[-8:])
+        raise _error(events, data, code, tail, account_id)
+    _record_limits(events, account_id)
     tokens_in, tokens_out = _tokens(data)
+    usage.record_account_tokens(account_id, tokens_in, tokens_out)
+    native_id = str(data.get("session_id") or "")
     return NativeTurn(
         text=str(data.get("result") or ""),
-        session_id=str(data.get("session_id") or ""),
+        session_id=f"{account_id}/{native_id}" if native_id else "",
         input_tokens=tokens_in,
         output_tokens=tokens_out,
     )
+
+
+def _session_account(session_id: str) -> tuple[ClaudeAccount | None, str]:
+    """(account, CLI session id) of a stored "account/session" id (older ids: default)."""
+    account_id, _, native_id = session_id.rpartition("/")
+    return claude_accounts.get(account_id or DEFAULT_ID), native_id
 
 
 async def run_native_turn(
@@ -484,18 +529,34 @@ async def run_native_turn(
     on_text: Callable[[str], Awaitable[None]],
     cancelled: Callable[[], bool],
 ) -> NativeTurn:
-    """One user turn through Claude Code's own agent loop; a new session unless resuming."""
+    """One user turn through Claude Code's own agent loop; a new session unless resuming.
+
+    A session lives in its account's folder, so it resumes only there. When that account is
+    spent or gone the error makes the runtime start again from the history (`_run_native`),
+    on the next account."""
     binary = claude_binary()
     if binary is None:
         raise LLMError("Claude Code CLI not found")
-    session = (session_id, True) if session_id else (str(uuid.uuid4()), False)
-    events: list[dict[str, Any]] = []
-    code, stderr = await run_streaming(
-        _native_command(binary, cfg, model, system, mcp_url, session),
-        prompt,
-        workdir,
-        {**subscription_env(), "MCP_TOOL_TIMEOUT": str(NATIVE_TIMEOUT_S * 1000)},
-        claude_events(events, on_text),
-        cancelled,
-    )
-    return _native_result(events, code, stderr)
+
+    async def on(account: ClaudeAccount, session: tuple[str, bool]) -> NativeTurn:
+        events: list[dict[str, Any]] = []
+        code, stderr = await run_streaming(
+            _native_command(binary, cfg, model, system, mcp_url, session),
+            prompt,
+            workdir,
+            {**claude_accounts.env(account), "MCP_TOOL_TIMEOUT": str(NATIVE_TIMEOUT_S * 1000)},
+            claude_events(events, on_text),
+            cancelled,
+        )
+        return _native_result(events, code, stderr, account.id)
+
+    if not session_id:
+        return await claude_accounts.acall(lambda a: on(a, (str(uuid.uuid4()), False)))
+    account, native_id = _session_account(session_id)
+    if account is None or not claude_accounts.usable(account):
+        raise LLMError("This chat's Claude account is unavailable; continuing on another")
+    try:
+        return await on(account, (native_id, True))
+    except LLMError as exc:
+        claude_accounts.note_failure(account, exc)
+        raise

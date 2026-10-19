@@ -51,7 +51,7 @@ export function ThemePicker() {
         <Palette size={15} />
       </button>
       {open && (
-        <div role="menu" className="card absolute right-0 top-7 z-50 max-h-[80vh] w-72 overflow-y-auto p-1.5 shadow-xl scroll-thin">
+        <div role="menu" className="card absolute right-0 top-7 z-50 max-h-[calc(var(--vh)*80)] w-72 overflow-y-auto p-1.5 shadow-xl scroll-thin">
           <p className="label px-2 pb-1 pt-0.5">Theme</p>
           {THEMES.map((t) => (
             <button

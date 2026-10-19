@@ -269,7 +269,12 @@
   --bad: #c25400;
 }
 
-html, body, #root { height: 100%; }
+/* The app's own zoom (`stores/zoomStore`): in a browser tab CSS zoom scales the page, so it is
+   sized to the window divided by the zoom, and every window-sized part uses
+   calc(…vh / var(--zoom)); the Dock app zooms natively and keeps --zoom at 1. */
+:root { --zoom: 1; --vh: calc(1vh / var(--zoom)); --vw: calc(1vw / var(--zoom)); }
+html { width: calc(100vw / var(--zoom)); height: calc(100vh / var(--zoom)); overflow: hidden; }
+body, #root { height: 100%; }
 body { background: var(--bg); color: var(--text-primary); font-size: 13px; }
 /* Job cards and tailored CV results: every text size 2px larger, for easier reading. */
 .reading { font-size: 15px; }
@@ -290,12 +295,13 @@ body { background: var(--bg); color: var(--text-primary); font-size: 13px; }
            placeholder:text-faint outline-none focus:border-accent;
   }
   .btn {
-    @apply inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-[13px]
-           font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+    @apply inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5
+           text-[13px] font-medium leading-tight transition-colors disabled:cursor-not-allowed disabled:opacity-50;
   }
   .btn-primary { @apply btn bg-accent text-accent-fg hover:brightness-110; }
   .btn-ghost { @apply btn border border-border bg-surface text-muted hover:text-fg; }
-  .chip { @apply inline-flex items-center gap-1 rounded-full bg-surface px-2 py-0.5 text-[11px] text-muted; }
+  /* Pills and buttons keep their words on one line at every zoom level. */
+  .chip { @apply inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-surface px-2 py-0.5 text-[11px] leading-tight text-muted; }
   .scroll-thin { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
 }
 

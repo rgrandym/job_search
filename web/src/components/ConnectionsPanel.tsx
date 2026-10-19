@@ -5,6 +5,7 @@ import { clockLabel, PROVIDER_LABEL } from "../lib/labels";
 import type { Connection, OnLimit, PlanWindow, RoleView, SpendRow } from "../lib/types";
 import { cn } from "../lib/utils";
 import { useChat } from "../stores/chatStore";
+import { windowsLine } from "./ClaudeAccounts";
 import { Resizable } from "./ui";
 
 // One view of every model connection, replacing the per-provider blocks: which model serves
@@ -55,8 +56,22 @@ function ConnectionCard({ c, threshold }: { c: Connection; threshold: number }) 
           {c.roles.length ? c.roles.join(", ") : c.ready ? "standby" : "not connected"}
         </span>
       </div>
+      {c.accounts.length > 1 && <p className="text-[10px] text-faint">Account in use: {c.accounts.find((a) => a.active)?.label}</p>}
       {c.windows?.windows.map((w) => <WindowBar key={w.name} win={w} threshold={threshold} />)}
       {c.windows?.note && <p className="text-[10px] text-faint">{c.windows.note}</p>}
+      {c.accounts.length > 1 && (
+        <div className="space-y-0.5">
+          {c.accounts.map((a) => (
+            <div key={a.id} className="flex items-center gap-1.5 text-[11px]">
+              <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", !a.signed_in ? "bg-bad" : a.exhausted_until ? "bg-warn" : "bg-good")} />
+              <span className={a.active ? "text-fg" : "text-muted"}>{a.label}</span>
+              <span className="ml-auto truncate text-faint">
+                {!a.signed_in ? "not signed in" : a.exhausted_until ? `limit reached · back ${clockLabel(a.exhausted_until)}` : windowsLine(a.windows) || "ready"}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
       <p className="text-[11px] text-faint">
         Today: {c.spend_today.length ? spendLine(c.spend_today) : "no calls"}
         {c.cost_today != null && ` · $${c.cost_today.toFixed(3)}`}
@@ -134,7 +149,7 @@ export function ConnectionsPanel() {
       </summary>
       {view.isError && <p className="mt-2 text-[11px] text-bad">Could not read the connections: {(view.error as Error).message}</p>}
       {data && (
-        <Resizable id="connections" className="mt-2 space-y-3" fit="max-h-[45vh] overflow-y-auto scroll-thin">
+        <Resizable id="connections" className="mt-2 space-y-3" fit="max-h-[calc(var(--vh)*45)] overflow-y-auto scroll-thin">
           <div className="space-y-1 rounded-md bg-surface p-2">
             {data.roles.map((r) => <RoleLine key={r.role} r={r} />)}
           </div>
@@ -153,7 +168,7 @@ export function ConnectionsPanel() {
               ))}
             </div>
             <p className="text-[10px] text-faint">
-              Plans only (Claude Code ⇄ Codex): the model of the same standing takes over at the same effort. Providers billed per token are never switched to automatically.
+              Your Claude accounts are used in turn first. Then plans only (Claude Code ⇄ Codex): the model of the same standing takes over at the same effort. Providers billed per token are never switched to automatically.
             </p>
             {setMode.isError && <p className="text-[11px] text-bad">{(setMode.error as Error).message}</p>}
           </div>

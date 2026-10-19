@@ -62,10 +62,20 @@ def _no_claude_usage_read(monkeypatch: pytest.MonkeyPatch) -> None:
     from src.core.llm import claude_code_backend
     from src.core.llm.types import LLMError
 
-    def unavailable() -> str:
+    def unavailable(config_dir: str | None = None) -> str:
         raise LLMError("Claude Code usage is not read in tests")
 
     monkeypatch.setattr(claude_code_backend, "claude_usage_text", unavailable)
+
+
+@pytest.fixture(autouse=True)
+def _claude_accounts_in_memory() -> None:
+    """Each test starts with only the default Claude account, never the user's saved list,
+    and no account or plan known to be spent."""
+    from src.core.llm import claude_accounts, usage
+
+    usage.configure(None)
+    claude_accounts.configure(None)
 
 
 @pytest.fixture(autouse=True)

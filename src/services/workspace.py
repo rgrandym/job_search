@@ -19,6 +19,7 @@ from src.core.llm import (
     LLMConfig,
     Role,
     UsageSink,
+    claude_accounts,
     fallback,
     make_chat,
     make_structured,
@@ -40,6 +41,7 @@ class Workspace:
         self.llm_config_path = data / "llm_config.json"
         self.llm = self._load_llm_config()
         usage.configure(data)  # plan windows and spend persist next to the other app data
+        claude_accounts.configure(data)  # the Claude accounts used in turn
         self.memory = ProfileMemory(
             data / "profile_summaries.json", self.settings.output_dir / "profiles"
         )
@@ -105,10 +107,26 @@ class Workspace:
             cfg.api_key = SecretStr(keys[provider])
         self._cli_login.pop(provider, None)
         self.llm, self._saved_keys = cfg, keys
-        payload = cfg.model_dump(mode="json", exclude={"api_key"}) | {"api_keys": keys}
-        self.llm_config_path.parent.mkdir(parents=True, exist_ok=True)
-        self.llm_config_path.write_text(json.dumps(payload, indent=2))
+        self._save_llm()
         return cfg
+
+    def set_api_key(self, provider: LLMProviderName, key: str | None) -> None:
+        """Save (or with None remove) the API key of one provider, whatever the tasks use."""
+        if key:
+            self._saved_keys[provider] = key
+        else:
+            self._saved_keys.pop(provider, None)
+        if provider == self.llm.provider:
+            env_key = LLMConfig.from_settings(self.settings, provider).api_key
+            self.llm.api_key = SecretStr(key) if key else env_key
+        self._save_llm()
+
+    def _save_llm(self) -> None:
+        payload = self.llm.model_dump(mode="json", exclude={"api_key"})
+        self.llm_config_path.parent.mkdir(parents=True, exist_ok=True)
+        self.llm_config_path.write_text(
+            json.dumps(payload | {"api_keys": self._saved_keys}, indent=2)
+        )
 
     def saved_key(self, provider: str) -> str | None:
         """API key saved from the UI for `provider` (env keys are not returned)."""
@@ -145,19 +163,23 @@ class Workspace:
         return False
 
     def _cli_logged_in(self, provider: str) -> bool:
-        """CLI sign-in status, cached for 30s (it spawns a process)."""
+        """CLI sign-in status, cached for 30s (it spawns a process). Claude Code is signed in
+        when any of its accounts is."""
         import time
 
-        from src.core.llm.claude_code_backend import claude_code_status
         from src.core.llm.codex_backend import codex_status
 
         now = time.monotonic()
         ok, checked = self._cli_login.get(provider, (False, -1e9))
         if now - checked > 30:
-            status = codex_status() if provider == "codex" else claude_code_status()
+            status = codex_status() if provider == "codex" else claude_accounts.summary()
             ok = bool(status["logged_in"])
             self._cli_login[provider] = (ok, now)
         return ok
+
+    def forget_sign_in(self, provider: LLMProviderName) -> None:
+        """Check `provider`'s sign-in again on the next call (accounts changed)."""
+        self._cli_login.pop(provider, None)
 
     def structured(
         self,

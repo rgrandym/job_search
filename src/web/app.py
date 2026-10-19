@@ -49,6 +49,7 @@ from src.core.llm import (
     LLMError,
     ModelUsage,
     available_models,
+    claude_accounts,
     claude_code_backend,
     fallback,
 )
@@ -56,6 +57,7 @@ from src.core.llm import usage as plan_usage
 from src.core.llm.calls import call_group, cancel_group
 from src.core.llm.catalog import ModelInfo
 from src.core.llm.codex_backend import codex_status, start_login
+from src.core.llm.signin import SignInStart
 from src.cv.models import (
     MasterCV,
     TailoredCV,
@@ -452,6 +454,45 @@ def llm_models(provider: LLMProviderName) -> list[ModelInfo]:
         raise HTTPException(502, f"Could not list {provider} models: {exc}") from exc
 
 
+PROVIDER_NAMES: tuple[LLMProviderName, ...] = (
+    "claude_code",
+    "codex",
+    "anthropic",
+    "openai",
+    "openrouter",
+)
+
+
+@app.get("/api/llm/providers")
+def llm_providers() -> dict[str, dict[str, bool]]:
+    """Each provider for Settings' top section: usable now, and whether a key is saved there."""
+    ws = get_workspace()
+    return {
+        p: {"ready": ws.provider_ready(p), "key_saved": ws.saved_key(p) is not None}
+        for p in PROVIDER_NAMES
+    }
+
+
+class ApiKey(BaseModel):
+    api_key: str = Field(min_length=1, max_length=500)
+
+
+@app.put("/api/llm/keys/{provider}")
+def save_api_key(provider: LLMProviderName, body: ApiKey) -> dict[str, bool]:
+    """Save an API provider's key (CLI plans sign in instead)."""
+    if provider in ("claude_code", "codex"):
+        raise HTTPException(400, "This provider signs in with its plan, not a key.")
+    get_workspace().set_api_key(provider, body.api_key.strip())
+    return {"saved": True}
+
+
+@app.delete("/api/llm/keys/{provider}")
+def remove_api_key(provider: LLMProviderName) -> dict[str, bool]:
+    """Remove the key saved in the app for a provider (a key in .env stays)."""
+    get_workspace().set_api_key(provider, None)
+    return {"removed": True}
+
+
 @app.get("/api/llm/chat-providers")
 def chat_providers() -> dict[str, bool]:
     """Credential availability for providers offered in the assistant picker."""
@@ -465,18 +506,19 @@ def get_codex_status() -> dict[str, Any]:
 
 
 @app.post("/api/codex/login")
-def codex_login() -> dict[str, Any]:
-    """Open the ChatGPT sign-in page via `codex login` (the CLI stores the credentials)."""
+def codex_login() -> SignInStart:
+    """Open the ChatGPT sign-in page via `codex login` (the CLI stores the credentials); the
+    page's link comes back for Settings to open if the browser did not."""
     try:
-        start_login()
+        return start_login()
     except LLMError as exc:
         raise HTTPException(400, str(exc)) from exc
-    return {"started": True}
 
 
 @app.get("/api/claude-code/status")
 def get_claude_code_status() -> dict[str, Any]:
-    return claude_code_backend.claude_code_status()
+    """Claude Code as one provider: signed in when any of its accounts is."""
+    return claude_accounts.summary(max_age=2.0)
 
 
 @app.get("/api/connections")
@@ -486,13 +528,89 @@ async def get_connections() -> connections_service.ConnectionsView:
 
 
 @app.post("/api/claude-code/login")
-def claude_code_login() -> dict[str, Any]:
-    """Open the claude.ai sign-in page via `claude auth login` (the CLI stores credentials)."""
+def claude_code_login() -> SignInStart:
+    """Open the claude.ai sign-in page via `claude auth login` for the first Claude account
+    (the CLI stores credentials)."""
+    return claude_account_login(claude_accounts.accounts()[0].id)
+
+
+class NewClaudeAccount(BaseModel):
+    label: str = ""
+    config_dir: str | None = None  # an existing Claude Code folder; None: a new one
+
+
+def _accounts_changed() -> connections_service.ClaudeAccountsView:
+    claude_accounts.forget_status()
+    get_workspace().forget_sign_in("claude_code")
+    return connections_service.claude_accounts_view()
+
+
+@app.get("/api/claude-code/accounts")
+async def list_claude_accounts() -> connections_service.ClaudeAccountsView:
+    """The Claude accounts in the order calls use them, with sign-in and plan windows."""
+    return await asyncio.to_thread(connections_service.claude_accounts_view)
+
+
+@app.post("/api/claude-code/accounts")
+def add_claude_account(body: NewClaudeAccount) -> connections_service.ClaudeAccountsView:
+    """Add a Claude account (used after the others when their limits are spent)."""
     try:
-        claude_code_backend.start_login()
+        claude_accounts.add(body.label, body.config_dir)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return _accounts_changed()
+
+
+@app.delete("/api/claude-code/accounts/{account_id}")
+def remove_claude_account(account_id: str) -> connections_service.ClaudeAccountsView:
+    """Take an account out of the list; its folder and sign-in are left as they are."""
+    try:
+        claude_accounts.remove(account_id)
+    except KeyError as exc:
+        raise HTTPException(404, "No such Claude account") from exc
+    return _accounts_changed()
+
+
+@app.post("/api/claude-code/accounts/{account_id}/up")
+def raise_claude_account(account_id: str) -> connections_service.ClaudeAccountsView:
+    """Use an account one place earlier."""
+    try:
+        claude_accounts.move_up(account_id)
+    except KeyError as exc:
+        raise HTTPException(404, "No such Claude account") from exc
+    return _accounts_changed()
+
+
+@app.post("/api/claude-code/accounts/{account_id}/login")
+def claude_account_login(account_id: str) -> SignInStart:
+    """Open the claude.ai sign-in page for one account's folder; its link comes back for
+    Settings to open if the browser did not."""
+    account = claude_accounts.get(account_id)
+    if account is None:
+        raise HTTPException(404, "No such Claude account")
+    try:
+        started = claude_code_backend.start_login(account.config_dir, account_id)
     except LLMError as exc:
         raise HTTPException(400, str(exc)) from exc
-    return {"started": True}
+    claude_accounts.forget_status(account_id)
+    get_workspace().forget_sign_in("claude_code")
+    return started
+
+
+class LoginCode(BaseModel):
+    code: str = Field(min_length=1, max_length=500)
+
+
+@app.post("/api/claude-code/accounts/{account_id}/code")
+def claude_account_code(account_id: str, body: LoginCode) -> dict[str, bool]:
+    """Pass on the code claude.ai shows after approving (when the link was opened by hand)."""
+    try:
+        claude_code_backend.send_login_code(account_id, body.code)
+    except LLMError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    claude_accounts.forget_status(account_id)
+    get_workspace().forget_sign_in("claude_code")
+    return {"sent": True}
 
 
 # ------------------------------------------------------------------ CV
@@ -750,15 +868,21 @@ class ClaudeReading(BaseModel):
     kind: str  # "five_hour", "seven_day", ...
     percent_used: float = Field(ge=0)
     resets_at: float | None = None  # epoch seconds
+    config_dir: str | None = None  # the session's CLAUDE_CONFIG_DIR (None: default sign-in)
 
 
 @app.post("/api/usage/claude")
 def record_claude_usage(readings: list[ClaudeReading]) -> dict[str, int]:
     """Claude plan windows read by a Claude Code session (the dev pane passes them on): the
-    CLI's own events state the share used only near a limit."""
+    CLI's own events state the share used only near a limit. A session on a folder that is
+    not one of the app's accounts is left out: its plan is not one the app uses."""
+    recorded = 0
     for r in readings:
-        plan_usage.record_claude_reading(r.kind, r.percent_used, r.resets_at)
-    return {"recorded": len(readings)}
+        account = claude_accounts.by_dir(r.config_dir)
+        if account is not None:
+            plan_usage.record_claude_reading(r.kind, r.percent_used, r.resets_at, account.id)
+            recorded += 1
+    return {"recorded": recorded}
 
 
 @app.exception_handler(progress.TaskStopped)

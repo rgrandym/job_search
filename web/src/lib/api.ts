@@ -8,6 +8,8 @@ import type {
   CompanyBoard,
   CompanyBoardsStatus,
   ConnectionsView,
+  ClaudeAccountsView,
+  SignInStart,
   CodexStatus,
   OnLimit,
   HistoryItem,
@@ -191,9 +193,24 @@ export const api = {
   connections: () => request<ConnectionsView>("/api/connections"),
   updateHandover: (body: { on_limit?: OnLimit; handover_threshold?: number }) =>
     request<LLMView>("/api/llm/handover", json("PUT", body)),
-  loginCodex: () => request<{ started: boolean }>("/api/codex/login", { method: "POST" }),
+  loginCodex: () => request<SignInStart>("/api/codex/login", { method: "POST" }),
   claudeCodeStatus: () => request<ClaudeCodeStatus>("/api/claude-code/status"),
-  loginClaudeCode: () => request<{ started: boolean }>("/api/claude-code/login", { method: "POST" }),
+  loginClaudeCode: () => request<SignInStart>("/api/claude-code/login", { method: "POST" }),
+  llmProviders: () => request<Record<Provider, { ready: boolean; key_saved: boolean }>>("/api/llm/providers"),
+  saveApiKey: (provider: Provider, api_key: string) =>
+    request<{ saved: boolean }>(`/api/llm/keys/${provider}`, json("PUT", { api_key })),
+  removeApiKey: (provider: Provider) => request<{ removed: boolean }>(`/api/llm/keys/${provider}`, { method: "DELETE" }),
+  claudeAccounts: () => request<ClaudeAccountsView>("/api/claude-code/accounts"),
+  addClaudeAccount: (body: { label: string; config_dir: string | null }) =>
+    request<ClaudeAccountsView>("/api/claude-code/accounts", json("POST", body)),
+  removeClaudeAccount: (id: string) =>
+    request<ClaudeAccountsView>(`/api/claude-code/accounts/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  raiseClaudeAccount: (id: string) =>
+    request<ClaudeAccountsView>(`/api/claude-code/accounts/${encodeURIComponent(id)}/up`, { method: "POST" }),
+  loginClaudeAccount: (id: string) =>
+    request<SignInStart>(`/api/claude-code/accounts/${encodeURIComponent(id)}/login`, { method: "POST" }),
+  sendClaudeCode: (id: string, code: string) =>
+    request<{ sent: boolean }>(`/api/claude-code/accounts/${encodeURIComponent(id)}/code`, json("POST", { code })),
   uploadCV: (file: File) => {
     const form = new FormData();
     form.append("file", file);

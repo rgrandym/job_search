@@ -34,7 +34,7 @@ enum Backend { case ready, stale, devOnly, down }
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate,
-    WKDownloadDelegate
+    WKDownloadDelegate, WKScriptMessageHandler
 {
     let config = Config.load()
     var window: NSWindow!
@@ -47,6 +47,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         NSApp.mainMenu = makeMenu()
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()  // keeps the UI's remembered state
+        // The header's zoom control sets the native page zoom: it reflows like Safari's own
+        // zoom, where CSS zoom would leave window-sized panels larger than the window.
+        configuration.userContentController.add(self, name: "jobSearchZoom")
         webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -319,9 +322,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     @objc func reloadPage() {
         if webView.url?.scheme == "about" { start() } else { webView.reload() }
     }
-    @objc func zoomIn() { webView.pageZoom = min(webView.pageZoom + 0.1, 3) }
-    @objc func zoomOut() { webView.pageZoom = max(webView.pageZoom - 0.1, 0.5) }
-    @objc func zoomReset() { webView.pageZoom = 1 }
+    func userContentController(
+        _ controller: WKUserContentController, didReceive message: WKScriptMessage
+    ) {
+        if message.name == "jobSearchZoom", let zoom = message.body as? Double, zoom >= 0.5, zoom <= 3 {
+            webView.pageZoom = zoom
+        }
+    }
+
+    /// The menu steps through the page's own zoom levels (it remembers the choice and shows it in
+    /// its header); a page without that control is zoomed directly.
+    func zoomStep(_ by: Int, fallback: CGFloat) {
+        let script = "window.jobSearchZoomStep ? (window.jobSearchZoomStep(\(by)), true) : false"
+        webView.evaluateJavaScript(script) { [weak self] handled, _ in
+            if (handled as? Bool) != true { self?.webView.pageZoom = fallback }
+        }
+    }
+    @objc func zoomIn() { zoomStep(1, fallback: min(webView.pageZoom + 0.1, 3)) }
+    @objc func zoomOut() { zoomStep(-1, fallback: max(webView.pageZoom - 0.1, 0.5)) }
+    @objc func zoomReset() { zoomStep(0, fallback: 1) }
 
     func makeMenu() -> NSMenu {
         let bar = NSMenu()

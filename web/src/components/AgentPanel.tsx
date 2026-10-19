@@ -240,7 +240,7 @@ export function AgentPanel({ ready, llm, hasCv }: { ready: boolean; llm?: LLMVie
             <span className="min-w-0 truncate">{selectedModel}</span>
             <ChevronDown size={13} className={cn("shrink-0 text-faint transition-transform", pickerOpen && "rotate-180")} />
           </button>
-          {pickerOpen && <div id="chat-model-options" className="absolute bottom-full left-0 z-50 mb-1.5 max-h-[46vh] w-full overflow-y-auto rounded-lg border border-border bg-panel p-1.5 shadow-2xl scroll-thin">
+          {pickerOpen && <div id="chat-model-options" className="absolute bottom-full left-0 z-50 mb-1.5 max-h-[calc(var(--vh)*46)] w-full overflow-y-auto rounded-lg border border-border bg-panel p-1.5 shadow-2xl scroll-thin">
             <p className="px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-faint">Configured models</p>
             {([
               { value: "quality", name: llm.quality_model, detail: `Quality · ${llm.quality_effort}` },

@@ -69,7 +69,16 @@ every model call is classified on failure (`LLMError.kind`: limit, auth, context
 other). When a plan (Claude Code or Codex) runs out, `on_limit` decides: "switch" moves the
 task to the other plan's model of the same standing at the same effort, "ask" offers stop /
 continue on that model / wait for the reset. Providers billed per token are never switched to.
-Plan windows (`data/usage_claude.json`; Codex through `app-server`) and per-provider spend
+Several Claude accounts come first (`src/core/llm/claude_accounts.py`, `data/claude_accounts.json`,
+Settings → Claude accounts): each is a Claude Code folder (`CLAUDE_CONFIG_DIR`, the default
+sign-in when none), used in the user's order; a spent or signed-out account passes the call to
+the next, and only when every account is spent is Claude Code a spent plan. An assistant session
+resumes only on its own account (ids "account/session"); otherwise it restarts from history.
+Settings lists every provider at the top (Claude accounts in priority order, Codex sign-in,
+API keys saved or removed per provider: `PUT/DELETE /api/llm/keys/{provider}`), then the model
+per task. Sign-in runs the CLI (`src/core/llm/signin.py`): the page it prints is opened when the
+CLI did not open it, and the code claude.ai shows on that page is passed back to the CLI.
+Plan windows (`data/usage_claude.json`, per Claude account; Codex through `app-server`) and per-provider spend
 (`data/model_spend.json`) are served by `GET /api/connections`. The assistant's handover packet
 (`src/agents/handoff.py`, `prompts/handoff*.md`) is built from recorded data only: the user's
 messages, the actions taken and the last answer; each provider keeps its own CLI session.

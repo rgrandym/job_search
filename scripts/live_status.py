@@ -22,6 +22,7 @@ inside the window), today's tokens and spent plans, from `GET /api/connections`.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import urllib.error
@@ -140,7 +141,10 @@ def status(backend: str = BACKEND, frontend: str = FRONTEND, plans: bool = False
 def claude_limits(readings: str, backend: str = BACKEND) -> dict[str, Any]:
     """POST the session's Claude windows (a JSON list) to the app; never raises."""
     try:
-        body = json.dumps(json.loads(readings)).encode()
+        # This session's account folder, so the app files the readings under that account.
+        folder = os.environ.get("CLAUDE_CONFIG_DIR") or None
+        rows = [{**r, "config_dir": folder} for r in json.loads(readings)]
+        body = json.dumps(rows).encode()
         req = urllib.request.Request(
             f"{backend}/api/usage/claude",
             data=body,

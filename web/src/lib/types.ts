@@ -70,6 +70,51 @@ export interface RoleView {
   switched: boolean;
 }
 
+/** One Claude account: a Claude Code folder, in the order calls use them (backend
+ *  `connections.ClaudeAccountView`). */
+export interface ClaudeAccount {
+  id: string;
+  label: string;
+  /** null: the Claude Code CLI's default sign-in (~/.claude). */
+  config_dir: string | null;
+  signed_in: boolean;
+  /** Who the folder is signed in as. */
+  email: string | null;
+  subscription: string | null;
+  message: string;
+  /** Calls run on this account now. */
+  active: boolean;
+  /** An earlier account signed in as the same person (so this one adds no usage). */
+  same_as: string | null;
+  windows: PlanWindows | null;
+  exhausted_until: number | null;
+}
+
+/** A Claude Code folder on this computer that is not one of the app's accounts yet. */
+export interface FoundFolder {
+  folder: string;
+  signed_in: boolean;
+  email: string | null;
+  subscription: string | null;
+}
+
+/** `GET /api/claude-code/accounts`: the accounts and Claude folders not added yet. */
+export interface ClaudeAccountsView {
+  accounts: ClaudeAccount[];
+  found: FoundFolder[];
+}
+
+/** A CLI sign-in just started (backend `signin.SignInStart`). */
+export interface SignInStart {
+  started: boolean;
+  /** The provider's sign-in page, as the CLI printed it. */
+  url: string | null;
+  /** The CLI says it opened the browser itself. */
+  opened: boolean;
+  /** The page ends on a code to paste back (Claude). */
+  needs_code: boolean;
+}
+
 export interface Connection {
   id: Provider;
   label: string;
@@ -81,6 +126,8 @@ export interface Connection {
   spend_today: SpendRow[];
   cost_today: number | null;
   cost_month: number | null;
+  /** Claude Code only: each Claude account. */
+  accounts: ClaudeAccount[];
 }
 
 /** `GET /api/connections`: every model connection in one view. */

@@ -121,7 +121,7 @@ export function FindInLists({ jobs, onPick }: { jobs: FoundJob[]; onPick: (job: 
         </button>
       )}
       {open && text.trim() && (
-        <div className="absolute right-0 top-full z-30 mt-1 max-h-96 w-[min(28rem,calc(100vw-2rem))] overflow-y-auto scroll-thin rounded-md border border-border bg-panel p-1 shadow-lg" role="listbox">
+        <div className="absolute right-0 top-full z-30 mt-1 max-h-96 w-[min(28rem,calc(var(--vw)*100_-_2rem))] overflow-y-auto scroll-thin rounded-md border border-border bg-panel p-1 shadow-lg" role="listbox">
           {found.length === 0 ? (
             <p className="p-2 text-[12px] text-muted">
               No job in your results, Saved or Applied lists matches. To find a posting online, use <b>Find one job</b> next to Search.

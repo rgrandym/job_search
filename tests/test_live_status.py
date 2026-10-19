@@ -153,8 +153,12 @@ def test_claude_limits_posts_the_readings(monkeypatch: pytest.MonkeyPatch) -> No
         return _Resp()
 
     monkeypatch.setattr(live.urllib.request, "urlopen", fake_open)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     out = live.claude_limits('[{"kind": "five_hour", "percent_used": 23.5}]')
     assert out == {"ok": True, "recorded": 1}
     assert sent["url"].endswith("/api/usage/claude")
-    assert sent["body"] == [{"kind": "five_hour", "percent_used": 23.5}]
+    assert sent["body"] == [{"kind": "five_hour", "percent_used": 23.5, "config_dir": None}]
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/home/me/.claude-work")  # a second account
+    live.claude_limits('[{"kind": "five_hour", "percent_used": 5}]')
+    assert sent["body"][0]["config_dir"] == "/home/me/.claude-work"
     assert live.claude_limits("not json")["ok"] is False

@@ -30,6 +30,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
+from src.core.llm import signin
 from src.core.llm.calls import run_cli
 from src.core.llm.native import MCP_SERVER, NATIVE_TIMEOUT_S, TextRelay, run_streaming
 from src.core.llm.types import (
@@ -214,17 +215,13 @@ def codex_status() -> dict[str, Any]:
     }
 
 
-def start_login() -> None:
-    """Launch `codex login` (opens the ChatGPT sign-in page in the browser)."""
+def start_login() -> signin.SignInStart:
+    """Start `codex login` (it opens the ChatGPT sign-in page in the browser and finishes by
+    itself once the user approves)."""
     binary = codex_binary()
     if binary is None:
         raise LLMError("Codex CLI not found")
-    subprocess.Popen(
-        [binary, "login"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    return signin.start("codex", [binary, "login"])
 
 
 def list_codex_models() -> list[dict[str, Any]]:

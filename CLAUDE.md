@@ -58,6 +58,8 @@ src/
                claude_code_backend.py · codex_backend.py · native.py (CLI agent loops over MCP)
                usage.py (error kinds, plan windows, spend ledger) · fallback.py (plan handover)
                calls.py (call groups: Stop kills CLI calls and cuts off HTTP requests mid-call)
+               claude_accounts.py (several Claude plan accounts, used in turn when one is spent)
+               signin.py (CLI sign-in from Settings: its link opened, a pasted code passed on)
   cv/          models.py · master_cv_manager.py · tailor.py (requirement map, positioning, guards,
                review, trim and level rules) · fit_check.py (before/after) · claims.py · cover_letter.py
                proposals.py (optimised red layer: proposal and compression checks)

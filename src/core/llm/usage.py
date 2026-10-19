@@ -11,6 +11,9 @@ soon after a call on that plan.
 Each plan window also shows the tokens this app spent inside it (`tokens`), from a short log
 of recent calls: the plans state only a percentage, never a token allowance.
 
+Claude windows are kept per Claude account (`claude_accounts`: each signed-in folder has its
+own plan); the Claude Code provider's windows are those of the account calls run on now.
+
 Persistence (`data/usage_claude.json`, `data/model_spend.json`, `data/usage_recent.json`)
 starts once the workspace calls `configure(data_dir)`; until then everything stays in memory,
 so tests and CLIs never write into the user's data folder by accident.
@@ -30,6 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 ErrorKind = Literal["limit", "auth", "context", "network", "other"]
 PLAN_PROVIDERS = ("claude_code", "codex")  # paid by plan windows, not per token
+DEFAULT_ACCOUNT = "default"  # `claude_accounts.DEFAULT_ID`: the CLI's own sign-in
 
 LIMIT = re.compile(
     r"usage limit|hit your (usage )?limit|limit reached|limit (has been )?exceeded|rate[ _-]?limit"
@@ -130,7 +134,7 @@ def reset_from_text(text: str, now: float | None = None) -> float | None:
 
 _lock = threading.Lock()
 _dir: Path | None = None
-_claude: dict[str, Any] = {}
+_claude: dict[str, dict[str, Any]] = {}  # Claude account -> window kind -> last reading
 _spend: dict[str, dict[str, dict[str, Any]]] = {}  # day -> "provider|model" -> counters
 _exhausted: dict[str, tuple[float, str]] = {}  # provider -> (until, message)
 _recent: dict[str, list[list[float]]] = {}  # plan provider -> [[time, input, output], ...]
@@ -146,9 +150,18 @@ def configure(data_dir: Path | None) -> None:
         _exhausted.clear()
         _recent.clear()
         _claude_cli.clear()
-        _claude.update(_read("usage_claude.json"))
+        _claude.update(_claude_accounts(_read("usage_claude.json")))
         _spend.update(_read("model_spend.json"))
         _recent.update(_read("usage_recent.json"))
+        if "claude_code" in _recent:  # calls from before accounts ran on the default sign-in
+            _recent.setdefault(f"claude_code@{DEFAULT_ACCOUNT}", list(_recent["claude_code"]))
+
+
+def _claude_accounts(saved: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Stored windows per account; a file from before accounts belongs to the default one."""
+    if "observed_at" in saved:
+        return {DEFAULT_ACCOUNT: saved}
+    return {k: v for k, v in saved.items() if isinstance(v, dict)}
 
 
 def _read(name: str) -> dict[str, Any]:
@@ -181,29 +194,33 @@ _CLAUDE_NAMES = {
 }
 
 
-def record_claude_limit(info: dict[str, Any]) -> None:
-    """Store one `rate_limit_info` from a stream-json `rate_limit_event`."""
+def record_claude_limit(info: dict[str, Any], account: str = DEFAULT_ACCOUNT) -> None:
+    """Store one `rate_limit_info` from a stream-json `rate_limit_event` for `account`."""
     kind = info.get("rateLimitType")
     if not kind:
         return
     with _lock:
-        win = dict(_claude.get(str(kind)) or {})
+        mine = _claude.setdefault(account, {})
+        win = dict(mine.get(str(kind)) or {})
         win.update(status=info.get("status"), resetsAt=info.get("resetsAt"))
         if info.get("utilization") is not None:
             win["utilization"] = info["utilization"]
         win["overage"] = bool(info.get("isUsingOverage"))
-        _claude[str(kind)] = win
-        _claude["observed_at"] = time.time()
+        mine[str(kind)] = win
+        mine["observed_at"] = time.time()
         _write("usage_claude.json", _claude)
 
 
-def record_claude_reading(kind: str, percent_used: float, resets_at: float | None) -> None:
+def record_claude_reading(
+    kind: str, percent_used: float, resets_at: float | None, account: str = DEFAULT_ACCOUNT
+) -> None:
     """Store a window's share used as a Claude Code session reports it (the dev pane passes
     these on): unlike `rate_limit_event`s, it is stated far from the limit too."""
     if kind not in _CLAUDE_NAMES:
         return
     with _lock:
-        win = dict(_claude.get(kind) or {})
+        mine = _claude.setdefault(account, {})
+        win = dict(mine.get(kind) or {})
         previous_reset = win.get("resetsAt")
         win["utilization"] = max(0.0, min(float(percent_used), 100.0)) / 100  # a fraction
         if resets_at:
@@ -211,16 +228,16 @@ def record_claude_reading(kind: str, percent_used: float, resets_at: float | Non
             if previous_reset and resets_at > float(previous_reset) + 60:
                 win["status"] = "allowed"  # the rejected window has reset
         win.setdefault("status", "allowed")
-        _claude[kind] = win
-        _claude["observed_at"] = time.time()
+        mine[kind] = win
+        mine["observed_at"] = time.time()
         _write("usage_claude.json", _claude)
 
 
-def claude_windows(now: float | None = None) -> UsageWindows:
-    """The Claude plan's windows as last reported. A window past its reset reads as unused."""
+def claude_windows(now: float | None = None, account: str = DEFAULT_ACCOUNT) -> UsageWindows:
+    """A Claude account's windows as last reported. A window past its reset reads as unused."""
     now = time.time() if now is None else now
     with _lock:
-        stored = dict(_claude)
+        stored = dict(_claude.get(account) or {})
     if not stored.get("observed_at"):
         return UsageWindows(note="Shown after the first Claude Code call.")
     windows = []
@@ -298,7 +315,8 @@ def codex_plan_windows(ttl: float = CODEX_TTL_S) -> UsageWindows:
     return value
 
 
-_claude_cli: dict[str, Any] = {}  # when `/usage` was last read, and whether calls moved it
+# Claude account -> when its `/usage` was last read, and whether calls moved it since.
+_claude_cli: dict[str, dict[str, Any]] = {}
 _USAGE_LINE = re.compile(
     r"^\s*Current (session|week)(?: \(([^)]*)\))?:\s*(\d+(?:\.\d+)?)% used(?:\s*·\s*resets (.+))?$",
     re.I | re.M,
@@ -361,35 +379,49 @@ def _reset_epoch(text: str, now: float | None = None) -> float | None:
     return when.timestamp()
 
 
-def claude_plan_windows(ttl: float = CLAUDE_TTL_S) -> UsageWindows:
-    """The Claude plan's windows, refreshed from `/usage` once a minute (sooner after calls
-    on the plan); what the calls reported stands when it cannot be read."""
-    age = time.time() - float(_claude_cli.get("at") or 0)
-    stale = _claude_cli.get("stale") and age >= CODEX_STALE_S
+def claude_plan_windows(
+    ttl: float = CLAUDE_TTL_S, account: str = DEFAULT_ACCOUNT, config_dir: str | None = None
+) -> UsageWindows:
+    """A Claude account's windows (its folder: `config_dir`), refreshed from `/usage` once a
+    minute (sooner after calls on it); what the calls reported stands when it cannot be read."""
+    read = _claude_cli.setdefault(account, {})
+    age = time.time() - float(read.get("at") or 0)
+    stale = read.get("stale") and age >= CODEX_STALE_S
     if age >= ttl or stale:
-        _claude_cli.update(at=time.time(), stale=False)  # one reader at a time
+        read.update(at=time.time(), stale=False)  # one reader at a time
         from src.core.llm.claude_code_backend import claude_usage_text
         from src.core.llm.types import LLMError
 
         try:
-            readings = parse_claude_usage(claude_usage_text())
+            readings = parse_claude_usage(claude_usage_text(config_dir))
         except (LLMError, OSError, ValueError):
             readings = []
         for kind, used, resets in readings:
-            record_claude_reading(kind, used, resets)
-    return claude_windows()
+            record_claude_reading(kind, used, resets, account)
+    return claude_windows(account=account)
 
 
-def plan_windows(provider: str, fresh: bool = False) -> UsageWindows | None:
+def plan_windows(
+    provider: str, fresh: bool = False, account: str | None = None
+) -> UsageWindows | None:
     """The plan windows of a plan provider, each with this app's tokens inside it; None for
-    providers billed per token."""
+    providers billed per token. Claude Code: `account`'s, else those of the account calls
+    run on now."""
+    ttl = 0 if fresh else CLAUDE_TTL_S
+    key = provider
     if provider == "claude_code":
-        found = claude_plan_windows(ttl=0 if fresh else CLAUDE_TTL_S)
+        from src.core.llm import claude_accounts
+
+        found_account = claude_accounts.get(account) if account else claude_accounts.active()
+        if found_account is None:
+            return None
+        key = claude_accounts.spent_key(found_account.id)
+        found = claude_plan_windows(ttl, found_account.id, found_account.config_dir)
     elif provider == "codex":
         found = codex_plan_windows(ttl=0 if fresh else CODEX_TTL_S)
     else:
         return None
-    windows = [w.model_copy(update={"tokens": window_tokens(provider, w)}) for w in found.windows]
+    windows = [w.model_copy(update={"tokens": window_tokens(key, w)}) for w in found.windows]
     return found.model_copy(update={"windows": windows})
 
 
@@ -475,8 +507,13 @@ def record_spend(
             _log_recent(provider, int(input_tokens), int(output_tokens))
     if provider == "codex":
         _codex_cache["stale"] = True  # its windows moved: read them again soon
-    elif provider == "claude_code":
-        _claude_cli["stale"] = True
+
+
+def record_account_tokens(account: str, input_tokens: int, output_tokens: int) -> None:
+    """Log a call on one Claude account, whose windows then are read again soon."""
+    with _lock:
+        _log_recent(f"claude_code@{account}", int(input_tokens), int(output_tokens))
+    _claude_cli.setdefault(account, {})["stale"] = True
 
 
 RECENT_S = 8 * 86400  # longer than the longest plan window (7 days)
