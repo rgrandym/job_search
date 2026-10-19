@@ -138,7 +138,9 @@ def account_views(max_age: float = claude_accounts.STATUS_TTL_S) -> list[ClaudeA
         signed_in = bool(status.get("logged_in"))
         email = status.get("email") if signed_in else None
         same = next((v.label for v in out if email and v.email == email), None)
-        windows = usage.plan_windows("claude_code", account=account.id) if signed_in else None
+        windows = (
+            usage.plan_windows("claude_code", account=account.id, live=True) if signed_in else None
+        )
         out.append(
             ClaudeAccountView(
                 id=account.id,
@@ -230,7 +232,7 @@ def connections(ws: Workspace) -> ConnectionsView:
                 billing="plan" if plan else "key",
                 ready=ready,
                 roles=labels,
-                windows=usage.plan_windows(provider) if plan and ready else None,
+                windows=usage.plan_windows(provider, live=True) if plan and ready else None,
                 exhausted_until=usage.exhausted_until(provider),
                 spend_today=mine_today,
                 cost_today=None if plan else _cost(mine_today, prices),

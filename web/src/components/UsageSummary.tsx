@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { clockLabel, tokenCount } from "../lib/labels";
-import type { Connection, ConnectionsView, PlanWindow } from "../lib/types";
+import type { ClaudeAccount, Connection, ConnectionsView, PlanWindow } from "../lib/types";
 import { cn } from "../lib/utils";
 import { spendLine } from "./ConnectionsPanel";
 import { useNow } from "./TaskProgress";
@@ -25,7 +25,9 @@ const left = (win: PlanWindow) => (win.used_percent == null ? null : Math.max(0,
 const exhausted = (win: PlanWindow) => left(win) === 0 || win.status === "rejected";
 
 export function useConnections(busy: boolean) {
-  return useQuery({ queryKey: ["connections"], queryFn: api.connections, refetchInterval: busy ? 10_000 : 60_000 });
+  // Every Claude account is read again in the background every 20 s; polling more often
+  // only picks up the newest reading and this app's tokens, which change with each call.
+  return useQuery({ queryKey: ["connections"], queryFn: api.connections, refetchInterval: busy ? 5_000 : 15_000 });
 }
 
 /** Connections that serve a task or were used today. */
@@ -80,8 +82,37 @@ function WindowLine({ win, now, threshold }: { win: PlanWindow; now: number; thr
   );
 }
 
+/** "read 12 s ago" for a plan reading. */
+const readAgo = (at: number | null, now: number) => (at == null ? "" : now - at < 60 ? `read ${Math.max(0, Math.round(now - at))} s ago` : `read ${until(now - at)} ago`);
+
+/** One Claude account: who it is, whether calls run on it, and its own windows. */
+function AccountUsage({ a, now, threshold }: { a: ClaudeAccount; now: number; threshold: number }) {
+  const windows = a.windows?.windows ?? [];
+  let state = "";
+  if (!a.signed_in) state = "not signed in";
+  else if (a.exhausted_until) state = `limit reached · back in ${until(a.exhausted_until - now)}`;
+  else if (a.same_as) state = `same account as ${a.same_as}`;
+  return (
+    <div className="space-y-1 rounded-md border border-border p-1.5">
+      <div className="flex items-baseline gap-1.5 text-[11px]">
+        <span className={cn("h-1.5 w-1.5 shrink-0 self-center rounded-full", !a.signed_in ? "bg-bad" : a.exhausted_until ? "bg-warn" : "bg-good")} />
+        <span className={a.active ? "font-medium text-fg" : "text-muted"}>{a.label}</span>
+        {a.active && <span className="chip">in use</span>}
+        {a.email && <span className="min-w-0 truncate text-faint">{a.email}</span>}
+        {/* Idle accounts are read once (see `usage.plan_windows`), so their age says nothing. */}
+        <span className={cn("ml-auto shrink-0", state ? "text-warn" : "text-faint")}>
+          {state || (a.active ? readAgo(a.windows?.updated_at ?? null, now) : "not in use")}
+        </span>
+      </div>
+      {windows.map((w) => <WindowLine key={w.name} win={w} now={now} threshold={threshold} />)}
+      {a.signed_in && !windows.length && <p className="text-[10px] text-faint">{a.windows?.note || "Reading usage…"}</p>}
+    </div>
+  );
+}
+
 function ConnectionUsage({ c, now, threshold }: { c: Connection; now: number; threshold: number }) {
   const windows = c.windows?.windows ?? [];
+  const several = c.accounts.length > 1;
   const sessionExhausted = windows.some((w) => w.name === "5h" && exhausted(w));
   return (
     <div className="space-y-1">
@@ -93,8 +124,10 @@ function ConnectionUsage({ c, now, threshold }: { c: Connection; now: number; th
           {c.cost_today != null && ` · $${c.cost_today.toFixed(3)}`}
         </span>
       </div>
-      {windows.map((w) => <WindowLine key={w.name} win={w} now={now} threshold={threshold} />)}
-      {c.billing === "plan" && !windows.length && c.windows?.note && <p className="text-[10px] text-faint">{c.windows.note}</p>}
+      {several
+        ? c.accounts.map((a) => <AccountUsage key={a.id} a={a} now={now} threshold={threshold} />)
+        : windows.map((w) => <WindowLine key={w.name} win={w} now={now} threshold={threshold} />)}
+      {!several && c.billing === "plan" && !windows.length && c.windows?.note && <p className="text-[10px] text-faint">{c.windows.note}</p>}
     </div>
   );
 }

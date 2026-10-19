@@ -179,6 +179,28 @@ def test_claude_windows_are_read_from_usage_and_again_after_a_call(
     assert len(reads) == 2
 
 
+def test_live_windows_are_read_in_the_background(monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    from src.core.llm import claude_code_backend
+
+    release = threading.Event()
+
+    def text(config_dir: str | None = None) -> str:
+        release.wait(5)
+        return "Current session: 30% used · resets 11:59pm (UTC)"
+
+    monkeypatch.setattr(claude_code_backend, "claude_usage_text", text)
+    first = usage.plan_windows("claude_code", live=True)  # returns before `/usage` answers
+    assert first is not None and first.windows == []
+    release.set()
+    deadline = time.time() + 5
+    while time.time() < deadline and not usage.claude_windows().windows:
+        time.sleep(0.01)
+    found = usage.plan_windows("claude_code", live=True)
+    assert found is not None and found.windows[0].used_percent == 30.0
+
+
 def test_an_unreadable_usage_keeps_what_the_calls_reported() -> None:
     usage.record_claude_limit(
         {"rateLimitType": "seven_day", "status": "allowed_warning", "utilization": 0.77}

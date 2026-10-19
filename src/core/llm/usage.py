@@ -22,6 +22,7 @@ so tests and CLIs never write into the user's data folder by accident.
 from __future__ import annotations
 
 import json
+import math
 import re
 import threading
 import time
@@ -269,6 +270,7 @@ def claude_windows(now: float | None = None, account: str = DEFAULT_ACCOUNT) -> 
 _codex_cache: dict[str, Any] = {}
 CODEX_TTL_S = 60
 CLAUDE_TTL_S = 60
+LIVE_TTL_S = 20  # the usage panel: Claude accounts read again this often
 CODEX_STALE_S = 15  # after a Codex call, windows older than this are read again
 
 
@@ -379,35 +381,52 @@ def _reset_epoch(text: str, now: float | None = None) -> float | None:
     return when.timestamp()
 
 
+def _read_claude_usage(account: str, config_dir: str | None) -> None:
+    """Record what `/usage` reports for one account; nothing when it cannot be read."""
+    from src.core.llm.claude_code_backend import claude_usage_text
+    from src.core.llm.types import LLMError
+
+    try:
+        readings = parse_claude_usage(claude_usage_text(config_dir))
+    except (LLMError, OSError, ValueError):
+        readings = []
+    for kind, used, resets in readings:
+        record_claude_reading(kind, used, resets, account)
+
+
 def claude_plan_windows(
-    ttl: float = CLAUDE_TTL_S, account: str = DEFAULT_ACCOUNT, config_dir: str | None = None
+    ttl: float = CLAUDE_TTL_S,
+    account: str = DEFAULT_ACCOUNT,
+    config_dir: str | None = None,
+    wait: bool = True,
 ) -> UsageWindows:
     """A Claude account's windows (its folder: `config_dir`), refreshed from `/usage` once a
-    minute (sooner after calls on it); what the calls reported stands when it cannot be read."""
+    minute (sooner after calls on it); what the calls reported stands when it cannot be read.
+    `wait=False` reads in the background and returns what is known now."""
     read = _claude_cli.setdefault(account, {})
     age = time.time() - float(read.get("at") or 0)
     stale = read.get("stale") and age >= CODEX_STALE_S
-    if age >= ttl or stale:
+    if not read.get("at") or age >= ttl or stale:
         read.update(at=time.time(), stale=False)  # one reader at a time
-        from src.core.llm.claude_code_backend import claude_usage_text
-        from src.core.llm.types import LLMError
-
-        try:
-            readings = parse_claude_usage(claude_usage_text(config_dir))
-        except (LLMError, OSError, ValueError):
-            readings = []
-        for kind, used, resets in readings:
-            record_claude_reading(kind, used, resets, account)
+        if wait:
+            _read_claude_usage(account, config_dir)
+        else:
+            threading.Thread(
+                target=_read_claude_usage, args=(account, config_dir), daemon=True
+            ).start()
     return claude_windows(account=account)
 
 
 def plan_windows(
-    provider: str, fresh: bool = False, account: str | None = None
+    provider: str, fresh: bool = False, account: str | None = None, live: bool = False
 ) -> UsageWindows | None:
     """The plan windows of a plan provider, each with this app's tokens inside it; None for
     providers billed per token. Claude Code: `account`'s, else those of the account calls
-    run on now."""
-    ttl = 0 if fresh else CLAUDE_TTL_S
+    run on now. `live` (the usage panel): the account in use is read again every
+    `LIVE_TTL_S` in the background, so the panel never waits on the CLI; an idle account
+    is read once, then again only after calls on it (its spent state and reset times are
+    known, and a window past its reset already reads as unused)."""
+    ttl: float = 0 if fresh else CLAUDE_TTL_S
     key = provider
     if provider == "claude_code":
         from src.core.llm import claude_accounts
@@ -416,7 +435,15 @@ def plan_windows(
         if found_account is None:
             return None
         key = claude_accounts.spent_key(found_account.id)
-        found = claude_plan_windows(ttl, found_account.id, found_account.config_dir)
+        if live:
+            idle = found_account.id != claude_accounts.active().id
+            ttl = math.inf if idle else min(ttl, LIVE_TTL_S)
+        found = claude_plan_windows(
+            ttl,
+            found_account.id,
+            found_account.config_dir,
+            wait=not live,
+        )
     elif provider == "codex":
         found = codex_plan_windows(ttl=0 if fresh else CODEX_TTL_S)
     else:

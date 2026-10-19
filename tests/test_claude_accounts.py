@@ -275,3 +275,39 @@ def test_two_accounts_signed_in_as_the_same_person_are_flagged(
         ("me@example.com", None),
         ("me@example.com", "Claude (default sign-in)"),
     ]
+
+
+def test_an_idle_account_is_read_once_until_a_call_runs_on_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    work = claude_accounts.add("Work", "/tmp/claude-work-test").config_dir
+    reads: list[str | None] = []
+
+    def text(config_dir: str | None = None) -> str:
+        reads.append(config_dir)
+        return "Current week (all models): 100% used · resets 11:59pm (UTC)"
+
+    class Now:  # the background read, run in place so the test can count it
+        def __init__(self, target: Any, args: tuple[Any, ...], daemon: bool) -> None:
+            self.run = lambda: target(*args)
+
+        def start(self) -> None:
+            self.run()
+
+    monkeypatch.setattr(backend, "claude_usage_text", text)
+    monkeypatch.setattr(usage.threading, "Thread", Now)
+    for _ in range(2):
+        usage.plan_windows("claude_code", account="work", live=True)
+        usage.plan_windows("claude_code", account="default", live=True)
+    assert reads == [work, None]
+
+    for state in usage._claude_cli.values():  # long after: only the account in use is read
+        state["at"] -= usage.CLAUDE_TTL_S
+    usage.plan_windows("claude_code", account="work", live=True)
+    usage.plan_windows("claude_code", account="default", live=True)
+    assert reads[2:] == [None]
+
+    usage.record_account_tokens("work", 10, 1)  # a call ran on it: read once more
+    usage._claude_cli["work"]["at"] -= usage.CODEX_STALE_S
+    usage.plan_windows("claude_code", account="work", live=True)
+    assert reads[3:] == [work]
