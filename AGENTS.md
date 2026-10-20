@@ -78,6 +78,10 @@ Settings lists every provider at the top (Claude accounts in priority order, Cod
 API keys saved or removed per provider: `PUT/DELETE /api/llm/keys/{provider}`), then the model
 per task. Sign-in runs the CLI (`src/core/llm/signin.py`): the page it prints is opened when the
 CLI did not open it, and the code claude.ai shows on that page is passed back to the CLI.
+Claude sign-ins live in the macOS Keychain, one entry per folder, and their refresh token is
+used once: concurrent CLI processes on one folder (parallel app calls, VS Code, a terminal)
+can race when it renews, and the losers report "not signed in". With several accounts, one
+such error skips that account for `SIGNED_OUT_S` (10 min); `claude auth status` clears it.
 Plan windows (`data/usage_claude.json`, per Claude account; Codex through `app-server`) and per-provider spend
 (`data/model_spend.json`) are served by `GET /api/connections`. The assistant's handover packet
 (`src/agents/handoff.py`, `prompts/handoff*.md`) is built from recorded data only: the user's
