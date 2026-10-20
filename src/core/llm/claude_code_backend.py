@@ -2,9 +2,9 @@
 
 We never read or reuse the CLI's stored credentials. Every call runs `claude -p` (headless
 mode) with built-in tools and MCP servers disabled, no session persistence and no user
-settings, in an empty temp directory; the CLI handles sign-in. Inherited Anthropic API keys
-are stripped from the child environment so usage comes from the Claude plan (Pro/Max), never
-from an API account.
+settings, in one fixed empty folder (`WORKDIR`); the CLI handles sign-in. Inherited
+Anthropic API keys are stripped from the child environment so usage comes from the Claude
+plan (Pro/Max), never from an API account.
 Structured output uses `--json-schema`. The assistant runs natively (`run_native`): Claude Code
 runs its own agent loop with real tool use, the app's tools reach it through the app's MCP
 endpoint, and each chat resumes its CLI session, so the model keeps every earlier tool result.
@@ -23,7 +23,6 @@ import asyncio
 import json
 import shutil
 import subprocess
-import tempfile
 import uuid
 from collections.abc import Awaitable, Callable
 from functools import lru_cache
@@ -95,6 +94,18 @@ def _folder_env(config_dir: str | None) -> dict[str, str]:
     return claude_accounts.env(ClaudeAccount(id="", label="", config_dir=config_dir))
 
 
+# The working folder of every headless call. A new temporary folder per call made Claude
+# Code register a new project in ~/.claude/projects each time, thousands of them; one
+# fixed folder registers one. It sits outside any repository so no CLAUDE.md is read, and
+# nothing writes to it (tools off, no session persistence), so concurrent calls share it.
+WORKDIR = Path.home() / ".cache" / "job_search" / "claude-cwd"
+
+
+def _workdir() -> Path:
+    WORKDIR.mkdir(parents=True, exist_ok=True)
+    return WORKDIR
+
+
 def claude_usage_text(config_dir: str | None = None) -> str:
     """The plan usage Claude Code reports for `/usage` (its share of each window and when it
     resets) for the account in `config_dir`. A local command: `claude -p /usage` answers
@@ -104,19 +115,19 @@ def claude_usage_text(config_dir: str | None = None) -> str:
         raise LLMError("Claude Code CLI not found")
     cmd = [binary, "-p", "/usage", "--output-format", "json", "--no-session-persistence"]
     cmd += ["--tools", "", "--strict-mcp-config", "--setting-sources", "", *no_chrome(binary)]
-    with tempfile.TemporaryDirectory(prefix="jobsearch-claude-") as workdir:
-        try:
-            out = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=USAGE_TIMEOUT_S,
-                cwd=workdir,
-                env=_folder_env(config_dir),
-                stdin=subprocess.DEVNULL,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise LLMError(f"Could not read Claude Code usage: {exc}") from exc
+    workdir = _workdir()
+    try:
+        out = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=USAGE_TIMEOUT_S,
+            cwd=workdir,
+            env=_folder_env(config_dir),
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise LLMError(f"Could not read Claude Code usage: {exc}") from exc
     try:
         data = json.loads(out.stdout)
     except json.JSONDecodeError as exc:
@@ -299,17 +310,17 @@ def run_claude(
     command = _command(binary, cfg, model, system, schema)
 
     def on(account: ClaudeAccount) -> dict[str, Any]:
-        with tempfile.TemporaryDirectory(prefix="jobsearch-claude-") as workdir:
-            try:
-                proc = run_cli(  # cancellable by the search that started it
-                    command,
-                    input=prompt,
-                    timeout=TIMEOUT_S,
-                    cwd=workdir,
-                    env=claude_accounts.env(account),
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise LLMError(f"claude -p timed out after {TIMEOUT_S}s") from exc
+        workdir = _workdir()
+        try:
+            proc = run_cli(  # cancellable by the search that started it
+                command,
+                input=prompt,
+                timeout=TIMEOUT_S,
+                cwd=str(workdir),
+                env=claude_accounts.env(account),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise LLMError(f"claude -p timed out after {TIMEOUT_S}s") from exc
         return _result(proc.returncode, proc.stdout, proc.stderr, account.id)
 
     return claude_accounts.call(on)
@@ -325,20 +336,20 @@ async def run_claude_async(
     command = _command(binary, cfg, model, system, schema)
 
     async def on(account: ClaudeAccount) -> dict[str, Any]:
-        with tempfile.TemporaryDirectory(prefix="jobsearch-claude-") as workdir:
-            proc = await asyncio.create_subprocess_exec(
-                *command,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=workdir,
-                env=claude_accounts.env(account),
-            )
-            try:
-                out, err = await asyncio.wait_for(proc.communicate(prompt.encode()), TIMEOUT_S)
-            except (TimeoutError, asyncio.CancelledError):
-                proc.kill()
-                raise
+        workdir = _workdir()
+        proc = await asyncio.create_subprocess_exec(
+            *command,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=workdir,
+            env=claude_accounts.env(account),
+        )
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(prompt.encode()), TIMEOUT_S)
+        except (TimeoutError, asyncio.CancelledError):
+            proc.kill()
+            raise
         stdout, stderr = out.decode(errors="replace"), err.decode(errors="replace")
         return _result(proc.returncode or 0, stdout, stderr, account.id)
 
