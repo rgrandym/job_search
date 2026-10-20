@@ -144,7 +144,7 @@ def test_stop_ends_a_tailoring_request_with_stopped(
 
     async def main() -> tuple[httpx.Response, float]:
         transport = httpx.ASGITransport(app=webapp.app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://app") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             started = time.monotonic()
             request = asyncio.ensure_future(
                 client.post("/api/jobs/j1/tailor?progress_id=t-1", json=body)

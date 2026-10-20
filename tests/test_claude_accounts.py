@@ -119,32 +119,32 @@ def test_accounts_are_added_ordered_and_removed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    (tmp_path / ".claude-rodrigo").mkdir()
-    (tmp_path / ".claude-rodrigo" / ".claude.json").write_text("{}")
+    (tmp_path / ".claude-work").mkdir()
+    (tmp_path / ".claude-work" / ".claude.json").write_text("{}")
     claude_accounts.configure(tmp_path / "data")
     assert [a.id for a in claude_accounts.accounts()] == ["default"]
-    assert claude_accounts.found_folders() == [str(tmp_path / ".claude-rodrigo")]
+    assert claude_accounts.found_folders() == [str(tmp_path / ".claude-work")]
 
-    added = claude_accounts.add("Rodrigo", str(tmp_path / ".claude-rodrigo"))
+    added = claude_accounts.add("Work", str(tmp_path / ".claude-work"))
     claude_accounts.add("Second", None)
     assert (tmp_path / ".claude-second").is_dir()
     assert claude_accounts.found_folders() == []
     with pytest.raises(ValueError):
-        claude_accounts.add("Again", str(tmp_path / ".claude-rodrigo"))
+        claude_accounts.add("Again", str(tmp_path / ".claude-work"))
     with pytest.raises(ValueError):
         claude_accounts.add("Default", str(tmp_path / ".claude"))  # the default sign-in
 
     claude_accounts.move_up(added.id)
     claude_accounts.configure(tmp_path / "data")  # a restart keeps the list and order
-    assert [a.id for a in claude_accounts.accounts()] == ["rodrigo", "default", "second"]
+    assert [a.id for a in claude_accounts.accounts()] == ["work", "default", "second"]
     env = claude_accounts.env(claude_accounts.accounts()[0])
-    assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / ".claude-rodrigo")
+    assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / ".claude-work")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/elsewhere")
     assert "CLAUDE_CONFIG_DIR" not in claude_accounts.env(claude_accounts.DEFAULT)
 
     claude_accounts.remove("default")
     claude_accounts.remove("second")
-    assert [a.id for a in claude_accounts.accounts()] == ["rodrigo"]
+    assert [a.id for a in claude_accounts.accounts()] == ["work"]
     with pytest.raises(KeyError):
         claude_accounts.remove("missing")
 

@@ -20,6 +20,7 @@ from contextlib import nullcontext
 from datetime import date
 from pathlib import Path
 from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
 
 from fastapi import (
     FastAPI,
@@ -113,6 +114,32 @@ app = FastAPI(title="AI Job Search", version="0.1.0")
 log = logging.getLogger(__name__)
 DIST = PROJECT_ROOT / "web" / "dist"
 _GMAIL_PENDING: dict[str, tuple[str, float]] = {}
+# The app serves one person on this computer. "testserver" is the test client's host.
+LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "testserver"})
+
+
+def _hostname(value: str) -> str:
+    """The host part of a Host header or an Origin URL, without scheme or port."""
+    netloc = urlsplit(value).netloc if "://" in value else value
+    return urlsplit(f"//{netloc}").hostname or ""
+
+
+def _local_request(host: str | None, origin: str | None) -> bool:
+    """Sent to this computer's address (not a rebound DNS name) and, when a browser names
+    the page that sent it, from one of this app's own pages: any other website the user has
+    open could otherwise drive the API, and WebSockets are not covered by CORS."""
+    if host is not None and _hostname(host) not in LOCAL_HOSTS:
+        return False
+    return origin is None or _hostname(origin) in LOCAL_HOSTS
+
+
+@app.middleware("http")
+async def _only_local(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    if not _local_request(request.headers.get("host"), request.headers.get("origin")):
+        return JSONResponse({"detail": "Requests from other sites are refused."}, status_code=403)
+    return await call_next(request)
 
 
 # ------------------------------------------------------------------ state & config
@@ -1793,6 +1820,9 @@ def download(name: str) -> FileResponse:
 
 @app.websocket("/api/ws/chat")
 async def chat_ws(websocket: WebSocket) -> None:
+    if not _local_request(websocket.headers.get("host"), websocket.headers.get("origin")):
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     ws = get_workspace()
     session = chat.get_session(websocket.query_params.get("session"), ws)

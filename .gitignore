@@ -35,3 +35,6 @@ web/*.tsbuildinfo
 
 # Types the Claude Code engine writes beside a loaded mod
 .claude/mods/*/.claude-plugin/types/
+
+# Claude Code per-machine settings (may name local accounts and folders)
+.claude/settings.local.json

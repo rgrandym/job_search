@@ -2109,3 +2109,26 @@ def test_api_keys_are_saved_and_removed_per_provider(client: TestClient, ws: Wor
     assert client.delete("/api/llm/keys/openrouter").json() == {"removed": True}
     assert ws.saved_key("openrouter") is None
     assert "sk-or" not in ws.llm_config_path.read_text()
+
+
+def test_requests_from_other_sites_are_refused() -> None:
+    """Another website open in the browser cannot drive the app, nor reach it by DNS rebinding."""
+    from starlette.websockets import WebSocketDisconnect
+
+    from src.web import app as webapp
+
+    client = TestClient(webapp.app)
+    assert client.get("/api/health").status_code == 200
+    own = {"origin": "http://127.0.0.1:8000"}
+    assert client.get("/api/health", headers=own).status_code == 200
+    dev = {"origin": "http://localhost:5173"}
+    assert client.get("/api/health", headers=dev).status_code == 200
+    other = {"origin": "https://evil.example"}
+    assert client.get("/api/health", headers=other).status_code == 403
+    assert client.get("/api/health", headers={"origin": "null"}).status_code == 403
+    assert client.get("/api/health", headers={"host": "evil.example:8000"}).status_code == 403
+    with (
+        pytest.raises(WebSocketDisconnect),
+        client.websocket_connect("/api/ws/chat", headers=other),
+    ):
+        pass

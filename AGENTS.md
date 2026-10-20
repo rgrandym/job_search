@@ -28,6 +28,8 @@ All tests run offline: the LLM is faked, HTTP is mocked, and the agent chat uses
 
 ## The app
 
+The backend listens on 127.0.0.1 only and refuses any request, WebSocket included, whose
+Host or Origin is not this computer (`app._local_request`), so other open websites cannot drive it.
 A three-pane web UI (`web/`) over a FastAPI backend (`src/web/app.py`):
 **left**: CV library/upload (click a CV to review and edit its parsed facts) and search filters (titles, keywords, location, radius, salary, arrangement,
 sources, threshold, smart-match toggle). **centre**: ranked results with AI fit scores, reasons,
