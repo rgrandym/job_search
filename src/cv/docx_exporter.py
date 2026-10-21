@@ -209,7 +209,9 @@ def _experience(
             dt.add_bullet(doc, bullet.text)
         for item in additions or []:
             if item.status == "pending" and item.kind == "experience" and item.role_id == e.id:
-                run = dt.add_bullet(doc, f"[CONFIRM EXPERIENCE BEFORE USE] {item.text}").runs[0]
+                run = dt.add_bullet(doc, f"[CONFIRM NEW LINE BEFORE USE: added] {item.text}").runs[
+                    0
+                ]
                 run.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
 
 

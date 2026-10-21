@@ -915,3 +915,13 @@ def test_editing_a_cover_letter_rewrites_its_own_word_file(
     assert [p.name for p in directory.glob("*.docx")] == ["letter.docx"]
     body = "\n".join(p.text for p in Document(str(path)).paragraphs)
     assert "Third draft." in body
+
+
+def test_a_term_counts_as_evidenced_however_hyphens_and_plurals_write_it() -> None:
+    from src.tools.search_tools import mentions
+
+    assert mentions("an early-stage life-science venture", "life science")
+    assert mentions("ten years in the life sciences", "life science")
+    assert mentions("BSc, Biochemistry", "bachelor's degree")
+    assert not mentions("AI-powered applications", "AI-powered products")  # another claim
+    assert not mentions("access control", "acces")

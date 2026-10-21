@@ -29,6 +29,8 @@ SKILL_SYNONYMS: dict[str, set[str]] = {
     "c++": {"cpp"},
     "c#": {"csharp"},
     "golang": {"go lang"},  # bare "go" is too ambiguous ("go to market")
+    # The degree a posting asks for, as CVs write it ("BA" is left out: too ambiguous).
+    "bachelor's degree": {"bachelor", "bachelors", "bachelor of science", "bsc", "b.sc", "beng"},
 }
 _ALIAS_TO_CANON = {a: c for c, aliases in SKILL_SYNONYMS.items() for a in aliases | {c}}
 
@@ -229,9 +231,21 @@ def _padded(text: str) -> str:
 _LONE_LETTER = r"(?<![\w&./'’-]){}(?![\w&/'’+#-]|\.\w|\.\s+[A-Z][a-z])"
 
 
+def _forms(tokens: list[str]) -> set[str]:
+    """A term as an ATS search finds it: hyphens as spaces, and singular or plural
+    ("life science" in "life-sciences")."""
+    words = " ".join(tokens).replace("-", " ").split()
+    last = words[-1]
+    if len(last) > 3 and last.isalpha():
+        other = last[:-1] if last.endswith("s") and not last.endswith("ss") else f"{last}s"
+        return {" ".join(words), " ".join([*words[:-1], other])}
+    return {" ".join(words)}
+
+
 def _mentions_padded(padded: str, term: str, raw: str | None = None) -> bool:
     canon = normalize_skill(term)
     variants = {canon} | SKILL_SYNONYMS.get(canon, set())
+    loose = padded.replace("-", " ")
     for variant in variants:
         tokens = tokenize(variant)
         if not tokens:
@@ -239,7 +253,7 @@ def _mentions_padded(padded: str, term: str, raw: str | None = None) -> bool:
         if raw is not None and len(tokens) == 1 and len(tokens[0]) == 1 and tokens[0].isalpha():
             if re.search(_LONE_LETTER.format(re.escape(tokens[0].upper())), raw):
                 return True
-        elif f" {' '.join(tokens)} " in padded:
+        elif any(f" {form} " in loose for form in _forms(tokens)):
             return True
     return False
 

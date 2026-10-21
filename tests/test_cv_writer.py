@@ -649,3 +649,41 @@ def test_every_change_is_red_in_a_draft_and_black_in_the_final_version(
     export_docx(tailored, final, final=True)
     text = [p.text for p in Document(str(final)).paragraphs]
     assert _red_texts(final) == set() and "Staff ML Engineer" not in text and new in text
+
+
+def test_a_word_file_that_differs_from_the_stored_cv_still_gets_every_change(
+    master_cv: MasterCV, tmp_path: Path
+) -> None:
+    """The Word design need not match the stored CV word for word (user's report
+    2026-10-21): changes still land in their place, red, for the user to decide."""
+    from src.cv.docx_original import write_like_original
+    from src.cv.models import ReviewAddition
+
+    in_file = master_cv.model_copy(deep=True)
+    in_file.basics.headline = "Senior ML Engineer | Recommendations"
+    in_file.basics.summary = "Engineer building recommendation systems; " * 6
+    in_file.skills[2].items.append("Terraform")  # a skill only the file lists
+    in_file.experience[0].bullets[1].text = "Something written quite differently in Word."
+    original = _original_cv(in_file, tmp_path / "original.docx")
+    tailored = master_cv.model_copy(deep=True)
+    tailored.skills[2].items = ["Docker", "Kubernetes"]  # a shorter skills line
+    tailored.skills[0].items = ["SQL", "Go"]  # the first skill left out
+    gap = ReviewAddition(
+        id="g1", kind="enrichment", text="with model monitoring", anchor_id="nimbus-2",
+        role_id="nimbus", requirement="r", background_quote="b", job_quote="j", reason="r",
+    )  # fmt: skip
+    out = tmp_path / "draft.docx"
+    notes = write_like_original(
+        original, master_cv, tailored, out, ["Staff ML Engineer"], ["Python"],
+        review_additions=[gap], key_strengths=["Built a service"],
+    )  # fmt: skip
+    texts = [p.text for p in Document(str(out)).paragraphs]
+
+    assert texts[texts.index(in_file.basics.headline) + 1] == "Staff ML Engineer"
+    assert texts[texts.index(in_file.basics.summary) + 2] == "• Built a service"
+    assert "Infrastructure: Docker, Kubernetes, Terraform" in texts  # AWS, PostgreSQL cut
+    assert "Languages: SQL, Go" in texts
+    gap_at = next(i for i, t in enumerate(texts) if "with model monitoring" in t)
+    next_role = next(i for i, t in enumerate(texts) if t.endswith(master_cv.experience[1].company))
+    assert gap_at < next_role  # within its role, not at the end of the CV
+    assert not any("placed at the end" in n or "not added" in n for n in notes)

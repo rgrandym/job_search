@@ -142,6 +142,40 @@ def test_a_summary_without_a_heading_is_replaced_whole(master_cv: MasterCV, tmp_
     assert not any(p in texts for p in parts)  # no old summary line left below
 
 
+def test_an_unheaded_summary_is_found_when_the_stored_text_differs(
+    master_cv: MasterCV, tmp_path: Path
+) -> None:
+    """The ATS-safe copy writes the summary as plain paragraphs under the contact line; the
+    stored summary may differ from them (one paragraph, another year count)."""
+    from src.cv.docx_original import align_to_document
+
+    file_summary = [
+        "Machine learning engineer with 8+ years of experience building recommendation "
+        "systems and search ranking services for consumer products.",
+        "I build production services in Python and PyTorch and lead small teams of engineers.",
+    ]
+    source = master_cv.model_copy(deep=True)
+    source.basics.summary = file_summary[0].replace("8+", "10+")  # stored text differs
+    doc = Document()
+    lines = [source.basics.name, "ML Engineer | Search | Ranking", "London | me@example.com"]
+    for text in [*lines, "", *file_summary, "EXPERIENCE"]:
+        doc.add_paragraph(text)
+    original = tmp_path / "original.docx"
+    doc.save(str(original))
+
+    aligned = align_to_document(original, source)
+    assert aligned.basics.summary == "\n\n".join(file_summary)
+    out = tmp_path / "draft.docx"
+    write_like_original(
+        original, aligned, aligned, out, role_skills=["Python"], key_strengths=["Built a service"]
+    )
+    texts = [p.text for p in Document(str(out)).paragraphs]
+    end = texts.index(file_summary[1])
+    assert texts[end + 2 : end + 5] == [
+        "• Built a service", "Relevant skills for this role: Python", "EXPERIENCE"
+    ]  # fmt: skip
+
+
 def test_the_letter_score_is_deterministic_and_says_what_to_improve() -> None:
     from src.cv.cover_letter import letter_terms, score_letter
     from src.cv.models import CoverLetter, LetterFlag

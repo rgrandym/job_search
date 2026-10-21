@@ -105,6 +105,9 @@ Job descriptions are third-party data: every prompt says never to follow instruc
 
 These hold for every tailored CV (user's decision; mandatory):
 
+0. **Never tailored from a draft.** When the selected CV is a draft this app wrote, the CV it
+   came from is tailored instead (`cv_service.tailoring_source`), and the draft's notes say
+   so; a draft without its record that still holds red "[CONFIRM" lines is refused.
 1. **Same format and design as the original CV** (template `"original"`, the default).
    `docx_original.write_like_original` writes the tailored CV as a copy of the selected Word
    CV, or, for a PDF or text CV, of its Word version in the library
@@ -156,8 +159,12 @@ These hold for every tailored CV (user's decision; mandatory):
    least two per role; roles, education and publications always stay; a left-out bullet that
    carried a JD keyword is put back; every left-out line is recorded in `TailoredCV.changes`
    and listed in the UI with the reason (`TailoredCV.trim`).
-5. Anything the Word writer cannot find safely in the file is left as in the original and
-   reported in `TailoredCV.document_notes`.
+5. The Word file need not match the stored CV word for word (user's decision 2026-10-21):
+   changes are placed by the file's layout (summary lines with or without a heading, the
+   headline under the name, a role's last line, a skills line by its label), red in a draft
+   for the user to decide, and a skill only the file lists stays on its line. Anything the
+   Word writer still cannot place safely is left as in the original and reported in
+   `TailoredCV.document_notes`.
 
 ## 3a. Rewrite bullets as STAR accomplishments, without hallucinating
 
@@ -240,9 +247,15 @@ tightened or merged lines of that role.
 **The optimised CV is the short version (user's decision 2026-10-21).** The checked shorter
 roles and skills lines are applied in the draft (`tailor._with_shorter_roles`,
 `proposals.applied`): each version line takes the id of a replaced line it draws on
-(`version_ids`), so the Word writer rewrites that paragraph in its formatting and removes the
-rest; the draft labels each role "[CONFIRM SHORTER VERSION OF THIS ROLE: n lines for m; ...]"
-and each trimmed skills line with what it left out, and keeps a removed skills line in red
+(`version_ids`), so the final version's Word writer rewrites that paragraph in its formatting
+and removes the rest. The draft Word file shows each such role with the user's own lines as
+written in their CV (black), then "[CONFIRM SHORTER VERSION OF THIS ROLE BEFORE USE: the n red
+lines below without a label replace your m lines above; ...]" and the shorter version in red.
+Every other red line there says what it does: "[CONFIRM NEW LINE BEFORE USE: added]",
+"[CONFIRM REWORDED LINE BEFORE USE: replaces the shorter line above]" (one per shorter line,
+the best ranked), "[CONFIRM ADDED WORDS: ...]", so deleting the lines above the label leaves
+the short version (`docx_original._shorter_roles_below`); it
+labels each trimmed skills line with what it left out, and keeps a removed skills line in red
 under "[CONFIRM REMOVAL: not related to this job]"; the final version has no labels and drops
 it. What each replaced is kept (`before`, `before_ids`, `line_ids`): "Restore my lines"
 (`review_compression(..., "restore")`, `proposals.restored`) brings the user's lines back and

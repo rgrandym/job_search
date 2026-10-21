@@ -218,9 +218,12 @@ A CV is a factual document. Tailoring may rephrase and reorder. It may never inv
   40 words, the job terms printed nowhere else kept, every number left out listed, nothing
   added); what fails twice is listed with the changes. **The optimised CV is the short
   version (user's decision 2026-10-21):** the checked shorter roles and skills lines are
-  applied in the draft (`proposals.applied`, `tailor._with_shorter_roles`), red and labelled
-  "[CONFIRM SHORTER VERSION OF THIS ROLE: ...]" / "[CONFIRM REMOVAL: ...]" in the draft, clean
-  in the final version; what each replaced is kept, and "Restore my lines"
+  applied (`proposals.applied`, `tailor._with_shorter_roles`) and clean in the final version.
+  The draft Word file shows each such role with the user's own lines, then the label
+  "[CONFIRM SHORTER VERSION OF THIS ROLE BEFORE USE: ...]" and the shorter version in red
+  below it, so deleting the lines above the label leaves the short version (user's decision
+  2026-10-21, `docx_original._shorter_roles_below`); a removed skills line is labelled
+  "[CONFIRM REMOVAL: ...]". What each replaced is kept, and "Restore my lines"
   (`review_compression`, "restore", `proposals.restored`) brings the user's lines back. The
   scores read the short version. Gap fillers stay red questions for the user; one on a line a
   shorter version replaced sits beside the shorter line that carries it (`line_sources`,
@@ -252,6 +255,10 @@ A CV is a factual document. Tailoring may rephrase and reorder. It may never inv
 ## Tailored CV Rules (MANDATORY, user's decision 2026-10-07)
 
 Every tailored CV is written the same way (`tailor.apply_plan`, `cv/docx_original.py`):
+- **Never from a draft (user's report 2026-10-21):** when the selected CV is a draft this app
+  wrote, tailoring uses the CV that draft came from (`cv_service.tailoring_source`, followed
+  back through earlier drafts) and says so; a draft whose record is gone and still holds red
+  "[CONFIRM" lines is refused with that reason. The selection is left as it is.
 - **Same design as the original** (template `"original"`, the default). The tailored CV is a copy
   of the selected Word CV (`write_like_original`); for a PDF or text CV, of its Word version in
   the library (`cv_service.original_docx`: same name, or nearly the same text); for the
@@ -337,7 +344,11 @@ Every tailored CV is written the same way (`tailor.apply_plan`, `cv/docx_origina
   `OriginalReading`), so every draft of the job is set against the same baseline. The saved search verdict is the original score when available;
   verified changes in CV presentation adjust its five evidence dimensions with the search
   weights. Practicality stays fixed. This measures presentation, not new experience.
-- Anything the Word writer cannot place safely is left as in the original and reported
+- **The Word file need not match the stored CV word for word (user's decision 2026-10-21).**
+  Changes are placed by the file's layout (summary lines, with or without a heading; the
+  headline under the name; a role's last line; a skills line by its label), red in a draft
+  for the user to decide; a skill only the file lists stays on its line. Anything the Word
+  writer still cannot place safely is left as in the original and reported
   (`TailoredCV.document_notes`).
 - **Every change is red in the draft (user's decision 2026-10-15):** rewritten bullets, the
   summary, key strengths, the relevant-skills line, reordered skills lists and suggested

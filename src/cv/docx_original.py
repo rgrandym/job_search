@@ -42,7 +42,7 @@ from src.cv.models import (
     SkillGroup,
     SkillToConfirm,
 )
-from src.cv.proposals import covering_line
+from src.cv.proposals import covering_line, restored
 from src.tools.docx_tools import (
     all_paragraphs,
     find_paragraph,
@@ -253,7 +253,8 @@ def _pair(bullets: list[Bullet], lines: list[Paragraph]) -> dict[str, Paragraph]
 
 def profile_paragraphs(doc: DocxDocument) -> list[Paragraph]:
     """The summary as written in the file: the content lines under a profile/summary heading,
-    up to the next heading or section."""
+    up to the next heading or section; in a CV without that heading, the prose lines just
+    above its first section (`_unheaded_profile`)."""
     paragraphs = all_paragraphs(doc)
     start = next(
         (
@@ -265,7 +266,7 @@ def profile_paragraphs(doc: DocxDocument) -> list[Paragraph]:
         None,
     )
     if start is None:
-        return []
+        return _unheaded_profile(paragraphs)
     lines: list[Paragraph] = []
     for p in paragraphs[start + 1 :]:
         if _heading_level(p) is not None or _section_break(p):
@@ -273,6 +274,72 @@ def profile_paragraphs(doc: DocxDocument) -> list[Paragraph]:
         if len(p.text.strip()) >= MIN_LINE:
             lines.append(p)
     return lines
+
+
+SUMMARY_WORDS = 12  # a summary line is prose (or a sentence): name, headline, contact are not
+
+
+def _prose(paragraph: Paragraph) -> bool:
+    text = paragraph.text.strip()
+    return (
+        len(text) >= MIN_LINE
+        and (text.endswith((".", "!", "?")) or len(text.split()) >= SUMMARY_WORDS)
+        and not any(mark in text for mark in ("|", "@", "\t"))
+        and not DATE_RANGE.search(text)
+    )
+
+
+def _unheaded_profile(paragraphs: list[Paragraph]) -> list[Paragraph]:
+    """A summary with no heading (as the ATS-safe copy writes it): the prose lines directly
+    above the first section heading, below the name, headline and contact lines."""
+    first = _first_section(paragraphs)
+    lines: list[Paragraph] = []
+    for p in reversed(paragraphs[:first] if first is not None else []):
+        if not p.text.strip():
+            continue
+        if not _prose(p) or _listed(p):
+            break
+        lines.append(p)
+    return lines[::-1]
+
+
+def _first_section(paragraphs: list[Paragraph]) -> int | None:
+    return next(
+        (i for i, p in enumerate(paragraphs) if (_heading_level(p) or 0) > 0 or _section_break(p)),
+        None,
+    )
+
+
+def _top_lines(doc: DocxDocument) -> list[Paragraph]:
+    """The non-empty lines above the CV's first section: name, headline, contact, summary."""
+    paragraphs = all_paragraphs(doc)
+    first = _first_section(paragraphs)
+    return [p for p in paragraphs[: first or 0] if p.text.strip()]
+
+
+def _summary_place(doc: DocxDocument) -> Paragraph | None:
+    """Where the summary ends, found from the file's layout whatever its wording: its
+    profile lines, else the last line above the first section. Changes the app writes there
+    are red in a draft, so the text the stored CV holds need not match the file's."""
+    if lines := profile_paragraphs(doc):
+        return lines[-1]
+    top = _top_lines(doc)
+    return top[-1] if top else None
+
+
+def _headline_place(doc: DocxDocument, headline: str | None) -> Paragraph | None:
+    """The headline line, among the lines above the first section (a role heading may carry
+    the same words): the one matching the CV's headline, else the short line under the name
+    (not the contact line)."""
+    top = _top_lines(doc)
+    if not headline or len(top) < 2:
+        return None
+    best = max(top[1:], key=lambda p: _ratio(p.text, headline))
+    if _ratio(best.text, headline) >= 0.75 or _plain(headline) in _plain(best.text):
+        return best
+    line = top[1]
+    text = line.text.strip()
+    return line if len(text) < 200 and "@" not in text and not _prose(line) else None
 
 
 def _covered(bullet: Bullet, lines: list[str]) -> bool:
@@ -361,9 +428,12 @@ def _write(
     compressions: Sequence[CompressionProposal],
     key_strengths: Sequence[str],
 ) -> list[str]:
+    shown = list(compressions)
+    if _MARK.get():
+        tailored, shown = _shorter_roles_below(source, tailored, compressions)
     doc = Document(str(original))
     claimed: list[Any] = []
-    headline = find_paragraph(doc, source.basics.headline or "", 0.75)
+    headline = _headline_place(doc, source.basics.headline)
     notes = _replace(doc, source.basics.headline, tailored.basics.headline, "Headline", claimed)
     notes += _summary(doc, source.basics.summary, tailored.basics.summary, claimed)
     notes += _footers(doc, tailored.basics.name)
@@ -387,18 +457,54 @@ def _write(
     notes += _skills(doc, source.skills, tailored.skills, claimed)
     # Last, so the added lines are never taken for a role, summary or skills line.
     notes += _headline_options(headline, tailored.basics.headline, headline_options)
-    end, found = _key_strengths_lines(_summary_end(doc, tailored.basics.summary), key_strengths)
+    end, found = _key_strengths_lines(_summary_place(doc), key_strengths)
     end, placed = _role_skills_line(end, role_skills)
     notes += found + placed + _skills_to_confirm_line(doc, end, skills_to_confirm)
     places = Places(blocks, lines, skill_lines, headline)
+    # Shorter versions first: a gap filler on a line one replaced goes on its shorter line.
+    notes += _compression_lines(source, places, ranges, shown)
     moved, covered = _beside_shorter_versions(review_additions, compressions)
     notes += _review_addition_lines(doc, places, moved, covered)
-    notes += _compression_lines(source, places, ranges, compressions)
     if academic:
         notes += academic_order(doc)
     out.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(out))
     return notes
+
+
+def _shorter_roles_below(
+    source: MasterCV, tailored: MasterCV, compressions: Sequence[CompressionProposal]
+) -> tuple[MasterCV, list[CompressionProposal]]:
+    """A draft shows each role a shorter version replaced with the user's own lines, as
+    written in their CV (black: a rewrite of a line the shorter version replaces is not
+    shown twice), and the shorter version in red below them, so deleting the lines above the
+    label leaves the short version (the final version is the short version, clean)."""
+    shown, out = tailored, []
+    for item in compressions:
+        if item.kind != "shorter_role" or item.status != "applied":
+            out.append(item)
+            continue
+        role = next((r for r in tailored.experience if r.id == item.role_ids[0]), None)
+        try:
+            shown = _as_written(restored(shown, item, source), source, item.before_ids)
+        except ValueError:  # cannot be taken back here: shown as applied
+            out.append(item)
+            continue
+        current = {b.id: b.text for b in role.bullets} if role else {}
+        lines = [current[i] for i in item.line_ids if i in current] or item.bullets
+        out.append(item.model_copy(update={"status": "pending", "bullets": lines}))
+    return shown, out
+
+
+def _as_written(cv: MasterCV, source: MasterCV, ids: Collection[str]) -> MasterCV:
+    """`cv` with the lines `ids` back in the source CV's own words."""
+    own = source.bullet_index()
+    out = cv.model_copy(deep=True)
+    for role in out.experience:
+        for bullet in role.bullets:
+            if bullet.id in ids and bullet.id in own:
+                bullet.text = own[bullet.id].text
+    return out
 
 
 def restore_normalized_indents(original: Path, edited: Path) -> bool:
@@ -471,15 +577,6 @@ def _headline_options(
     for option in reversed(extra):
         _mark(insert_paragraph_after(line, option))
     return []
-
-
-def _summary_end(doc: DocxDocument, summary: str | None) -> Paragraph | None:
-    """The summary's last line: the end of the profile section, or, in a CV whose summary
-    has no heading above it, the paragraph holding (the last part of) the summary."""
-    if lines := profile_paragraphs(doc):
-        return lines[-1]
-    parts = [part for part in (summary or "").split("\n\n") if part.strip()]
-    return find_paragraph(doc, parts[-1], 0.75) if parts else None
 
 
 def _key_strengths_lines(
@@ -573,12 +670,19 @@ def _beside_shorter_versions(
     additions: Sequence[ReviewAddition], compressions: Sequence[CompressionProposal]
 ) -> tuple[list[ReviewAddition], set[str]]:
     """Gap fillers on a line an applied shorter version replaced, moved to the shorter line
-    that now carries it (`proposals.covering_line`), and the ids they were moved to."""
+    that now carries it (`proposals.covering_line`), and the ids they were moved to. One
+    reworded line per shorter line, the best ranked (`additions` come ranked): several
+    rewrites of lines it merged would offer the same line again and again."""
     out: list[ReviewAddition] = []
     covered: set[str] = set()
+    reworded: set[str] = set()
     for item in additions:
         cover = covering_line(compressions, item.anchor_id or "")
         if cover is not None:
+            if item.kind == "rewording" and item.status == "pending":
+                if cover in reworded:
+                    continue  # still listed in the app; the Word file shows the best one
+                reworded.add(cover)
             item = item.model_copy(update={"anchor_id": cover})
             covered.add(cover)
         out.append(item)
@@ -602,13 +706,13 @@ def _review_addition_lines(
             continue
         if item.kind in {"enrichment", "metric"}:
             line = _alive(places.lines.get(item.anchor_id or ""))
-            if line is None:
-                notes.append(f"Review suggestion for {item.role_id} placed at the end")
-                _red(doc.add_paragraph(f"[CONFIRM BEFORE USE] {item.text}"))
+            if line is None:  # its bullet was not matched: a red line at the role's end
+                notes += _red_line(doc, places, after, item)
             else:
-                _red_run(line, f" [CONFIRM: {item.text}]")
+                what = "ADDED WORDS" if item.kind == "enrichment" else "ADD A NUMBER"
+                _red_run(line, f" [CONFIRM {what}: {item.text}]")
         elif item.kind == "skill" and (line := _alive(places.skills.get(item.skill_group or ""))):
-            _red_run(line, f" · [CONFIRM: {item.text}]")
+            _red_run(line, f" · [CONFIRM ADDED SKILL: {item.text}]")
         else:
             notes += _red_line(doc, places, after, item, item.anchor_id in covered)
     return notes
@@ -622,32 +726,36 @@ def _red_line(
     shortened: bool = False,
 ) -> list[str]:
     """One red paragraph for a proposal, after its anchor (or the last red line there). A
-    reworded line under a shorter version's line adds to it rather than replacing it."""
+    reworded line under a shorter version's line adds to it rather than replacing it. An
+    anchor the file does not match is replaced by its place in the layout: the role's last
+    line, the last skills line, the summary."""
     label = {
-        "experience": "[CONFIRM EXPERIENCE BEFORE USE]",
-        "rewording": "[CONFIRM REWORDED LINE BEFORE USE: adds to the shorter line above]"
+        "experience": "[CONFIRM NEW LINE BEFORE USE: added]",
+        "rewording": "[CONFIRM REWORDED LINE BEFORE USE: replaces the shorter line above]"
         if shortened
         else "[CONFIRM REWORDED LINE BEFORE USE: replaces the line above]",
         "summary": "[CONFIRM SUMMARY BEFORE USE]",
         "headline": "[CONFIRM HEADLINE BEFORE USE]",
-    }.get(item.kind, "[CONFIRM SKILL BEFORE USE]")
+        "skill": "[CONFIRM SKILL BEFORE USE: added]",
+        "enrichment": "[CONFIRM ADDED WORDS BEFORE USE: for the line above]",
+        "metric": "[CONFIRM BEFORE USE: add a number to the line above]",
+    }.get(item.kind, "[CONFIRM BEFORE USE]")
     text = f"{label} {item.text}"
-    if item.kind == "rewording":
-        key = f"line:{item.anchor_id}"
-        anchor = after.get(key) or _alive(places.lines.get(item.anchor_id or ""))
-    elif item.kind == "experience":
-        key = item.anchor_id or item.role_id or ""
-        role_lines = places.blocks.get(item.role_id or "", [])
-        anchor = (
-            after.get(key)
-            or _alive(places.lines.get(item.anchor_id or ""))
-            or next((line for line in reversed(role_lines) if _alive(line)), None)
-        )
+    role_lines = places.blocks.get(item.role_id or "", [])
+    role_end = next((line for line in reversed(role_lines) if _alive(line)), None)
+    if item.kind in {"rewording", "experience", "enrichment", "metric"}:
+        key = f"line:{item.anchor_id}" if item.kind == "rewording" else item.role_id or ""
+        if item.kind == "experience":
+            key = item.anchor_id or item.role_id or ""
+        anchor = after.get(key) or _alive(places.lines.get(item.anchor_id or "")) or role_end
     elif item.kind == "headline":
         key, anchor = "headline", after.get("headline") or _alive(places.headline)
+    elif item.kind == "skill":
+        skills = [line for line in places.skills.values() if _alive(line)]
+        key = "skills"
+        anchor = after.get(key) or (max(skills, key=_position) if skills else None)
     else:
-        lines = profile_paragraphs(doc)
-        key, anchor = "profile", after.get("profile") or (lines[-1] if lines else None)
+        key, anchor = "profile", after.get("profile") or _summary_place(doc)
     if anchor is None:
         _red(doc.add_paragraph(text))
         return [f"Review suggestion for {item.role_id or item.kind} placed at the end"]
@@ -713,34 +821,42 @@ def _shorter_role_lines(places: Places, item: CompressionProposal) -> list[str]:
         return [f"Shorter version of {item.role_ids[0]} not placed (role not found)"]
     model = next((p for p in reversed(lines) if _listed(p)), lines[-1])
     n, m = len(item.bullets), len(item.source_ids)
-    label = f"[CONFIRM SHORTER VERSION OF THIS ROLE BEFORE USE: {n} lines replace the {m} above]"
-    anchor = _red(insert_paragraph_after(max(lines, key=_position), label))
-    for text in item.bullets:
+    label = (
+        f"[CONFIRM SHORTER VERSION OF THIS ROLE BEFORE USE: the {n} red lines below without a "
+        f"label replace your {m} lines above; delete yours to use them, or delete these to "
+        "keep yours. Labelled red lines are separate suggestions]"
+    )
+    anchor = _red(_unlisted(insert_paragraph_after(max(lines, key=_position), label)))
+    ids = item.line_ids or [""] * len(item.bullets)
+    for line_id, text in zip(ids, item.bullets, strict=False):
         anchor = _red(_copy_after(model, anchor, text))
+        if line_id:  # gap fillers for this line go on the shorter line, not the user's
+            places.lines[line_id] = anchor
     return []
 
 
 def _applied_label(places: Places, item: CompressionProposal) -> list[str]:
-    """In a draft, a red label under a role or skills line the short version changed: what
-    it did and that the user's lines can be restored (the final version has no label)."""
-    if not _MARK.get():
+    """In a draft, a red label under a skills line the short version cut: what it left out
+    (the final version has no label). A shorter role is shown below the user's lines
+    instead (`_shorter_roles_below`)."""
+    if not _MARK.get() or item.kind != "trim_skills":
         return []
-    if item.kind == "trim_skills":
-        line = _alive(places.skills.get(item.category))
-        if line is None or not item.bullets:  # a removed line carries its own label
-            return []
-        text = f"[CONFIRM SHORTER SKILLS LINE: left out for this job: {', '.join(item.removed)}]"
-    else:
-        lines = [p for p in places.blocks.get(item.role_ids[0], []) if _alive(p)]
-        if not lines:
-            return []
-        line = max(lines, key=_position)
-        text = (
-            f"[CONFIRM SHORTER VERSION OF THIS ROLE: {len(item.line_ids)} lines for "
-            f"{len(item.before_ids)}; restore your lines in the app if you prefer them]"
-        )
+    line = _alive(places.skills.get(item.category))
+    if line is None or not item.bullets:  # a removed line carries its own label
+        return []
+    text = f"[CONFIRM SHORTER SKILLS LINE: left out for this job: {', '.join(item.removed)}]"
     _red(insert_paragraph_after(line, text))
     return []
+
+
+def _unlisted(paragraph: Paragraph) -> Paragraph:
+    """A label line, not a bullet: copied from a bullet, it loses its list formatting."""
+    ppr = paragraph._p.pPr
+    if ppr is not None and ppr.numPr is not None:
+        ppr.remove(ppr.numPr)
+    if _listed(paragraph):
+        paragraph.style = "Normal"
+    return paragraph
 
 
 def _trimmed_skills_line(places: Places, item: CompressionProposal) -> list[str]:
@@ -857,16 +973,21 @@ def academic_order(doc: DocxDocument) -> list[str]:
 
 
 def _summary(doc: DocxDocument, old: str | None, new: str | None, claimed: list[Any]) -> list[str]:
-    """Write the summary into the file's profile lines (as aligned): one paragraph each when
-    the counts match, otherwise all of it in the first and the rest removed."""
+    """Write the summary into the file's profile lines, whatever their wording: one
+    paragraph each when the counts match, otherwise all of it in the first and the rest
+    removed. A CV with no summary lines gets it under its top lines."""
     if not old or not new or old == new:
         return []
-    lines = profile_paragraphs(doc)
-    if lines and "\n\n".join(p.text.strip() for p in lines) != old:
-        lines = []
-    lines = lines or _summary_run(doc, old)
+    lines = profile_paragraphs(doc) or _summary_run(doc, old)
+    if not lines and (found := find_paragraph(doc, old, 0.75, claimed)) is not None:
+        lines = [found]
     if not lines:
-        return _replace(doc, old, new, "Summary", claimed)
+        if (anchor := _summary_place(doc)) is None:
+            return ["Summary kept as in your CV (the Word file has no lines above its sections)"]
+        paragraph = insert_paragraph_after(anchor, new)
+        _mark(paragraph)
+        claimed.append(paragraph._p)
+        return []
     parts = [part.strip() for part in new.split("\n\n") if part.strip()]
     if len(parts) != len(lines):
         parts = [" ".join(parts)]
@@ -992,8 +1113,15 @@ def _removed_skill_lines(
         if any(g.category == group.category for g in new):
             continue
         paragraph = _list_paragraph(doc, group, claimed)
-        if paragraph is None or not _reorder_list(paragraph, group.items):
-            notes.append(f"Skills line {group.category} kept (not found as one line)")
+        # The file's line may list a skill or two the stored CV lacks: its own label is
+        # enough to know it is this line (most of its skills were found on it).
+        labelled = paragraph is not None and _plain(paragraph.text).startswith(
+            _plain(group.category) + ":"
+        )
+        if paragraph is None or not (labelled or _reorder_list(paragraph, group.items)):
+            notes.append(
+                f"Skills line {group.category} kept: the Word file lists other skills there"
+            )
         elif _MARK.get():  # a draft shows what goes, labelled; the final version drops it
             claimed.append(paragraph._p)
             _red(_red_label(paragraph, "[CONFIRM REMOVAL: not related to this job] "))
@@ -1025,21 +1153,27 @@ def _list_paragraph(doc: DocxDocument, group: SkillGroup, claimed: list[Any]) ->
 
 
 def _reorder_list(paragraph: Paragraph, items: list[str], dropped: Collection[str] = ()) -> bool:
-    """Rewrite "Label: a, b, c." with `items` in the new order, keeping the label's runs.
-    Only when the text after the label is exactly those items and the `dropped` ones (a
-    shorter skills line the user chose: those are left out)."""
+    """Rewrite "Label: a, b, c." with `items` in the new order, keeping the label's runs,
+    and the `dropped` ones left out (a shorter skills line). A skill the file lists that the
+    stored CV does not know stays, after them: the file need not match the CV exactly."""
     text = paragraph.text
     sep = max(SEPARATORS, key=text.count)
-    starts = [text.find(i) for i in items if text.find(i) >= 0]
+    starts = [text.find(i) for i in [*items, *dropped] if text.find(i) >= 0]
     if not starts or text.count(sep) == 0:
         return False
     prefix = min(starts)
+    label_end = text.find(":") + 1  # the list starts after "Label:", whichever skill is first
+    if 0 < label_end <= prefix:
+        prefix = label_end + len(text[label_end:]) - len(text[label_end:].lstrip())
     tail = text[prefix:].rstrip()
     end = "." if tail.endswith(".") else ""
     listed = [part.strip() for part in tail.rstrip(".").split(sep)]
-    ordered = [i for i in items if i in listed]
-    if sorted(i for i in listed if i not in dropped) != sorted(ordered):
-        return False  # something other than these skills is listed
+    known = {_plain(i) for i in [*items, *dropped]}
+    by_name = {_plain(part): part for part in listed}
+    ordered = [by_name[_plain(i)] for i in items if _plain(i) in by_name]
+    if not ordered:
+        return False
+    ordered += [part for part in listed if _plain(part) not in known]
     if ordered != listed:
         replace_text_after(paragraph, prefix, sep.join(ordered) + end)
     return True

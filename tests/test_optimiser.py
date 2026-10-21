@@ -677,7 +677,7 @@ def test_a_shorter_role_is_red_below_the_role_until_chosen(
     write_like_original(original, master_cv, tailored.cv, pending, compressions=[item])
     text = [p.text for p in Document(str(pending)).paragraphs]
     label = next(i for i, t in enumerate(text) if t.startswith("[CONFIRM SHORTER VERSION"))
-    assert "2 lines replace the 3 above" in text[label]
+    assert "the 2 red lines below without a label replace your 3 lines above" in text[label]
     assert text[label + 1 : label + 3] == SHORTER_NIMBUS.bullets
     assert text[label - 1].startswith("Mentored 5 engineers")  # the role's lines stay
     assert {text[label], *SHORTER_NIMBUS.bullets} <= _red_texts(pending)
@@ -759,8 +759,8 @@ def test_red_layer_goes_where_a_reader_expects_it(master_cv: MasterCV, tmp_path:
     )
     text = [p.text for p in Document(str(pending)).paragraphs]
     line = next(t for t in text if t.startswith("Led migration"))
-    assert line.endswith("[CONFIRM: with model monitoring]")
-    assert any(t.endswith("· [CONFIRM: Grafana]") for t in text)
+    assert line.endswith("[CONFIRM ADDED WORDS: with model monitoring]")
+    assert any(t.endswith("· [CONFIRM ADDED SKILL: Grafana]") for t in text)
     assert any(t.startswith("[CONFIRM MERGED ENTRY BEFORE USE") for t in text)
     assert sum("University A" in t for t in text) == 2  # the original entry stays
     report = check_docx(pending, tailored.cv, ["Grafana", "model monitoring"])
@@ -1187,12 +1187,25 @@ def test_the_short_version_is_written_red_and_labelled_then_clean(
     write_like_original(
         original, cv, draft, out, review_additions=gap, compressions=[version, office]
     )
-    text = [p.text for p in Document(str(out)).paragraphs]
-    assert any(t.startswith("[CONFIRM SHORTER VERSION OF THIS ROLE: 6 lines for 10") for t in text)
+    paragraphs = Document(str(out)).paragraphs
+    text = [p.text for p in paragraphs]
+    label = (
+        "[CONFIRM SHORTER VERSION OF THIS ROLE BEFORE USE: the 6 red lines below without a "
+        "label replace your 10"
+    )
+    at = next(i for i, t in enumerate(text) if t.startswith(label))
+    # The user's lines stay above the label and the shorter version follows it, so
+    # deleting everything above the label leaves the short version.
+    assert any(t.startswith("Mentored 5") for t in text[:at])
+    assert [t.split(" [CONFIRM")[0] for t in text[at + 1 : at + 7]] == NIMBUS_SIX
+    assert "List" not in paragraphs[at].style.name  # a label, not an empty bullet
+    from tests.test_cv_writer import _red_texts
+
+    assert {text[at], *text[at + 1 : at + 7]} <= _red_texts(out)
     assert any(t.startswith("[CONFIRM REMOVAL: not related to this job]") for t in text)
-    line_two = next(t for t in text if t.startswith(NIMBUS_SIX[1]))
-    assert line_two.endswith("[CONFIRM: with model monitoring dashboards]")
-    assert not any(t.startswith("Mentored 5") and t != NIMBUS_SIX[2] for t in text)
+    assert text[at + 2].endswith(
+        "[CONFIRM ADDED WORDS: with model monitoring dashboards]"
+    )  # on line 2
     final = tmp_path / "final.docx"
     write_like_original(
         original, cv, draft, final, compressions=[version, office], mark_changes=False
@@ -1200,3 +1213,78 @@ def test_the_short_version_is_written_red_and_labelled_then_clean(
     text = [p.text for p in Document(str(final)).paragraphs]
     assert all(line in text for line in NIMBUS_SIX)
     assert not any("[CONFIRM" in t or "Visio" in t for t in text)
+
+
+def test_a_removed_skills_line_is_found_when_the_file_lists_one_more_skill(
+    master_cv: MasterCV, tmp_path: Path
+) -> None:
+    """The Word design may list a skill the stored CV lacks; the line is still removed."""
+    from src.cv.models import SkillGroup
+    from src.cv.proposals import applied
+
+    in_file = master_cv.model_copy(deep=True)
+    in_file.skills.append(SkillGroup(category="Office", items=["Excel", "Visio", "Access"]))
+    original = tmp_path / "original.docx"
+    export_docx(in_file, original)
+    cv = master_cv.model_copy(deep=True)
+    cv.skills.append(SkillGroup(category="Office", items=["Excel", "Visio"]))
+    office = CompressionProposal(
+        id="o1", kind="trim_skills", category="Office", role_ids=[], bullets=[],
+        removed=["Excel", "Visio"], reason="r",
+    )  # fmt: skip
+    draft, office = applied(cv, office)
+    out = tmp_path / "draft.docx"
+    notes = write_like_original(original, cv, draft, out, compressions=[office])
+    text = [p.text for p in Document(str(out)).paragraphs]
+    assert any(t.startswith("[CONFIRM REMOVAL: not related to this job] Office") for t in text)
+    assert not any("Office kept" in n for n in notes)
+
+
+def test_a_shorter_role_shows_the_users_own_lines_and_one_rewording_per_line(
+    master_cv: MasterCV, tmp_path: Path
+) -> None:
+    """Above the label, the role as the user wrote it; below, the shorter lines and each
+    suggestion labelled with what it does (user's report 2026-10-21)."""
+    from src.cv.models import ReviewAddition
+    from src.cv.proposals import applied
+
+    cv = _long_roles(master_cv)
+    original = tmp_path / "original.docx"
+    export_docx(cv, original)
+    vocab = [*JD.hard_skills, *cv.all_skills()]
+    shorter = CompressionCandidate(
+        kind="shorter_role", role_ids=["nimbus"], bullets=NIMBUS_SIX,
+        line_sources=NIMBUS_SOURCES, reason="r",
+    )  # fmt: skip
+    version = check_compressions([shorter], cv, ["Kubernetes"], vocab)[0]
+    rewritten = apply_plan(cv, TailoringPlan(), JD).cv
+    rewritten.experience[0].bullets[0].text = "A plan rewrite of the first line."
+    draft, version = applied(rewritten, version)
+    line = version.line_sources[0][0]
+    rewordings = [
+        ReviewAddition(
+            id=f"r{n}",
+            kind="rewording",
+            text=f"Reworded {n}",
+            anchor_id=line,
+            role_id="nimbus",
+            requirement="r",
+            background_quote="b",
+            job_quote="j",
+            reason="r",
+        )  # fmt: skip
+        for n in (1, 2)
+    ]
+    out = tmp_path / "draft.docx"
+    write_like_original(
+        original, cv, draft, out, review_additions=rewordings, compressions=[version]
+    )
+    text = [p.text for p in Document(str(out)).paragraphs]
+    at = next(i for i, t in enumerate(text) if t.startswith("[CONFIRM SHORTER VERSION"))
+    own = [b.text for b in cv.experience[0].bullets]
+    assert all(t in text[:at] for t in own)  # the user's lines, as written
+    assert "A plan rewrite of the first line." not in text
+    reworded = [t for t in text if "Reworded" in t]
+    assert reworded == [
+        "[CONFIRM REWORDED LINE BEFORE USE: replaces the shorter line above] Reworded 1"
+    ]

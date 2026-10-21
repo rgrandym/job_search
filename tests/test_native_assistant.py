@@ -567,3 +567,51 @@ def test_coming_back_resumes_the_old_session_with_a_return_packet(
     back = claude.seen[-1]
     assert back["session_id"] == "session-1"  # its own session, resumed
     assert "Back in this conversation" in back["prompt"] and "Save it" in back["prompt"]
+
+
+def test_a_selected_draft_is_never_tailored_again_its_own_cv_is(
+    settings: Settings, master_cv: MasterCV, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A draft's red suggestions and labels must never be read as the user's CV (user's
+    report 2026-10-21: drafts tailored from drafts repeated earlier suggestions)."""
+    from src.cv.models import JDAnalysis, TailoringPlan
+    from src.cv.tailor import apply_plan
+    from src.jobs.models import JobPosting
+    from src.services import tailored_documents
+    from tests.test_cv_writer import _original_cv
+
+    ws = Workspace(settings)
+    original = _original_cv(master_cv, settings.data_dir / "upload.docx")
+    asset = cv_service.store_cv(ws, "My CV.docx", original.read_bytes())
+    cv_service._parsed_path(ws, asset.id).parent.mkdir(parents=True, exist_ok=True)
+    cv_service._parsed_path(ws, asset.id).write_text(master_cv.model_dump_json())
+    cv_service.select_cv(ws, asset.id)
+    jd = JDAnalysis(job_title="ML Engineer")
+    read: list[MasterCV] = []
+
+    def tailor(cv: MasterCV, *a: object) -> object:
+        read.append(cv)
+        return apply_plan(cv, TailoringPlan(bullet_order={"nimbus": ["nimbus-3"]}), jd)
+
+    monkeypatch.setattr(ws, "structured", lambda *a: None)
+    monkeypatch.setattr(cv_service, "analyze_jd", lambda text, llm: jd)
+    monkeypatch.setattr(cv_service, "tailor", tailor)
+    job = JobPosting(id="j1", title="ML Engineer", company="Orbit", description="Build ML.")
+    first, path = asyncio.run(cv_service.tailor_to_job(ws, job))
+
+    draft_id = f"generated:{path.name}"
+    assert draft_id in [a.id for a in cv_service.list_cvs(ws)]
+    drafted = master_cv.model_copy(deep=True)
+    drafted.experience[0].bullets[0].text = "[CONFIRM SHORTER VERSION OF THIS ROLE: 2 for 3]"
+    cv_service._parsed_path(ws, draft_id).write_text(drafted.model_dump_json())
+    cv_service.select_cv(ws, draft_id)
+
+    second, _ = asyncio.run(cv_service.tailor_to_job(ws, job))
+    assert read[-1].experience[0].bullets[0].text == master_cv.experience[0].bullets[0].text
+    assert second.document_notes[0].startswith("Tailored from My CV.docx")
+    assert tailored_documents.load(ws, second.document_id or "").cv_id == asset.id
+    assert ws.active_cv_id == draft_id  # the user's selection is left as it was
+
+    tailored_documents.delete_for_file(ws, path.name)  # the draft's record is gone
+    with pytest.raises(ValueError, match="tailored draft"):
+        asyncio.run(cv_service.tailor_to_job(ws, job))

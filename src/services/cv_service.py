@@ -699,9 +699,53 @@ async def tailor_to_job(
     """Tailor the Master CV to `job` (steered by the job_matcher's verdict on it and the
     stored profile, then reviewed and revised), export it to .docx, check what an ATS reads
     from the file and how much better it shows the fit than the original CV.
-    `template` "original" (the default) writes it in the CV's own Word design."""
+    `template` "original" (the default) writes it in the CV's own Word design. A draft this
+    app wrote is never the source: the CV it came from is (`tailoring_source`)."""
+    args = (job, template, usage_sink, result, emphasis, level, length, audience, mode)
+    source = tailoring_source(ws, ws.active_cv_id)
+    if source == ws.active_cv_id:
+        return await _tailor_selected(ws, *args)
+    name = next((a.filename for a in list_cvs(ws) if a.id == source), "your CV")
+    note = f"Tailored from {name}, the CV the selected draft came from"
+    with working_on(ws, source or ""):
+        return await _tailor_selected(ws, *args, note=note)
+
+
+def tailoring_source(ws: Workspace, asset_id: str | None) -> str | None:
+    """The CV to tailor from: the selected one, or, when that is a draft this app wrote
+    (its red suggestions and labels would be read as the user's own lines and proposed
+    again), the CV that draft came from, followed back through earlier drafts."""
+    seen: set[str] = set()
+    drafts = {d.filename: d.cv_id for d in tailored_documents.list_all(ws)}
+    while asset_id and asset_id.startswith("generated:") and asset_id not in seen:
+        seen.add(asset_id)
+        origin = drafts.get(Path(asset_id.removeprefix("generated:")).name)
+        if origin is None:
+            break
+        asset_id = origin
+    return asset_id
+
+
+async def _tailor_selected(
+    ws: Workspace,
+    job: JobPosting,
+    template: str,
+    usage_sink: UsageSink | None,
+    result: MatchResult | None,
+    emphasis: TailoringEmphasis,
+    level: LevelEmphasis,
+    length: LengthChoice,
+    audience: Audience,
+    mode: Literal["standard", "optimised"],
+    note: str | None = None,
+) -> tuple[TailoredCV, Path]:
     progress.step("Reading your CV", total=10)
     master_cv = await ensure_selected_cv(ws, usage_sink, role="cv")
+    if any(DRAFT_LABEL in b.text for r in master_cv.experience for b in r.bullets):
+        raise ValueError(
+            "The selected CV is a tailored draft with its red suggestions still in it. Select "
+            "your own CV (or a draft's final version) and tailor again."
+        )
     original = original_docx(ws)
     if original is not None:  # tailor from every line as written in the Word file
         master_cv = await asyncio.to_thread(align_to_document, original, master_cv)
@@ -757,6 +801,8 @@ async def tailor_to_job(
     tailored, template = _write_tailored(tailored, master_cv, original, path, template)
     progress.step("Checking what an ATS reads from the file")
     tailored = _with_ats(ws, tailored, master_cv, original, path)
+    if note:
+        tailored = tailored.model_copy(update={"document_notes": [note, *tailored.document_notes]})
     chosen = TailoringSettings(
         template=template,
         emphasis=emphasis,
@@ -786,6 +832,7 @@ async def tailor_to_job(
 
 
 MAX_BACKGROUND = 15_000  # characters of the user's other CVs given to the optimiser
+DRAFT_LABEL = "[CONFIRM"  # how every red suggestion in a draft begins
 
 
 # Who grades a CV is not who wrote it (user's decision 2026-10-15): the screening model, the

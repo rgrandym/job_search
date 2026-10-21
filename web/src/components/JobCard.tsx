@@ -375,6 +375,27 @@ function UncheckedPosting({ onRecheck, onSearch, message = UNCHECKED, pending = 
   );
 }
 
+/** "Save to test set": keep this CV and job to measure the optimiser on (backend
+ * `tailoring_tests.add`). */
+function SaveToTestSet({ documentId }: { documentId: string }) {
+  const save = useMutation({ mutationFn: () => api.addToTestSet(documentId) });
+  if (!documentId) return null;
+  return (
+    <>
+      <button
+        className="btn-ghost py-0.5 text-[11px]"
+        disabled={save.isPending}
+        title="Keep this CV and job to measure the optimiser on (python -m src.services.tailoring_tests run)"
+        onClick={() => save.mutate()}
+      >
+        {save.isPending && <Loader2 size={11} className="animate-spin" />} Save to test set
+      </button>
+      {save.data && <span className="text-good">Saved to the test set ({save.data.count} {save.data.count === 1 ? "case" : "cases"})</span>}
+      {save.error && <span className="text-bad">{(save.error as Error).message}</span>}
+    </>
+  );
+}
+
 export function JobCard({
   result,
   canTailor,
@@ -854,6 +875,7 @@ export function JobCard({
       {report && (
         <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md bg-surface p-2 text-[12px]">
           <CVViewButton downloadUrl={headlineChoice?.url ?? report.download_url} title={`Tailored CV · ${job.title}`} />
+          <SaveToTestSet documentId={report.document_id} />
           {!!report.review_additions?.some((item) => item.status === "pending") && (
             <span className="text-warn">Review red suggestions before using this CV</span>
           )}
