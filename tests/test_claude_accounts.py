@@ -311,3 +311,97 @@ def test_an_idle_account_is_read_once_until_a_call_runs_on_it(
     usage._claude_cli["work"]["at"] -= usage.CODEX_STALE_S
     usage.plan_windows("claude_code", account="work", live=True)
     assert reads[3:] == [work]
+
+
+def test_a_long_lived_sign_in_is_kept_and_given_to_every_call(
+    two_accounts: list[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv(claude_accounts.TOKEN_ENV, "inherited")
+    claude_accounts.save_token("work", "sk-ant-oat01-work", "work@example.com")
+    work = claude_accounts.get("work")
+    default = claude_accounts.get("default")
+    assert work is not None and default is not None
+
+    assert claude_accounts.env(work)[claude_accounts.TOKEN_ENV] == "sk-ant-oat01-work"
+    assert claude_accounts.TOKEN_ENV not in claude_accounts.env(default)
+    assert claude_accounts.TOKEN_ENV not in claude_accounts.env(work, with_token=False)
+    saved = tmp_path / "data" / claude_accounts.TOKENS_FILE
+    assert saved.stat().st_mode & 0o777 == 0o600
+    claude_accounts.configure(tmp_path / "data")  # the app restarts: still signed in
+    status = claude_accounts.status(work)
+    assert (status["logged_in"], status["lasting"], status["email"]) == (
+        True,
+        True,
+        "work@example.com",
+    )
+
+
+def test_a_refused_long_lived_sign_in_shows_until_a_call_works(
+    two_accounts: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claude_accounts.save_token("default", "sk-ant-oat01-me")
+    default = claude_accounts.accounts()[0]
+    refused = LLMError("Failed to authenticate. API Error: 401 OAuth access token is invalid.")
+    outcomes: list[LLMError | None] = [refused, None]
+
+    def run(account: claude_accounts.ClaudeAccount) -> str:
+        outcome = outcomes.pop(0) if account.id == "default" else None
+        if outcome:
+            raise outcome
+        return account.id
+
+    assert claude_accounts.call(run) == "work"  # the next account took over
+    assert claude_accounts.status(default)["logged_in"] is False
+    claude_accounts.forget_status()  # 10 minutes later: tried again, and it works
+    assert claude_accounts.call(run) == "default"
+    assert claude_accounts.status(default)["logged_in"] is True
+
+
+def test_signing_out_and_removing_forget_the_sign_in(
+    settings: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from src.web import app as webapp
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    ws = Workspace(settings)
+    monkeypatch.setattr(webapp, "get_workspace", lambda: ws)
+    monkeypatch.setattr(backend, "claude_binary", lambda: "/bin/claude")
+    signed_out = {"installed": True, "logged_in": False, "message": "Not signed in."}
+    monkeypatch.setattr(backend, "claude_code_status", lambda *_, **__: signed_out)
+    client = TestClient(webapp.app)
+    client.post("/api/claude-code/accounts", json={"label": "Work"})
+    claude_accounts.save_token("work", "sk-ant-oat01-work")
+    claude_accounts.save_token("default", "sk-ant-oat01-me")
+
+    view = client.post("/api/claude-code/accounts/work/logout").json()
+    assert [(a["id"], a["signed_in"], a["lasting"]) for a in view["accounts"]] == [
+        ("default", True, True),
+        ("work", False, False),
+    ]
+    assert claude_accounts.token("work") is None
+    client.delete("/api/claude-code/accounts/default")
+    assert claude_accounts.token("default") is None
+    assert client.post("/api/claude-code/accounts/nobody/logout").status_code == 404
+
+
+def test_signing_in_runs_setup_token_and_keeps_its_token(
+    two_accounts: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def start(key: str, cmd: list[str], env: Any = None, **kw: Any) -> SignInStart:
+        calls.append((cmd, kw))
+        assert kw["on_done"](f"Your token:\n{'sk-ant-oat01-' + 'b' * 40}\n", 0) is None
+        return SignInStart(url="https://claude.com/x", needs_code=True)
+
+    monkeypatch.setattr(backend.signin, "start", start)
+    who = {"installed": True, "logged_in": True, "email": "work@example.com"}
+    monkeypatch.setattr(backend, "claude_code_status", lambda *_, **__: who)
+
+    backend.start_login("/tmp/claude-work-test", "work")
+
+    assert calls[0][0][1:] == ["setup-token"] and calls[0][1]["tty"] is True
+    saved = claude_accounts.token("work")
+    assert saved is not None and saved.email == "work@example.com"
+    assert saved.token.get_secret_value() == "sk-ant-oat01-" + "b" * 40
+    assert calls[0][1]["on_done"]("cancelled", 1) is None  # a stopped sign-in says nothing

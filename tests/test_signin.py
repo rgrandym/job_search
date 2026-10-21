@@ -48,3 +48,43 @@ def test_a_link_without_a_code_prompt_and_a_restart() -> None:
     signin.start("codex", [sys.executable, "-c", script])  # pressing Sign in again
     assert old.wait(5) != 0  # the earlier sign-in was stopped
     signin._stop("codex")
+
+
+# A stand-in for `claude setup-token`: draws on a terminal (an OSC 8 link, spaces as cursor
+# moves) and prints the token once the code is pasted.
+SETUP_TOKEN = r"""
+import sys
+if not sys.stdin.isatty():
+    sys.exit(3)
+link = "https://claude.com/cai/oauth/authorize?code=true&x=1"
+print("Opening\x1b[1Cbrowser to sign in")
+print(f"\x1b]8;id=1;{link}\x07{link[:30]}\x1b]8;;\x07")
+print("Paste\x1b[1Ccode here if prompted > ", end="", flush=True)
+code = sys.stdin.readline().strip()
+print("Your token: sk-ant-oat01-" + "a" * 40 if code == "good-code" else "bad")
+"""
+
+
+def test_a_terminal_only_sign_in_hands_its_output_on() -> None:
+    seen: list[tuple[str, int]] = []
+
+    def done(text: str, code: int) -> str | None:
+        seen.append((text, code))
+        return None
+
+    started = signin.start(
+        "claude:tty", [sys.executable, "-c", SETUP_TOKEN], tty=True, on_done=done
+    )
+
+    assert started.url == "https://claude.com/cai/oauth/authorize?code=true&x=1"
+    assert started.opened and started.needs_code
+    signin.send_code("claude:tty", "good-code")
+    assert seen[0][1] == 0 and "sk-ant-oat01-" + "a" * 40 in seen[0][0]
+
+
+def test_an_error_from_the_finished_sign_in_is_reported() -> None:
+    signin.start(
+        "claude:tty2", [sys.executable, "-c", SETUP_TOKEN], tty=True, on_done=lambda *_: "no token"
+    )
+    with pytest.raises(LLMError, match="no token"):
+        signin.send_code("claude:tty2", "good-code")

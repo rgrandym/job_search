@@ -82,6 +82,10 @@ export interface ClaudeAccount {
   email: string | null;
   subscription: string | null;
   message: string;
+  /** Signed in from the app (a year-long sign-in): stays signed in until signed out. */
+  lasting: boolean;
+  /** When that sign-in was made (epoch seconds). */
+  token_saved_at: number | null;
   /** Calls run on this account now. */
   active: boolean;
   /** An earlier account signed in as the same person (so this one adds no usage). */

@@ -69,6 +69,8 @@ class ClaudeAccountView(BaseModel):
     email: str | None = Field(None, description="Who the folder is signed in as")
     subscription: str | None = None
     message: str = ""
+    lasting: bool = Field(False, description="Signed in from the app: stays signed in")
+    token_saved_at: float | None = Field(None, description="When that sign-in was made")
     active: bool = Field(False, description="Calls run on this account now")
     same_as: str | None = Field(None, description="An earlier account signed in as the same user")
     windows: UsageWindows | None = None
@@ -150,6 +152,8 @@ def account_views(max_age: float = claude_accounts.STATUS_TTL_S) -> list[ClaudeA
                 email=email,
                 subscription=status.get("subscription"),
                 message=str(status.get("message") or ""),
+                lasting=bool(status.get("lasting")),
+                token_saved_at=status.get("token_saved_at"),
                 active=account.id == active,
                 same_as=same,
                 windows=windows,

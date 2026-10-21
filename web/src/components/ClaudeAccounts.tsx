@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowUp, Loader2, LogIn, Plus, Trash2 } from "lucide-react";
+import { ArrowUp, Loader2, LogIn, LogOut, Plus, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { clockLabel } from "../lib/labels";
@@ -9,7 +9,8 @@ import { SignInHelp } from "./SignInHelp";
 
 // Several Claude plan accounts for Claude Code (each its own Claude Code folder). Calls use the
 // first account whose limit is not spent and move to the next one when it is; only when every
-// account is spent does work go to the other plan (Codex). Backend: `core/llm/claude_accounts`.
+// account is spent does work go to the other plan (Codex). Signing in here keeps a year-long
+// sign-in for the account, so it stays signed in until signed out. Backend: `core/llm/claude_accounts`.
 
 /** "5h 40% · 7d 12%" for an account's plan windows. */
 export function windowsLine(w: PlanWindows | null) {
@@ -24,7 +25,7 @@ const folderLabel = (a: ClaudeAccount) => a.config_dir ?? "default sign-in (~/.c
 
 /** Who an account is: its email, or why it has none yet. */
 function Identity({ a }: { a: ClaudeAccount }) {
-  if (!a.signed_in) return <span className="text-bad">Not signed in: press Sign in.</span>;
+  if (!a.signed_in) return <span className="text-bad">{a.lasting ? a.message : "Not signed in: press Sign in."}</span>;
   return (
     <span className="text-muted">
       Signed in as <strong className="text-fg">{a.email ?? "an unknown account"}</strong> · {planLabel(a.subscription)}
@@ -40,6 +41,7 @@ function AccountRow({
   pending,
   onSignIn,
   onUp,
+  onSignOut,
   onRemove,
   busy,
 }: {
@@ -48,6 +50,7 @@ function AccountRow({
   pending: Pending | null;
   onSignIn: () => void;
   onUp: () => void;
+  onSignOut: () => void;
   onRemove: () => void;
   busy: boolean;
 }) {
@@ -62,10 +65,15 @@ function AccountRow({
           <button type="button" className="btn-ghost px-2 py-1 text-[12px]" disabled={busy} onClick={onSignIn} title="Open the claude.ai sign-in page for this account">
             <LogIn size={12} /> {a.signed_in ? "Sign in again" : "Sign in"}
           </button>
+          {a.lasting && (
+            <button type="button" className="btn-ghost px-1.5 py-1" disabled={busy} onClick={onSignOut} title="Sign this account out of the app" aria-label="Sign out">
+              <LogOut size={12} />
+            </button>
+          )}
           <button type="button" className="btn-ghost px-1.5 py-1" disabled={busy || first} onClick={onUp} title="Use this account earlier" aria-label="Move up">
             <ArrowUp size={12} />
           </button>
-          <button type="button" className="btn-ghost px-1.5 py-1 text-bad" disabled={busy} onClick={onRemove} title="Remove from the list (the folder and its sign-in are kept)" aria-label="Remove">
+          <button type="button" className="btn-ghost px-1.5 py-1 text-bad" disabled={busy} onClick={onRemove} title="Remove from the list (its folder is kept)" aria-label="Remove">
             <Trash2 size={12} />
           </button>
         </span>
@@ -74,6 +82,12 @@ function AccountRow({
         <Identity a={a} />
         {a.signed_in && windowsLine(a.windows) && <span className="text-faint"> · {windowsLine(a.windows)}</span>}
       </p>
+      {a.signed_in && a.lasting && <p className="text-[11px] text-faint">{a.message}</p>}
+      {a.signed_in && !a.lasting && (
+        <p className="text-[11px] text-warn">
+          Signed in through its Claude Code folder, which can sign out when other programs use Claude. Press Sign in again once to keep it signed in.
+        </p>
+      )}
       {a.same_as && (
         <p className="text-[11px] text-warn">
           Same person as {a.same_as}, so it adds no usage. Press Sign in again and approve with your other Claude account.
@@ -193,10 +207,17 @@ export function ClaudeAccounts({ open }: { open: boolean }) {
     },
   });
   const up = useMutation({ mutationFn: api.raiseClaudeAccount, onSuccess: (view) => refresh(view) });
+  const signOut = useMutation({
+    mutationFn: (a: ClaudeAccount) => api.logoutClaudeAccount(a.id).then((view) => ({ view, a })),
+    onSuccess: ({ view, a }) => {
+      setNote(`Signed ${a.label} out of the app.`);
+      refresh(view);
+    },
+  });
   const remove = useMutation({
     mutationFn: (a: ClaudeAccount) => api.removeClaudeAccount(a.id).then((view) => ({ view, a })),
     onSuccess: ({ view, a }) => {
-      setNote(`Removed ${a.label} from the list. Its folder and sign-in are untouched.`);
+      setNote(`Removed ${a.label} from the list. Its folder is untouched.`);
       refresh(view);
     },
   });
@@ -207,16 +228,16 @@ export function ClaudeAccounts({ open }: { open: boolean }) {
     if (!pending) return;
     const now = accounts.find((a) => a.id === pending.account.id);
     const before = pending.account;
-    if (now?.signed_in && (!before.signed_in || now.email !== before.email)) {
-      setNote(`${now.label} is signed in as ${now.email ?? "your Claude account"}.`);
+    if (now?.signed_in && (!before.signed_in || now.email !== before.email || now.token_saved_at !== before.token_saved_at)) {
+      setNote(`${now.label} is signed in as ${now.email ?? "your Claude account"} and stays signed in.`);
       setPending(null);
       refresh();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accounts, pending]);
 
-  const busy = signIn.isPending || up.isPending || remove.isPending;
-  const error = signIn.error || up.error || remove.error;
+  const busy = signIn.isPending || up.isPending || signOut.isPending || remove.isPending;
+  const error = signIn.error || up.error || signOut.error || remove.error;
   const active = accounts.find((a) => a.active);
   const known = new Set(accounts.map((a) => a.email).filter((e): e is string => !!e));
 
@@ -248,6 +269,9 @@ export function ClaudeAccounts({ open }: { open: boolean }) {
           pending={pending}
           onSignIn={() => signIn.mutate(a)}
           onUp={() => up.mutate(a.id)}
+          onSignOut={() => {
+            if (window.confirm(`Sign ${a.label} out of the app? You will need to sign in again to use it.`)) signOut.mutate(a);
+          }}
           onRemove={() => {
             if (window.confirm(`Remove ${a.label} from the app's Claude accounts?`)) remove.mutate(a);
           }}

@@ -1,8 +1,9 @@
 """Claude via the official Claude Code CLI, authenticated with the user's Claude plan.
 
-We never read or reuse the CLI's stored credentials. Every call runs `claude -p` (headless
-mode) with built-in tools and MCP servers disabled, no session persistence and no user
-settings, in one fixed empty folder (`WORKDIR`); the CLI handles sign-in. Inherited
+We never read or reuse the CLI's stored credentials; an account signed in from the app gets a
+long-lived token (`claude setup-token`) that each of its calls is given (`claude_accounts`).
+Every call runs `claude -p` (headless mode) with built-in tools and MCP servers disabled, no
+session persistence and no user settings, in one fixed empty folder (`WORKDIR`). Inherited
 Anthropic API keys are stripped from the child environment so usage comes from the Claude
 plan (Pro/Max), never from an API account.
 Structured output uses `--json-schema`. The assistant runs natively (`run_native`): Claude Code
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 import subprocess
 import uuid
@@ -89,9 +91,13 @@ def no_chrome(binary: str) -> tuple[str, ...]:
     return ("--no-chrome",) if "--no-chrome" in out.stdout else ()
 
 
-def _folder_env(config_dir: str | None) -> dict[str, str]:
-    """The CLI's environment for the account signed in to `config_dir` (None: default)."""
-    return claude_accounts.env(ClaudeAccount(id="", label="", config_dir=config_dir))
+def _folder_env(config_dir: str | None, with_token: bool = True) -> dict[str, str]:
+    """The CLI's environment for the account using `config_dir` (None: default), with that
+    account's long-lived sign-in unless `with_token` is False."""
+    account = claude_accounts.by_dir(config_dir)
+    if account is None:
+        account = ClaudeAccount(id="", label="", config_dir=config_dir)
+    return claude_accounts.env(account, with_token)
 
 
 # The working folder of every headless call. A new temporary folder per call made Claude
@@ -156,7 +162,7 @@ def claude_code_status(config_dir: str | None = None, with_email: bool = False) 
             capture_output=True,
             text=True,
             timeout=20,
-            env=_folder_env(config_dir),
+            env=_folder_env(config_dir, with_token=False),  # the folder's own sign-in
         )
         info: dict[str, Any] = json.loads(out.stdout or "{}")
     except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
@@ -183,14 +189,31 @@ def _status_view(info: dict[str, Any]) -> dict[str, Any]:
     return {"logged_in": True, "subscription": plan, "message": f"Signed in with {label}."}
 
 
+_TOKEN = re.compile(r"sk-ant-oat\d+-[A-Za-z0-9_\-]{20,}")
+
+
 def start_login(config_dir: str | None = None, key: str = DEFAULT_ID) -> signin.SignInStart:
-    """Start `claude auth login --claudeai` for the account in `config_dir` (it opens the
-    claude.ai sign-in page); `key` names the sign-in a pasted code goes to."""
+    """Start `claude setup-token` for the account `key` (it opens the claude.ai sign-in page;
+    a pasted code goes to it). The year-long token it prints is kept for that account, so it
+    stays signed in however many programs use Claude at once (`claude_accounts`)."""
     binary = claude_binary()
     if binary is None:
         raise LLMError("Claude Code CLI not found")
-    cmd = [binary, "auth", "login", "--claudeai"]
-    return signin.start(f"claude:{key}", cmd, _folder_env(config_dir))
+
+    def done(text: str, code: int) -> str | None:
+        found = _TOKEN.findall(text)
+        if not found:
+            return None if code else "Claude did not print a sign-in token. Press Sign in again."
+        # The token does not say who it is: the folder's own sign-in usually does.
+        email = claude_code_status(config_dir, with_email=True).get("email")
+        before = claude_accounts.token(key)
+        email = email or (before.email if before else None)
+        claude_accounts.save_token(key, found[-1], email)
+        return None
+
+    cmd = [binary, "setup-token"]
+    env = _folder_env(config_dir, with_token=False)
+    return signin.start(f"claude:{key}", cmd, env, tty=True, on_done=done)
 
 
 def send_login_code(key: str, code: str) -> None:

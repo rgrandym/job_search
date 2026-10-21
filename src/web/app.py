@@ -591,7 +591,8 @@ def add_claude_account(body: NewClaudeAccount) -> connections_service.ClaudeAcco
 
 @app.delete("/api/claude-code/accounts/{account_id}")
 def remove_claude_account(account_id: str) -> connections_service.ClaudeAccountsView:
-    """Take an account out of the list; its folder and sign-in are left as they are."""
+    """Take an account out of the list and forget the app's sign-in for it; its folder is left
+    as it is."""
     try:
         claude_accounts.remove(account_id)
     except KeyError as exc:
@@ -623,6 +624,15 @@ def claude_account_login(account_id: str) -> SignInStart:
     claude_accounts.forget_status(account_id)
     get_workspace().forget_sign_in("claude_code")
     return started
+
+
+@app.post("/api/claude-code/accounts/{account_id}/logout")
+def claude_account_logout(account_id: str) -> connections_service.ClaudeAccountsView:
+    """Sign an account out of the app: its long-lived sign-in is forgotten."""
+    if claude_accounts.get(account_id) is None:
+        raise HTTPException(404, "No such Claude account")
+    claude_accounts.sign_out(account_id)
+    return _accounts_changed()
 
 
 class LoginCode(BaseModel):

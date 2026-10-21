@@ -209,6 +209,8 @@ export const api = {
     request<ClaudeAccountsView>(`/api/claude-code/accounts/${encodeURIComponent(id)}/up`, { method: "POST" }),
   loginClaudeAccount: (id: string) =>
     request<SignInStart>(`/api/claude-code/accounts/${encodeURIComponent(id)}/login`, { method: "POST" }),
+  logoutClaudeAccount: (id: string) =>
+    request<ClaudeAccountsView>(`/api/claude-code/accounts/${encodeURIComponent(id)}/logout`, { method: "POST" }),
   sendClaudeCode: (id: string, code: string) =>
     request<{ sent: boolean }>(`/api/claude-code/accounts/${encodeURIComponent(id)}/code`, json("POST", { code })),
   uploadCV: (file: File) => {
