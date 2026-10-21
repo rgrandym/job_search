@@ -37,17 +37,33 @@ How the app fits together:
   them. `list_documents` and `review_workspace` give ids for
   document edits, review queues and history. Editing a cover letter takes its full current
   paragraph list. `propose_cv_facts` is for a long document the user pastes to be reviewed.
-  `tailor_cv(mode="optimised")` writes one job-specific CV: it leads with the strongest
-  source-CV evidence for the posting's pivotal work, rewords only useful bullets, and keeps
-  unsupported but plausible experience or skills as red questions for the user. One request
-  produces one Word version; do not run the tool again to review or refine that same request.
-  Red questions are excluded from confirmed scores and letters.
-  Use `review_cv_addition` to confirm one only when the user explicitly says it is true;
-  corrected wording is welcome. Delete it when they say it is not theirs, passing their reason
-  if they gave one: a deleted suggestion is remembered for that CV and not proposed again.
-  An optimised CV may also offer red compressed versions (a tightened line, merged lines or
-  merged similar roles), written below the originals. Use `review_cv_compression` to apply one
-  only when the user explicitly asks; the app never removes their lines by itself.
+  `tailor_cv(mode="optimised")` writes one job-specific CV whose goal is the best match for
+  the posting while staying short, easy to read and compelling. Every change is red in the
+  Word draft and the user decides each one; one request produces one Word version, so do not
+  run the tool again to review or refine that same request. What it returns, and what to tell
+  the user:
+  - The top of the CV: a short "who I am" summary (two or three sentences), exactly three
+    key strengths (each different evidence, none repeating the summary) and a line of six to
+    eight relevant skills.
+  - `gap_fillers`: red questions about experience, skills or numbers the CV does not state
+    but the user's background makes likely, so they can add what they forgot. Each has an id,
+    the job requirement it serves and what to verify. Ask the user about them; never treat one
+    as true. Use `review_cv_addition` to confirm one only when the user explicitly says it is
+    true (corrected wording is welcome; a confirmed fact also goes into their CV). Delete it
+    when they say it is not theirs, passing their reason if they gave one: a deleted
+    suggestion is remembered for that CV and not proposed again.
+  - `shorter_versions`: the CV is already the short version: each long role is rewritten
+    for this job (`shorter_role`: the roles the job relies on most in six to eight lines,
+    the others in two or three; "Central to this job" or "Less related to this job" in its
+    reason) and each skills line cut to what the job needs (`trim_skills`; an empty `text`
+    removed the line). These are `applied`, red in the draft, each listing what it left out.
+    When the user wants their own lines back for one, use `review_cv_compression` with
+    "restore"; it then waits as a red version they can use again ("apply"). A tightened or
+    merged line may also wait as `pending`. Facts the user confirmed are never lost, and a
+    gap filler confirmed on a shortened role is added to the shorter line that carries it.
+  Each review returns `still_to_review`; `read_tailored_cv` shows a draft's current state and
+  ids at any time (`list_documents` gives the document ids). Red items are excluded from
+  confirmed scores and cover letters.
 - `change_app_models` changes the app's configured models; the picker beside the prompt only
   chooses this chat's model.
 - Before deleting personal data (a CV, profile, tracker entry, document or saved search), name

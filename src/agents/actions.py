@@ -241,7 +241,7 @@ async def tailor_cv(args: DocumentArgs, ctx: AgentContext) -> dict[str, Any]:
         "headline_options": tailored.headline_options,
         "trim": tailored.trim.model_dump() if tailored.trim else None,
         "document_notes": tailored.document_notes,
-        "review_additions": [a.model_dump() for a in tailored.review_additions],
+        **tailored_documents.review_summary(tailored),
         "rejections": [change.reason for change in tailored.changes if not change.accepted],
         "positioning": tailored.positioning.model_dump() if tailored.positioning else None,
         "gaps": [r.requirement for r in tailored.requirements if r.match == "not_evidenced"],

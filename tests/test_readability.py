@@ -48,6 +48,36 @@ def test_key_strengths_state_only_what_their_bullets_show(master_cv: MasterCV) -
     assert any("numbers" in (r or "") for r in reasons) and "cites no CV bullet" in reasons
     printed = printed_text(out)
     assert "• Recommendation service in Python for 4M users" in printed
+    four = [
+        KeyStrength(text="Recommendation service in Python for 4M users", source_ids=["nimbus-1"]),
+        KeyStrength(text="Training pipelines moved to Kubernetes", source_ids=["nimbus-2"]),
+        KeyStrength(text="Mentored 5 engineers", source_ids=["nimbus-3"]),
+        KeyStrength(text="NLP models for document classification", source_ids=["lexa-1"]),
+    ]
+    capped = apply_plan(master_cv, TailoringPlan(key_strengths=four), JD)
+    assert len(capped.key_strengths) == 3  # exactly 3 succinct points
+
+
+def test_a_key_strength_never_says_again_what_the_summary_says(master_cv: MasterCV) -> None:
+    plan = TailoringPlan(
+        key_strengths=[
+            KeyStrength(text="Recommendation service for 4M users", source_ids=["nimbus-1"]),
+            KeyStrength(
+                text="Recommendation service in Python and PyTorch", source_ids=["nimbus-1"]
+            ),
+            KeyStrength(text="Training pipelines moved to Kubernetes", source_ids=["nimbus-2"]),
+        ]
+    )
+    cv = master_cv.model_copy(deep=True)
+    cv.basics.summary = "I build recommendation services in Python and PyTorch for 4M users."
+    out = apply_plan(cv, plan, JD)
+    assert out.key_strengths == ["Training pipelines moved to Kubernetes"]
+    reasons = [c.reason for c in out.changes if c.source_id == "key_strengths" and not c.accepted]
+    assert reasons == ["repeats a number of the summary", "repeats the summary"]
+    cv.basics.summary = "Engineer with 5 years of experience in recommendation services."
+    mentoring = [KeyStrength(text="Mentored 5 engineers on ML code", source_ids=["nimbus-3"])]
+    years = apply_plan(cv, TailoringPlan(key_strengths=mentoring), JD)
+    assert years.key_strengths == ["Mentored 5 engineers on ML code"]  # years are not a repeat
     assert out.readability is None  # scored with the draft (`tailor`), not by apply_plan
 
 
@@ -80,9 +110,36 @@ def test_key_strengths_go_under_the_summary_in_red(master_cv: MasterCV, tmp_path
     )  # fmt: skip
     texts = [p.text for p in Document(str(out)).paragraphs]
     strength = texts.index("• Recommendation service in Python for 4M users")
-    assert texts[strength - 1] == master_cv.basics.summary
+    assert texts[strength - 1].startswith("[CONFIRM KEY STRENGTHS BEFORE USE")  # drafts only
+    assert texts[strength - 2] == master_cv.basics.summary
     assert texts[strength + 1] == "Relevant skills for this role: Python"
     assert "• Recommendation service in Python for 4M users" in _red_texts(out)
+
+
+def test_a_summary_without_a_heading_is_replaced_whole(master_cv: MasterCV, tmp_path: Path) -> None:
+    source = master_cv.model_copy(deep=True)
+    parts = [
+        "Machine learning engineer with eight years of experience in recommendation systems.",
+        "I build production services in Python and PyTorch for millions of users.",
+    ]
+    source.basics.summary = " ".join(parts)
+    doc = Document()
+    for text in [source.basics.name, source.basics.headline or "", *parts, "EXPERIENCE"]:
+        doc.add_paragraph(text)
+    original = tmp_path / "original.docx"
+    doc.save(str(original))
+    tailored = source.model_copy(deep=True)
+    tailored.basics.summary = "Machine learning engineer with eight years in recommendation."
+    out = tmp_path / "draft.docx"
+    write_like_original(
+        original, source, tailored, out, role_skills=["Python"], key_strengths=["Built a service"]
+    )
+    texts = [p.text for p in Document(str(out)).paragraphs]
+    start = texts.index(tailored.basics.summary)
+    assert texts[start + 2 :] == [
+        "• Built a service", "Relevant skills for this role: Python", "EXPERIENCE"
+    ]  # fmt: skip
+    assert not any(p in texts for p in parts)  # no old summary line left below
 
 
 def test_the_letter_score_is_deterministic_and_says_what_to_improve() -> None:

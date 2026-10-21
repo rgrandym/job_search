@@ -7,12 +7,14 @@ import secrets
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from src.cv.ats import check_docx
 from src.cv.docx_exporter import TEMPLATES, clean_copy, export_docx
 from src.cv.docx_original import restore_normalized_indents, write_like_original
 from src.cv.models import (
+    Bullet,
+    CompressionProposal,
     JDAnalysis,
     MasterCV,
     ReviewAddition,
@@ -23,7 +25,13 @@ from src.cv.models import (
     TailoredDocument,
     TailoringSettings,
 )
-from src.cv.proposals import MAX_ROLE_SKILLS, apply_compression, enriched
+from src.cv.proposals import (
+    MAX_ROLE_SKILLS,
+    applied,
+    covering_line,
+    enriched,
+    restored,
+)
 from src.cv.tailor import keyword_coverage, literal_terms, readability, revise_tailored, screen
 from src.jobs.models import JobPosting
 from src.services import declined, tracker
@@ -405,7 +413,10 @@ def _confirm(
     if addition.kind == "headline":
         revised.cv.basics.headline = wording
         return
-    if addition.kind == "rewording":  # the job's terms for this draft; the source keeps its own
+    if _after_shorter_role(revised, addition, wording):
+        if addition.kind == "rewording":
+            return
+    elif addition.kind == "rewording":  # the job's terms for this draft; the source its own
         bullet = revised.cv.bullet_index().get(addition.anchor_id or "")
         if bullet is None:
             raise ValueError("The line is no longer in this draft")
@@ -467,7 +478,8 @@ def _confirm_rewording(
     if target is None:
         raise ValueError("The line is no longer in the CV this draft came from")
     updated = apply_edits(current, [CVEdit(action="edit_bullet", bullet_id=target, text=wording)])
-    for cv in (source, revised.cv):
+    shortened = _shortened_by(revised, addition) is not None  # the draft has it already
+    for cv in (source,) if shortened else (source, revised.cv):
         bullet = cv.bullet_index().get(addition.anchor_id or "")
         if bullet is not None:
             bullet.text = wording
@@ -475,6 +487,48 @@ def _confirm_rewording(
     if synced.not_written:
         raise ValueError("Could not reword the line in the source Word CV")
     return updated
+
+
+def _shortened_by(revised: TailoredCV, addition: ReviewAddition) -> CompressionProposal | None:
+    """The applied shorter version of the role that replaced the line `addition` is on."""
+    return next(
+        (
+            c
+            for c in revised.compressions
+            if c.kind == "shorter_role"
+            and c.status == "applied"
+            and addition.anchor_id in (c.before_ids or c.source_ids)
+        ),
+        None,
+    )
+
+
+def _after_shorter_role(revised: TailoredCV, addition: ReviewAddition, wording: str) -> bool:
+    """A fact confirmed on a line a shorter version replaced, shown in the draft without
+    overwriting the shorter version: added words go at the end of the shorter line that now
+    carries that line (`covering_line`); a number, a reworded line or edited wording becomes
+    its own line after it (on a replaced line's id, so the Word writer has a paragraph for
+    it). False when the line was not replaced."""
+    version = _shortened_by(revised, addition)
+    if version is None or addition.kind not in {"enrichment", "metric", "rewording"}:
+        return False
+    role = next((r for r in revised.cv.experience if r.id == version.role_ids[0]), None)
+    if role is None:
+        raise ValueError("The role is no longer in this draft")
+    cover = covering_line(revised.compressions, addition.anchor_id or "")
+    index = next((n for n, b in enumerate(role.bullets) if b.id == cover), len(role.bullets) - 1)
+    default = enriched(addition.original_text, addition.text) if addition.original_text else ""
+    if addition.kind == "enrichment" and wording == default and cover is not None:
+        line = role.bullets[index]
+        role.bullets[index] = line.model_copy(update={"text": enriched(line.text, addition.text)})
+        return True
+    used = {b.id for b in role.bullets}
+    pool = [addition.anchor_id or "", *(version.before_ids or version.source_ids)]
+    free = [i for i in pool if i and i not in used]
+    if not free:
+        raise ValueError("No place left in this role's shorter version: edit it in Word")
+    role.bullets.insert(index + 1, Bullet(id=free[0], text=wording))
+    return True
 
 
 def _same_bullet(cv: MasterCV, bullet_id: str, text: str) -> str | None:
@@ -520,27 +574,72 @@ def review_compression(
     ws: Workspace,
     document_id: str,
     compression_id: str,
-    decision: Literal["apply", "reject"],
+    decision: Literal["apply", "reject", "restore"],
 ) -> TailoredDocument:
-    """The user's choice on a compressed version: applied, it replaces its lines in this
-    draft (never in the source CV); rejected, the red version goes. Either way the draft's
-    own Word file is rewritten. The app never applies one by itself."""
+    """The user's choice on a shorter version: applied, it replaces its lines in this draft
+    (never in the source CV); rejected, the red version goes; restored (an applied shorter
+    role or skills line, as optimised mode writes them by default), the user's lines come
+    back and the shorter version waits in red to be used again. Facts the user confirmed are
+    kept either way. The draft's own Word file is rewritten."""
     document = load(ws, document_id)
     item = next((c for c in document.tailored.compressions if c.id == compression_id), None)
-    if item is None or item.status != "pending":
-        raise ValueError("Pending compressed version was not found")
+    wanted = "applied" if decision == "restore" else "pending"
+    if item is None or item.status != wanted:
+        raise ValueError(f"{wanted.capitalize()} shorter version was not found")
     if decision == "apply" and item.kind == "merge_roles":  # from a draft made before 2026-10-15
         raise ValueError("Different roles are never combined: keep your lines")
     revised = document.tailored.model_copy(deep=True)
+    confirmed = {  # facts confirmed on these lines since the version was written
+        a.anchor_id or "": a.text
+        for a in revised.review_additions
+        if a.status == "confirmed" and a.kind in {"enrichment", "metric", "rewording"}
+    }
     if decision == "apply":
-        revised.cv = apply_compression(revised.cv, item)
+        revised.cv, item = applied(revised.cv, item, confirmed)
+    elif decision == "restore":
+        revised.cv = restored(revised.cv, item, document.source_cv)
+        for bullet in revised.cv.bullet_index().values():
+            if bullet.id in item.before_ids and bullet.id in confirmed:
+                bullet.text = confirmed[bullet.id]
+        item = item.model_copy(
+            update={"status": "pending", "line_ids": [], "before": [], "before_ids": []}
+        )
+    else:
+        item = item.model_copy(update={"status": "rejected"})
+    revised.compressions = [item if c.id == compression_id else c for c in revised.compressions]
+    if decision != "reject":
         _refresh(revised, document)
-    status = "applied" if decision == "apply" else "rejected"
-    revised.compressions = [
-        c.model_copy(update={"status": status}) if c.id == compression_id else c
-        for c in revised.compressions
-    ]
     return _write_revision(ws, document, revised)
+
+
+def review_summary(tailored: TailoredCV) -> dict[str, Any]:
+    """What a draft adds and what is the user's to decide, with the ids the assistant passes
+    to `review_cv_addition` and `review_cv_compression` (the same red layer the app shows):
+    pending gap fillers, and the shorter roles and skills lines, applied (optimised mode's
+    default: the user may restore their lines) or waiting to be used."""
+    roles = {r.id: f"{r.title}, {r.company}" for r in tailored.cv.experience}
+    return {
+        "summary": tailored.cv.basics.summary,
+        "key_strengths": tailored.key_strengths,
+        "relevant_skills": tailored.role_skills,
+        "gap_fillers": [
+            {"id": a.id, "kind": a.kind, "role": roles.get(a.role_id or "", ""),
+             "text": a.text, "requirement": a.requirement, "likelihood": a.likelihood,
+             "verify": a.reason}
+            for a in tailored.review_additions
+            if a.status == "pending"
+        ],
+        "shorter_versions": [
+            {"id": c.id, "kind": c.kind, "status": c.status,
+             "of": c.category if c.kind == "trim_skills" else roles.get(c.role_ids[0], ""),
+             "lines_before": len(c.before_ids or c.source_ids) if c.kind != "trim_skills"
+             else len(c.before or [*c.bullets, *c.removed]),
+             "lines_after": len(c.bullets), "text": c.bullets, "left_out": c.removed,
+             "reason": c.reason}
+            for c in tailored.compressions
+            if c.status in {"pending", "applied"}
+        ],
+    }  # fmt: skip
 
 
 def with_screening(document: TailoredDocument) -> TailoredCV:

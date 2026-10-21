@@ -33,6 +33,8 @@ python -m src.cv.master_cv_manager export-schema     # after changing src/cv/mod
 python -m src.jobs.fetcher export-schema             # after changing src/jobs/models.py
 python -m src.jobs.fetcher fetch --keywords "ml engineer" --out data/jobs.json
 python -m src.services.company_discovery [--stale | --all]   # same pass the app runs (Update button)
+python -m src.services.tailoring_tests list | run [--repeat 2] [--only ID] | remove ID
+                                             # optimiser test set (cases saved from the app; calls the CV model)
 python .agent/skills/job_search/scoring_engine.py --cv data/examples/master_cv.example.json \
     --jobs data/examples/jobs.example.json --show-rejected
 python .agent/skills/cv_writer/docx_templates.py --cv <cv.json> --template classic --out output/cv.docx
@@ -90,6 +92,8 @@ src/
                a labelled job is set aside in later searches: it was reviewed already)
                learning.py (preferences learned from labels and applied/N/A reasons; new reasons are
                added automatically at the start of a search, the user can remove any)
+               tailoring_tests.py (CLI: the optimiser's test set, "Save to test set" button;
+               measured by code: length, format, keywords kept, scores, spread across runs)
                model_compare.py (CLI: score model setups against your labels) · compare_usage.py
                (its cost per model, plan usage and progress bar)
                company_discovery.py (directory -> data/companies.json; run by searches + Update button;
@@ -198,13 +202,36 @@ A CV is a factual document. Tailoring may rephrase and reorder. It may never inv
   with the user's reason, for that CV. A draft with pending proposals is not reviewed for
   cover-letter use.
 - Optimised mode also proposes compressed versions (`compressions`, user's decision
-  2026-10-14): a long bullet tightened, or overlapping bullets of one role merged. Consolidation
+  2026-10-14): a long bullet tightened, or overlapping bullets of one role merged; and
+  (user's decision 2026-10-21: employers found the CV long and slow to scan) a shorter
+  version of every role over three lines, in its own step after the plan
+  (`cv/role_versions.py`: one call, one more for versions the checks rejected): the 3 roles
+  the job's key and essential requirements cite most (`central_roles`, whatever their age;
+  then the roles whose lines name the job's keywords most; with no evidence, the latest
+  role) consolidated into 6 to 8 bullets, always two fewer than now (one of 7 lines or
+  fewer keeps them), without losing information
+  (every job skill their lines name kept), every other role into 2 or 3. The same call cuts
+  each skills line over 6 items to what the job needs (`trim_skills`: a line with nothing
+  related goes; a skill the posting names always stays; `proposals.trimmed_skills_reason`).
+  Code checks each role (`proposals.shorter_role_reason`: fewer lines and words, none over
+  40 words, the job terms printed nowhere else kept, every number left out listed, nothing
+  added); what fails twice is listed with the changes. **The optimised CV is the short
+  version (user's decision 2026-10-21):** the checked shorter roles and skills lines are
+  applied in the draft (`proposals.applied`, `tailor._with_shorter_roles`), red and labelled
+  "[CONFIRM SHORTER VERSION OF THIS ROLE: ...]" / "[CONFIRM REMOVAL: ...]" in the draft, clean
+  in the final version; what each replaced is kept, and "Restore my lines"
+  (`review_compression`, "restore", `proposals.restored`) brings the user's lines back. The
+  scores read the short version. Gap fillers stay red questions for the user; one on a line a
+  shorter version replaced sits beside the shorter line that carries it (`line_sources`,
+  `proposals.covering_line`). A confirmed gap filler is never lost: lines confirmed before a
+  shorter version stay after it, a fact confirmed after it joins the line carrying it
+  (`tailored_documents._after_shorter_role`). Consolidation
   stays within one role: different roles are never combined (user's decision 2026-10-15; a
-  `merge_roles` from an older draft is still shown but cannot be applied). A compression keeps every
-  number and job term of its sources and adds nothing they do not show. It is written in red
-  below the lines it would replace, which stay: the app never removes them. Only the user's
-  choice ("use the shorter version", `tailored_documents.review_compression`) replaces them in
-  that draft; the source CV is never changed.
+  `merge_roles` from an older draft is still shown but cannot be applied). A tightened or merged line keeps
+  every number and job term of its sources; none adds anything they do not show. It is written in red
+  below the lines it would replace, which stay; only the user's choice ("use the shorter
+  version", `tailored_documents.review_compression`) replaces them in that draft. The source
+  CV is never changed by any shorter version.
 - Cover letters (user's decision 2026-10-11): the same checks run on every paragraph, but a
   questioned paragraph is kept and flagged in red with its reason (`CoverLetter.flags`) for the
   user to edit or keep; a letter is never refused by a check. Letters are drafted once and
@@ -230,11 +257,14 @@ Every tailored CV is written the same way (`tailor.apply_plan`, `cv/docx_origina
   structured Master CV, of the library Word CV holding most of its words (`_master_docx`). Layout, fonts,
   name, section headings and publications are untouched. A template (`docx_exporter.TEMPLATES`)
   is used only when the user picks one, or when no Word version exists.
-- **Additions (user's decision 2026-10-10):** 3 or 4 "Key strengths" lines under the summary
-  (user's decision 2026-10-15; `tailor._key_strengths`: each cites the bullets it rests on and
-  passes the same guards as a rewrite of them), then one "Relevant skills for this role" line,
-  in its formatting: 10 to 12 skills, only ones a bullet or project shows in use (user's
-  decision 2026-10-14). For an **academic** post
+- **Additions (user's decision 2026-10-10):** exactly 3 succinct "Key strengths" points
+  under the summary, one or two sentences each, the experience and contributions that best
+  match the job (user's decisions 2026-10-15, 2026-10-21; `tailor._key_strengths`: each
+  cites the bullets it rests on and passes the same guards as a rewrite of them; one that
+  repeats a number or most words of the summary or another point is rejected,
+  `tailor._repeats`; red and labelled in a draft), then one short "Relevant skills for this
+  role" line, in its formatting: 6 to 8 skills, the job's keywords first, only ones a bullet
+  or project shows in use (user's decisions 2026-10-14, 2026-10-21). For an **academic** post
   (`audience`), the sections the CV already has move whole into the academic order
   (`docx_original.academic_order`; name and contact lines stay first). The separate red
   unverified-skills line is a review prompt, not a factual addition.
@@ -242,9 +272,11 @@ Every tailored CV is written the same way (`tailor.apply_plan`, `cv/docx_origina
   (`headline_options`, each passing the headline guards). They are written into the Word file
   under the CV's own headline, in its formatting, for the user to delete the ones they do not
   want (user's decision 2026-10-07); picking one in the app saves a version with only that one.
-  The first is the job's exact title when the level and function fit. The summary is two or
-  three short sentences, at most 60 words (who, with the years of experience; the strongest
-  relevant result; what they bring to this team); code computes the years from the role dates and they are the only number a
+  The first is the job's exact title when the level and function fit. The summary is a "who
+  I am" introduction of two or three short sentences, at most 60 words (who, with the years
+  of experience; the work they do best that the job needs; what they bring to this team);
+  achievements are left to the key strengths: nothing is said twice (user's decision
+  2026-10-21); code computes the years from the role dates and they are the only number a
   summary or headline may add (`tailor.career_years`).
   Publications are never edited.
 - **Every role keeps its heading** (user's decision 2026-10-15): a role's title, employer and
@@ -252,7 +284,9 @@ Every tailored CV is written the same way (`tailor.apply_plan`, `cv/docx_origina
   line (`docx_original._spans`, `heading_line`).
 - **Nothing is removed.** Content is rephrased (under the no-fabrication guards) and reordered:
   the bullets that fit the post lead each role, the rest follow at the bottom of that role;
-  relevant skills lead each skills list, the others follow. Nothing is dropped. Tailoring starts
+  relevant skills lead each skills list, the others follow. Nothing is dropped in standard
+  mode; optimised mode's draft is the short version (shorter roles and skills lines applied,
+  red and labelled, every replaced line kept for "Restore my lines"). Tailoring starts
   from the document's own wording (`docx_original.align_to_document`), and a rewrite that drops
   a number or most of its line is rejected (`tailor._loss_reason`).
 - **Length is the user's choice** (`length`): "full" keeps every line, "junior" trims for a junior
@@ -262,10 +296,14 @@ Every tailored CV is written the same way (`tailor.apply_plan`, `cv/docx_origina
   When trimming, at least two bullets stay per role; roles, education and publications stay;
   every left-out line is recorded and shown to the user. Standard mode also lists length
   advice (`tailor.length_notes`: bullets over 35 words, overlapping bullets, long roles that
-  ended over 10 years ago); nothing is changed by it (user's decision 2026-10-14). Both modes
-  propose, in red, a shorter entry for each role that ended over 10 years ago with more than
-  three lines (`proposals.condensed_roles`, built by code: its two most relevant lines, the
-  rest listed); only the user's choice applies it (user's decision 2026-10-15).
+  ended over 10 years ago); nothing is changed by it (user's decision 2026-10-14). Standard
+  mode proposes, in red, a shorter entry for each role that ended over 10 years ago with more
+  than three lines (`proposals.condensed_roles`, built by code: its two most relevant lines,
+  the rest listed); only the user's choice applies it (user's decision 2026-10-15).
+  Relevance decides, never age (user's decision 2026-10-21): a role the job relies on
+  (`tailor.relevant_roles`: a line cited for a key or essential requirement, or half its
+  lines naming a job term) gets no such entry or advice; optimised mode has no code-built
+  entry (its shorter versions are judged by relevance).
 - **Keywords, not more (user's decision 2026-10-14):** rewrites bring one job term into at most
   two bullets (`tailor._limit_repetition`; repeating adds nothing for screening software and
   reads as stuffing); in standard mode, once 80% of the job's keywords are printed, the

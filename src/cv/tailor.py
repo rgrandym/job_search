@@ -19,9 +19,10 @@ that way is put back. Every decision is recorded in `TailoredCV.changes`.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Literal
@@ -58,6 +59,7 @@ from src.cv.models import (
 from src.cv.proposals import (
     MAX_ROLE_SKILLS,
     AdditionContext,
+    applied,
     as_candidate,
     check_additions,
     check_compressions,
@@ -67,6 +69,7 @@ from src.cv.proposals import (
     with_proposals,
 )
 from src.cv.readability import LONG_BULLET_WORDS, score_readability
+from src.cv.role_versions import shorter_cv
 from src.cv.terms import BRIDGE_MATCHES, verified_bridges, with_bridges
 from src.tools.search_tools import (
     extract_numbers,
@@ -235,25 +238,32 @@ from (the CV keeps its own unless they do). Each names the candidate's own level
 The job title is the most valuable phrase to match: make the first option the job's exact \
 title when the candidate's level and function fit it, optionally with the years of \
 experience given in <career> or one evidenced specialism.
-- `summary`: two or three short sentences (at most 60 words) built only from facts in the CV, \
-following the positioning, easy to read in seconds. First: who the candidate is for this job \
-(their function and level) and their years of experience as given in <career>. Then the \
-strongest achievement relevant to this job, from one of the CV's bullets with its own result, \
-and, if room remains, what the candidate brings to this team. Compelling through specifics, \
-never through adjectives. In the candidate's own voice, as above. Do not reduce the candidate \
-to the job description or repeat a keyword list. If the CV's summary has several paragraphs \
-(separated by a blank line), return the same number, separated the same way.
+- `summary`: a short "who I am" introduction for this job: two or three short sentences (at \
+most 60 words) built only from facts in the CV, following the positioning, easy to read in \
+seconds. Who the candidate is for this job (their function, level and specialism) with their \
+years of experience as given in <career>; the kind of work they do best that this job needs; \
+what they bring to this team. Leave achievements and their numbers to `key_strengths`: the \
+summary introduces, the key strengths prove; nothing is said twice. Compelling through \
+specifics, never through adjectives. In the candidate's own voice, as above. Do not reduce \
+the candidate to the job description or repeat a keyword list. If the CV's summary has \
+several paragraphs (separated by a blank line), return the same number, separated the same \
+way.
 Keep any job-relevant skill or experience named in the source summary when it is the only \
 place the CV names it. Give the key requirements priority over incidental desirable terms.
-- `key_strengths`: 3 or 4 short lines (at most about 20 words each) for a "Key strengths" list \
-under the summary: the strengths this job needs most, in the job's words where the CV's facts \
-support them, each citing in `source_ids` the CV bullets whose facts it states. A reader \
-should see the match from these lines alone. Only facts and numbers from the cited bullets; \
-no adjectives about the candidate.
-- `role_skills`: 10 to 12 of the CV's own skills most relevant to this job, most relevant \
-first, related skills next to each other, for one line under the summary. Use the job's own \
-wording where a term_bridge allows it. Only skills a bullet or project shows in use: a \
-recruiter distrusts a broad list with no work behind it.
+- `key_strengths`: exactly 3 succinct points (one or two short sentences, at most about 30 \
+words each) for a "Key strengths" list under the summary: the experience, contributions or \
+roles that best match what this job needs most, each with its result where the cited bullets \
+give one, in the job's words where the CV's facts support them, each citing in `source_ids` \
+the CV bullets whose facts it states. Three different pieces of evidence: none repeats a \
+fact, number or achievement of the summary or of another point (code rejects one that \
+does). A reader skimming for a few \
+seconds should see the match from these points alone. Only facts and numbers from the cited \
+bullets; compelling through specifics, never adjectives about the candidate.
+- `role_skills`: 6 to 8 of the CV's own skills most relevant to this job, most relevant \
+first, related skills next to each other, for one short line under the key strengths: the \
+job's own keywords first, then skills the summary and key strengths do not already name. \
+Use the job's own wording where a term_bridge allows it. Only skills a bullet or project \
+shows in use: a recruiter distrusts a broad list with no work behind it.
 - `skills_to_confirm`: up to 5 techniques or routine tools named in this job but absent \
 from the CV, which the documented education and hands-on work make plausible but do not \
 prove. Copy the relevant CV words into `background_quote` and explain the link in `reason`. \
@@ -287,13 +297,13 @@ proposals the candidate confirms, edits or deletes, never factual CV text. Retur
 list when no credible proposal remains. Do not duplicate what the CV already says.
 {PROPOSAL_KINDS}
 - In optimised mode only, `compressions`: shorter versions the candidate may choose instead of \
-their lines, so the CV scores high and reads quickly, always within one role: never combine \
-different roles. `tighten`: one long bullet without the details this job does not need. \
-`merge_bullets`: two or more bullets of one role that describe overlapping work, as one \
-bullet. Keep the main idea of every source line and every number, result and job term in \
-them; add nothing they do not show; list in `removed` the details left out. Propose only where \
-it clearly helps; never publications or education. The original lines stay; the candidate \
-compares and decides.
+their lines, so the CV scores high and a recruiter finds the match in seconds, always within \
+one role: never combine different roles. Long roles get a shorter version of their whole \
+entry in a separate step; here only `tighten` (one long bullet without the details this \
+job does not need) or `merge_bullets` (two or more bullets of one role that describe \
+overlapping work, as one bullet), keeping every number, result and job term. \
+Add nothing the lines do not show; never publications or education. \
+The original lines stay; the candidate compares and decides.
 
 If a <trimming> block allows it, you may leave out of `bullet_order` bullets that would \
 overstate the candidate for this more junior role, keeping at least two per role. Without it, \
@@ -702,6 +712,7 @@ def apply_plan(
     master = with_bridges(master, bridges)
     cv = master.model_copy(deep=True)
     requirements = check_requirements(plan.requirements, master, jd)
+    relevant = relevant_roles(master, requirements, ats_keywords(jd))
     changes = _apply_rewrites(cv, master, plan, jd, requirements)
     changes = _limit_repetition(cv, master, changes, plan.order_by_role(), keywords)
     before_order = {e.id: list(e.bullets) for e in cv.experience}
@@ -711,7 +722,7 @@ def apply_plan(
     role_skills = _role_skills(plan.role_skills, master)
     role_skills = _retain_summary_terms(master, plan.summary, jd, role_skills)
     changes += _apply_summary(cv, master, plan.summary, jd, role_skills)
-    strengths, checked = _key_strengths(master, plan.key_strengths, jd)
+    strengths, checked = _key_strengths(master, plan.key_strengths, jd, cv.basics.summary)
     changes += checked
     role_skills = _job_terms_on_top(role_skills, cv, keywords, bridges)
     options, rejected = _headline_options(cv, master, plan.headline_options, jd)
@@ -736,21 +747,57 @@ def apply_plan(
         key_strengths=strengths,
         skills_to_confirm=_skills_to_confirm(plan.skills_to_confirm, master, jd, jd_text),
         term_bridges=bridges,
-        length_notes=length_notes(cv) if mode == "standard" else [],
-        compressions=_compressions(plan, master, cv, jd, mode),
+        length_notes=length_notes(cv, relevant=relevant) if mode == "standard" else [],
+        compressions=_compressions(plan, master, cv, jd, mode, relevant),
         academic=jd.academic,
     )
 
 
 def _compressions(
-    plan: TailoringPlan, master: MasterCV, cv: MasterCV, jd: JDAnalysis, mode: str
+    plan: TailoringPlan,
+    master: MasterCV,
+    cv: MasterCV,
+    jd: JDAnalysis,
+    mode: str,
+    relevant: set[str],
 ) -> list[CompressionProposal]:
-    """Shorter versions for the user to choose: the model's (optimised mode, checked) and the
-    earlier roles condensed by code (both modes)."""
+    """Shorter versions for the user to choose: in optimised mode the model's (checked; a
+    role this job relies on keeps every skill it names), in standard mode the earlier roles
+    this job does not rely on, condensed by code. Relevance decides, never age (user's
+    decision 2026-10-21: an earlier postdoc's hands-on work may be what a post needs)."""
     keywords = ats_keywords(jd)
-    vocab = _skill_vocab(master, jd)
-    model = check_compressions(plan.compressions, master, keywords, vocab)
-    return (model if mode == "optimised" else []) + condensed_roles(cv, keywords)
+    if mode == "optimised":
+        vocab = _skill_vocab(master, jd)
+        return check_compressions(plan.compressions, master, keywords, vocab, relevant)
+    return condensed_roles(cv, keywords, relevant=relevant)
+
+
+def relevant_roles(
+    cv: MasterCV, requirements: list[RequirementEvidence], keywords: list[str]
+) -> set[str]:
+    """Roles this job relies on: a line cited as evidence for a key or essential requirement,
+    or at least half their lines naming a job term."""
+    named = {
+        r.id
+        for r in cv.experience
+        if r.bullets
+        and 2 * sum(any(mentions(b.text, k) for k in keywords) for b in r.bullets) >= len(r.bullets)
+    }
+    return cited_roles(cv, requirements) | named
+
+
+def cited_roles(cv: MasterCV, requirements: list[RequirementEvidence]) -> set[str]:
+    """Roles with a line (or the role itself) cited as evidence for a key or essential
+    requirement the CV shows."""
+    owner = {b.id: r.id for r in cv.experience for b in r.bullets}
+    owner.update({r.id: r.id for r in cv.experience})
+    return {
+        owner[e]
+        for row in requirements
+        if (row.importance == "key" or row.priority == "essential") and row.match in CLAIMABLE
+        for e in row.evidence
+        if e in owner
+    }
 
 
 OVERLAP = 0.6  # share of shared words at which two bullets of one role repeat the same work
@@ -758,10 +805,13 @@ OLD_ROLE_YEARS = 10
 OLD_ROLE_BULLETS = 4
 
 
-def length_notes(cv: MasterCV, today: date | None = None) -> list[str]:
+def length_notes(
+    cv: MasterCV, today: date | None = None, relevant: Collection[str] = ()
+) -> list[str]:
     """Advice only (standard mode keeps every line, user's decision 2026-10-14): bullets over
     about two lines, bullets in one role that repeat the same work, and long roles that ended
-    over ten years ago. Code finds them; the user decides."""
+    over ten years ago unless this job relies on them (`relevant`). Code finds them; the user
+    decides."""
     today = today or date.today()
     notes: list[str] = []
     for role in cv.experience:
@@ -777,7 +827,8 @@ def length_notes(cv: MasterCV, today: date | None = None) -> list[str]:
             for a, b in overlapping(role.bullets)
         ]
         ended = int(role.end[:4]) if role.end else today.year
-        if today.year - ended > OLD_ROLE_YEARS and len(role.bullets) > OLD_ROLE_BULLETS:
+        old = today.year - ended > OLD_ROLE_YEARS and role.id not in relevant
+        if old and len(role.bullets) > OLD_ROLE_BULLETS:
             notes.append(
                 f"{name}: ended over {OLD_ROLE_YEARS} years ago with {len(role.bullets)} "
                 "bullets; 2 or 3 may be enough"
@@ -869,16 +920,18 @@ def tailor(
     background: str = "",
     declined: Sequence[str] = (),
 ) -> TailoredCV:
-    """End-to-end: JD text + Master CV -> guarded TailoredCV in at most three model calls
-    after the job analysis (user's decision 2026-10-15: accurate but fast; the user reviews
-    the final document): the plan; with `review`, one revision when code finds the draft under
+    """End-to-end: JD text + Master CV -> guarded TailoredCV in a few model calls after the
+    job analysis (user's decision 2026-10-15: accurate but fast; the user reviews the final
+    document): the plan; with `review`, one revision when code finds the draft under
     grade A, rewrites rejected or (optimised) key gaps no proposal addresses (`_revised_once`,
-    the better-scoring draft kept); and `check`, the before/after reading by an independent
-    grader model. `jd`: an analysis already made of this JD text (saves a call). `profile`:
-    the stored profile as prompt text. `audience` "auto" writes for an academic post when the
-    analysis says the job is one. `suggest_unverified` keeps the plan's red skills to confirm
-    (standard mode). `background` (the user's other CVs) grounds optimised proposals and
-    `declined` lists what the user said they did not do."""
+    the better-scoring draft kept); in optimised mode a shorter version of each long role
+    (`role_versions.shorter_cv`, one call and at most one more); and `check`, the
+    before/after reading by an independent grader model. `jd`: an analysis already made of
+    this JD text (saves a call). `profile`: the stored profile as prompt text. `audience`
+    "auto" writes for an academic post when the analysis says the job is one.
+    `suggest_unverified` keeps the plan's red skills to confirm (standard mode). `background`
+    (the user's other CVs) grounds optimised proposals and `declined` lists what the user
+    said they did not do."""
     if jd is None:
         progress.step("Analysing the job description")
         jd = analyze_jd(jd_text, llm)
@@ -904,6 +957,8 @@ def tailor(
     out = draft.full(plan)
     if review:
         out = _revised_once(draft, plan, out)
+    if mode == "optimised":
+        out = _with_shorter_roles(draft, out)
     if check is not None:
         progress.step("Reading how clearly each CV shows your fit (independent grader)")
         out = check(out)
@@ -1019,6 +1074,27 @@ def _revised_once(d: _Draft, plan: TailoringPlan, out: TailoredCV) -> TailoredCV
         return second.model_copy(update={"revision": f"Revised once ({shown}); kept."})
     note = f"Revised once ({shown}); the first draft scored as well or better and is kept."
     return out.model_copy(update={"revision": note})
+
+
+def _with_shorter_roles(d: _Draft, out: TailoredCV) -> TailoredCV:
+    """Optimised: the draft is the short version (user's decision 2026-10-21): each long
+    role's shorter version and each shorter skills line (`role_versions`) is applied, red in
+    the draft, with what it replaced kept for "Restore my lines"; it takes the place of the
+    plan's tightened or merged lines of that role. What the checks rejected twice is listed
+    with the changes."""
+    keywords = ats_keywords(d.jd)
+    vocab = _skill_vocab(d.master, d.jd)
+    found = shorter_cv(d.llm, out, d.jd, d.jd_text, keywords, vocab)
+    covered = {r for c in found.proposals for r in c.role_ids}
+    rest = [c for c in out.compressions if not covered & set(c.role_ids)]
+    cv, done = out.cv, []
+    for item in found.proposals:
+        with contextlib.suppress(ValueError):  # else left as a proposal to apply by hand
+            cv, item = applied(cv, item)
+        done.append(item)
+    return out.model_copy(
+        update={"cv": cv, "compressions": done + rest, "changes": out.changes + found.rejected}
+    )
 
 
 def _ranked(d: _Draft, out: TailoredCV) -> TailoredCV:
@@ -1591,15 +1667,16 @@ def _apply_summary(
     return [_record("summary", master.basics.summary or "", summary, reason)]
 
 
-MAX_KEY_STRENGTHS = 4
-KEY_STRENGTH_WORDS = 25
+MAX_KEY_STRENGTHS = 3  # 2 or 3 succinct points (user's decision 2026-10-21)
+KEY_STRENGTH_WORDS = 35
 
 
 def _key_strengths(
-    master: MasterCV, proposed: list[KeyStrength], jd: JDAnalysis
+    master: MasterCV, proposed: list[KeyStrength], jd: JDAnalysis, summary: str | None = None
 ) -> tuple[list[str], list[ChangeRecord]]:
     """The "Key strengths" lines that state only what their cited bullets show (the same
-    guards as a rewrite of those bullets taken together); at most `MAX_KEY_STRENGTHS`."""
+    guards as a rewrite of those bullets taken together) and nothing the summary or another
+    key strength says (user's decision 2026-10-21); at most `MAX_KEY_STRENGTHS`."""
     bullets = master.bullet_index()
     cv_skills = normalize_skills(master.all_skills())
     kept: list[str] = []
@@ -1612,9 +1689,8 @@ def _key_strengths(
             if not cited
             else f"longer than {KEY_STRENGTH_WORDS} words"
             if len(text.split()) > KEY_STRENGTH_WORDS
-            else "repeats another key strength"
-            if text in kept
-            else _fabrication_reason(_joined(cited), text, jd, cv_skills, master)
+            else _repeats(text, summary or "", kept)
+            or _fabrication_reason(_joined(cited), text, jd, cv_skills, master)
         )
         if reason is None and len(kept) == MAX_KEY_STRENGTHS:
             reason = f"more than {MAX_KEY_STRENGTHS} key strengths"
@@ -1622,6 +1698,23 @@ def _key_strengths(
         if reason is None:
             kept.append(text)
     return kept, changes
+
+
+REPEAT_SHARE = 0.6  # share of a key strength's content words that another line already says
+YEARS_OF = re.compile(r"\b\d+\+?\s*years?\b", re.IGNORECASE)
+
+
+def _repeats(text: str, summary: str, kept: list[str]) -> str | None:
+    """Whether a key strength says again what the summary or a kept key strength says: one
+    of their numbers, or most of its words."""
+    words = _content_words(text)
+    summary = YEARS_OF.sub("", summary)  # the years of experience are not a repeated fact
+    for name, other in [("the summary", summary), *(("another key strength", k) for k in kept)]:
+        if extract_numbers(text) & extract_numbers(other):
+            return f"repeats a number of {name}"
+        if words and len(words & _content_words(other)) >= REPEAT_SHARE * len(words):
+            return f"repeats {name}"
+    return None
 
 
 def _joined(bullets: list[Bullet]) -> Bullet:

@@ -98,6 +98,7 @@ from src.services import (
     saved,
     search_service,
     tailored_documents,
+    tailoring_tests,
     tracker,
 )
 from src.services import connections as connections_service
@@ -1327,8 +1328,39 @@ def final_tailored_cv(document_id: str) -> dict[str, Any]:
         raise HTTPException(422, str(exc)) from exc
 
 
+@app.post("/api/tailored-cvs/{document_id}/test-set")
+def add_to_test_set(document_id: str) -> dict[str, Any]:
+    """Save this tailored CV's CV and job to the tailoring test set."""
+    ws = get_workspace()
+    try:
+        case = tailoring_tests.add(ws, document_id)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"id": case.id, "name": case.name, "count": len(tailoring_tests.cases(ws))}
+
+
+@app.get("/api/tailoring-tests")
+def list_tailoring_tests() -> list[dict[str, Any]]:
+    """The tailoring test set (the CV and job of each case)."""
+    return [
+        {"id": c.id, "name": c.name, "saved_at": c.saved_at, "job_id": c.job_id}
+        for c in tailoring_tests.cases(get_workspace())
+    ]
+
+
+@app.delete("/api/tailoring-tests/{case_id}")
+def remove_tailoring_test(case_id: str) -> dict[str, Any]:
+    """Take a case out of the tailoring test set."""
+    ws = get_workspace()
+    try:
+        tailoring_tests.remove(ws, case_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"count": len(tailoring_tests.cases(ws))}
+
+
 class ReviewCompressionRequest(BaseModel):
-    decision: Literal["apply", "reject"]
+    decision: Literal["apply", "reject", "restore"]
 
 
 @app.put("/api/tailored-cvs/{document_id}/compressions/{compression_id}")

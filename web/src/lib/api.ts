@@ -349,9 +349,11 @@ export const api = {
       `/api/tailored-cvs/${encodeURIComponent(id)}/additions/${encodeURIComponent(additionId)}`,
       json("PUT", { decision, text, reason: reason ?? "" }),
     ),
+  addToTestSet: (id: string) =>
+    request<{ id: string; name: string; count: number }>(`/api/tailored-cvs/${encodeURIComponent(id)}/test-set`, { method: "POST" }),
   finalTailoredCV: (id: string) =>
     request<TailoredCVView>(`/api/tailored-cvs/${encodeURIComponent(id)}/final`, { method: "POST" }),
-  reviewCVCompression: (id: string, compressionId: string, decision: "apply" | "reject") =>
+  reviewCVCompression: (id: string, compressionId: string, decision: "apply" | "reject" | "restore") =>
     request<TailoredCVView>(
       `/api/tailored-cvs/${encodeURIComponent(id)}/compressions/${encodeURIComponent(compressionId)}`,
       json("PUT", { decision }),

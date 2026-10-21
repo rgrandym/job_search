@@ -317,36 +317,104 @@ class CompressionCandidate(_Strict):
     output, optimised mode). Shown in red below the originals; only the user applies it."""
 
     # merge_roles: only in drafts made before 2026-10-15; different roles are never combined
-    kind: Literal["tighten", "merge_bullets", "merge_roles", "condense_role"]
-    role_ids: list[str] = Field(description="The one role whose lines it shortens")
+    kind: Literal[
+        "tighten", "merge_bullets", "merge_roles", "condense_role", "shorter_role", "trim_skills"
+    ]
+    role_ids: list[str] = Field(
+        description="The one role whose lines it shortens (trim_skills: empty)"
+    )
     source_ids: list[str] = Field(
         default_factory=list,
         description="tighten: one bullet; merge_bullets: two or more bullets of the role; "
-        "merge_roles: leave empty (all of the roles' bullets); condense_role (built by code, "
-        "never proposed by the model): the lines it leaves out",
+        "shorter_role and merge_roles: leave empty (all of the role's bullets); condense_role "
+        "(built by code, never proposed by the model): the lines it leaves out",
     )
     bullets: list[str] = Field(
-        description="The compressed wording: one bullet for tighten or merge_bullets; the "
-        "consolidated bullets for merge_roles, most relevant first"
+        description="The compressed wording: one bullet for tighten or merge_bullets; for "
+        "shorter_role the role's whole entry synthesised in fewer bullets, most relevant first; "
+        "for trim_skills the skills the line keeps (none: the line goes)"
     )
     removed: list[str] = Field(
         default_factory=list, description="Details left out because this job does not need them"
     )
     reason: str = Field(description="Why this reads better for this job")
+    category: str = Field("", description="trim_skills only (code-set): the skills line's category")
+    line_sources: list[list[str]] = Field(
+        default_factory=list,
+        description="shorter_role only (code-set): for each bullet, the role's line ids it "
+        "draws on",
+    )
 
 
 class CompressionProposal(CompressionCandidate):
-    """A checked compression awaiting the user's decision."""
+    """A checked compression: pending the user's decision, or (optimised mode's shorter
+    roles and skills lines) applied by default with what it replaced kept for a restore."""
 
     id: str
     heading: str = Field("", description="merge_roles: the merged entry's heading (code-built)")
     status: Literal["pending", "applied", "rejected"] = "pending"
+    line_ids: list[str] = Field(
+        default_factory=list, description="Applied shorter_role: the draft ids of its lines"
+    )
+    before: list[str] = Field(
+        default_factory=list,
+        description="Applied: the replaced lines' text (shorter_role) or the line's skills "
+        "(trim_skills), for 'Restore my lines'",
+    )
+    before_ids: list[str] = Field(
+        default_factory=list, description="Applied shorter_role: the replaced lines' ids"
+    )
+
+
+class VersionLine(_Strict):
+    """One bullet of a role's shorter version."""
+
+    text: str
+    sources: list[str] = Field(
+        default_factory=list, description="The ids of the role's lines this bullet draws on"
+    )
+
+
+class RoleVersion(_Strict):
+    """One role's entry rewritten shorter for this job (LLM output, optimised mode)."""
+
+    role_id: str
+    bullets: list[VersionLine] = Field(
+        description="The role's whole entry consolidated, as many bullets as the role's "
+        "`lines` attribute asks, most relevant first"
+    )
+    removed: list[str] = Field(
+        default_factory=list, description="Each detail and number left out, briefly"
+    )
+    reason: str = Field(description="Why this version reads better for this job (one line)")
+
+
+class SkillsLine(_Strict):
+    """One skills line of the CV cut to what this job needs (LLM output, optimised mode)."""
+
+    category: str
+    keep: list[str] = Field(
+        description="The line's own skills this job needs, exactly as written, most relevant "
+        "first; empty when none is related (the line goes)"
+    )
+    reason: str = Field(description="Why the others do not help for this job (one line)")
+
+
+class RoleVersions(_Strict):
+    """LLM output: shorter versions of the draft's long roles and skills lines
+    (`cv.role_versions`)."""
+
+    roles: list[RoleVersion] = Field(default_factory=list)
+    skills: list[SkillsLine] = Field(default_factory=list)
 
 
 class KeyStrength(_Strict):
     """One "Key strengths" line under the summary, resting on the CV bullets it cites."""
 
-    text: str = Field(description="One short line (at most about 20 words), first person implied")
+    text: str = Field(
+        description="One or two short sentences (at most about 30 words), first person implied; "
+        "evidence the summary does not already state"
+    )
     source_ids: list[str] = Field(description="The CV bullet ids whose facts it states")
 
 
@@ -365,8 +433,9 @@ class TailoringPlan(_Strict):
     summary: str | None = None
     key_strengths: list[KeyStrength] = Field(
         default_factory=list,
-        description="3 or 4 short lines under the summary: the strengths this job needs most, "
-        "each from the CV bullets it cites",
+        description="3 succinct points under the summary: the experience, contributions or "
+        "roles that best match this job, each from the CV bullets it cites, none repeating "
+        "the summary or another point",
     )
     rewritten_bullets: list[RewrittenBullet] = Field(default_factory=list)
     bullet_order: list[RoleOrder] = Field(
@@ -398,8 +467,8 @@ class TailoringPlan(_Strict):
     )
     compressions: list[CompressionCandidate] = Field(
         default_factory=list,
-        description="Optimised mode only: overlapping bullets merged, long bullets tightened, "
-        "or similar roles merged, for the user to compare and apply",
+        description="Optimised mode only: a shorter version of each long role, overlapping "
+        "bullets merged or long bullets tightened, for the user to compare and apply",
     )
 
     @field_validator("bullet_order", mode="before")

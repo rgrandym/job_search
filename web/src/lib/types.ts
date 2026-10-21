@@ -651,7 +651,7 @@ export interface ReviewAddition {
  * `CompressionProposal`). */
 export interface CompressionProposal {
   id: string;
-  kind: "tighten" | "merge_bullets" | "merge_roles" | "condense_role";
+  kind: "tighten" | "merge_bullets" | "merge_roles" | "condense_role" | "shorter_role" | "trim_skills";
   role_ids: string[];
   source_ids: string[];
   bullets: string[];
@@ -659,6 +659,12 @@ export interface CompressionProposal {
   reason: string;
   /** merge_roles: the merged entry's heading, every institution with its dates. */
   heading: string;
+  /** trim_skills: the skills line's category (`bullets` are the skills it keeps). */
+  category?: string;
+  /** Applied (optimised mode's default): the replaced lines' text, or the line's skills. */
+  before?: string[];
+  /** Applied shorter_role: the replaced lines' ids. */
+  before_ids?: string[];
   status: "pending" | "applied" | "rejected";
 }
 

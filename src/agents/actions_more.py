@@ -341,19 +341,21 @@ async def review_cv_addition(args: CVAdditionDecision, ctx: AgentContext) -> dic
         "document_id": document.id,
         "reviewed": document.reviewed,
         "download_url": f"/api/files/cvs/{document.filename}",
+        "still_to_review": tailored_documents.review_summary(document.tailored),
     }
 
 
 class CVCompressionDecision(BaseModel):
     document_id: str
     compression_id: str
-    decision: Literal["apply", "reject"]
+    decision: Literal["apply", "reject", "restore"]
 
 
 @tool(
     "review_cv_compression",
-    "Apply a red compressed version of a tailored CV's lines (only on the user's explicit "
-    "instruction; it replaces the original lines in that draft) or reject it.",
+    "An optimised CV is already the short version: restore the user's own lines for a "
+    "shorter role or skills line when they ask ('restore'), or use a shorter version waiting "
+    "in red ('apply') or drop it ('reject'). Facts the user confirmed always stay.",
     CVCompressionDecision,
 )
 async def review_cv_compression(args: CVCompressionDecision, ctx: AgentContext) -> dict[str, Any]:
@@ -363,7 +365,34 @@ async def review_cv_compression(args: CVCompressionDecision, ctx: AgentContext) 
         ctx.ws, args.document_id, args.compression_id, args.decision
     )
     await ctx.emit("documents_updated", {"job_id": document.job_id})
-    return {"document_id": document.id, "download_url": f"/api/files/cvs/{document.filename}"}
+    return {
+        "document_id": document.id,
+        "download_url": f"/api/files/cvs/{document.filename}",
+        "still_to_review": tailored_documents.review_summary(document.tailored),
+    }
+
+
+class TailoredRead(BaseModel):
+    document_id: str
+
+
+@tool(
+    "read_tailored_cv",
+    "Read a tailored CV draft: its summary, key strengths and relevant skills, and the red "
+    "gap fillers and shorter versions still to review, with their ids.",
+    TailoredRead,
+)
+async def read_tailored_cv(args: TailoredRead, ctx: AgentContext) -> dict[str, Any]:
+    from src.services import tailored_documents
+
+    document = tailored_documents.load(ctx.ws, args.document_id)
+    return {
+        "document_id": document.id,
+        "job": document.job_title + (f" at {document.job_company}" if document.job_company else ""),
+        "mode": document.settings.mode if document.settings else "standard",
+        "download_url": f"/api/files/cvs/{document.filename}",
+        **tailored_documents.review_summary(document.tailored),
+    }
 
 
 @tool("edit_tailored_cv", "Revise a tailored CV draft with source-fact guards.", TailoredEdit)

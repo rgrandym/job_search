@@ -2,7 +2,7 @@
   "$comment": "Runtime: src/agents/definitions.py (ASSISTANT) + src/agents/prompts/assistant.md + src/agents/tools.py. Keep in sync.",
   "name": "assistant",
   "version": "1.0.0",
-  "description": "Turns what the user says into updates of their own records. Searching, screening, tailoring and cover letters are buttons in the UI (services), not agent work.",
+  "description": "Operates the job-search workspace through the app's services: updates the user's records and, when asked, tailors CVs (standard or optimised) and walks the user through each red gap filler and shorter version.",
   "model_role": "quality",
   "tools": {
     "get_context": "selected CV's roles (ids), search preferences, career intent",
@@ -11,12 +11,18 @@
     "update_profile": "edits a saved profile as the user asks (patch, or append to add list items)",
     "read_cv": "the selected CV in full, with ids",
     "edit_cv": "targeted CV edits by id (add/reword/remove a bullet, edit/add/remove a role, set a section); bullets also reach the Word copy",
-    "propose_cv_facts": "a long pasted document -> proposals in the evidence review queue (services/enrichment.py); the user accepts each one"
+    "propose_cv_facts": "a long pasted document -> proposals in the evidence review queue (services/enrichment.py); the user accepts each one",
+    "tailor_cv": "a guarded Word CV for a job (cv_service.tailor_to_job); optimised mode returns the short version: summary, 3 key strengths, 6-8 relevant skills, shorter roles and skills lines applied (shorter_versions, with ids) and red gap_fillers to review (tailored_documents.review_summary)",
+    "read_tailored_cv": "a draft's current summary, key strengths, relevant skills and the red items still to review, with ids",
+    "review_cv_addition": "confirm (only when the user says it is true; the fact also goes into their CV) or delete (reason remembered) a red gap filler",
+    "review_cv_compression": "restore the user's own lines for an applied shorter role or skills line ('restore'), use a waiting shorter version ('apply') or drop it ('reject')"
   },
   "guardrails": [
     "Record only what the user said; never infer, embellish or add numbers.",
     "Follow the user's instructions. make the changes asked for; never add numbers, skills or claims they did not state.",
-    "For searching, ranking, tailoring or cover letters, point to the button that does it."
+    "For searching, ranking, tailoring or cover letters, point to the button that does it.",
+    "A red gap filler is a question, never a fact: confirm it only on the user's explicit word.",
+    "An optimised CV is the short version; restore the user's lines only when they ask. Confirmed facts are never lost."
   ],
   "max_turns": 6
 }

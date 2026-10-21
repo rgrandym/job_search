@@ -28,22 +28,37 @@ function kindLabel(item: ReviewAddition, document: TailoredCVView): string {
 function Compressions({ document }: { document: TailoredCVView }) {
   const qc = useQueryClient();
   const pending = (document.report?.compressions ?? []).filter((c) => c.status === "pending");
+  const applied = (document.report?.compressions ?? []).filter((c) => c.status === "applied" && (c.kind === "shorter_role" || c.kind === "trim_skills"));
   const decide = useMutation({
     meta: { syncLists: true },
-    mutationFn: ({ id, decision }: { id: string; decision: "apply" | "reject" }) => api.reviewCVCompression(document.id, id, decision),
+    mutationFn: ({ id, decision }: { id: string; decision: "apply" | "reject" | "restore" }) => api.reviewCVCompression(document.id, id, decision),
     onSuccess: () => { void qc.invalidateQueries({ queryKey: ["tailored-cvs"] }); void qc.invalidateQueries({ queryKey: ["cv-comparison", document.job_id] }); },
   });
-  if (!pending.length) return null;
+  if (!pending.length && !applied.length) return null;
   const bullets = Object.fromEntries(document.cv.experience.flatMap((r) => r.bullets.map((b) => [b.id, b.text])));
   const roles = Object.fromEntries(document.cv.experience.map((r) => [r.id, `${r.title} · ${r.company}`]));
   return (
     <div className="space-y-2 rounded border border-border p-2">
-      <p className="font-medium">Shorter versions to compare</p>
-      <p className="text-muted">Each is in red in the Word file, below the lines it would replace. Your lines stay unless you choose the shorter version. A merge or tightened line keeps every number and job term; a shorter earlier role lists what it leaves out.</p>
+      {applied.length > 0 && (
+        <>
+          <p className="font-medium">Shortened for this job</p>
+          <p className="text-muted">This CV is the short version: these roles and skills lines are rewritten for the job, red in the Word draft. Restore your own lines for any of them.</p>
+          {applied.map((item) => (
+            <div key={item.id} className="space-y-1 rounded border border-border p-2">
+              <p className="font-medium">{item.kind === "trim_skills" ? (item.bullets.length ? `Skills · ${item.category ?? ""}: ${item.bullets.length} of ${item.before?.length ?? item.bullets.length + item.removed.length} kept` : `Skills line removed · ${item.category ?? ""}`) : `${roles[item.role_ids[0]] ?? ""}: ${item.bullets.length} lines for ${item.before_ids?.length ?? item.source_ids.length}`}</p>
+              {item.removed.length > 0 && <p className="text-faint">Left out: {item.removed.join("; ")}</p>}
+              <p className="text-faint">Why: {item.reason}</p>
+              <button className="btn-ghost py-1 text-[11px]" disabled={decide.isPending} onClick={() => decide.mutate({ id: item.id, decision: "restore" })}>Restore my lines</button>
+            </div>
+          ))}
+        </>
+      )}
+      {pending.length > 0 && <p className="font-medium">Shorter versions to compare</p>}
+      {pending.length > 0 && <p className="text-muted">Each is in red in the Word file, below the lines it would replace. Your lines stay unless you choose the shorter version. A shorter role keeps every job term and lists what it leaves out; a merge or tightened line keeps every number and job term.</p>}
       {pending.map((item) => (
         <div key={item.id} className="space-y-1 rounded border border-border p-2">
-          <p className="font-medium">{item.kind === "merge_roles" ? `Merge ${item.role_ids.length} similar roles` : item.kind === "merge_bullets" ? `Merge ${item.source_ids.length} overlapping lines · ${roles[item.role_ids[0]] ?? ""}` : item.kind === "condense_role" ? `Shorter entry for an earlier role · ${roles[item.role_ids[0]] ?? ""}` : `Tighten a line · ${roles[item.role_ids[0]] ?? ""}`}</p>
-          {item.kind !== "condense_role" && (
+          <p className="font-medium">{item.kind === "merge_roles" ? `Merge ${item.role_ids.length} similar roles` : item.kind === "merge_bullets" ? `Merge ${item.source_ids.length} overlapping lines · ${roles[item.role_ids[0]] ?? ""}` : item.kind === "condense_role" ? `Shorter entry for an earlier role · ${roles[item.role_ids[0]] ?? ""}` : item.kind === "shorter_role" ? `Shorter version of this role: ${item.bullets.length} lines for ${item.source_ids.length} · ${roles[item.role_ids[0]] ?? ""}` : item.kind === "trim_skills" ? (item.bullets.length ? `Shorter skills line · ${item.category ?? ""}: keeps ${item.bullets.length} of ${item.bullets.length + item.removed.length}` : `Remove the skills line · ${item.category ?? ""}`) : `Tighten a line · ${roles[item.role_ids[0]] ?? ""}`}</p>
+          {item.kind !== "condense_role" && item.kind !== "shorter_role" && item.kind !== "trim_skills" && (
             <div className="space-y-0.5 text-muted">
               {item.kind === "merge_roles"
                 ? item.role_ids.map((id) => <p key={id}>Now: {roles[id] ?? id}</p>)
@@ -51,9 +66,11 @@ function Compressions({ document }: { document: TailoredCVView }) {
             </div>
           )}
           {item.kind === "condense_role" && <p className="text-muted">Keeps only these lines:</p>}
+          {item.kind === "shorter_role" && <p className="text-muted">Your role's lines stay above it in the Word file. Replaced by:</p>}
+          {item.kind === "trim_skills" && item.bullets.length > 0 && <p className="text-muted">Keeps:</p>}
           <div className="space-y-0.5 text-bad">
             {item.heading && <p className="font-medium">{item.heading}</p>}
-            {item.bullets.map((text) => <p key={text}>{text}</p>)}
+            {item.kind === "trim_skills" ? item.bullets.length > 0 && <p>{item.bullets.join(", ")}</p> : item.bullets.map((text) => <p key={text}>{text}</p>)}
           </div>
           {item.removed.length > 0 && <p className="text-faint">Left out: {item.removed.join("; ")}</p>}
           <p className="text-faint">Why: {item.reason}</p>
@@ -75,6 +92,7 @@ function FinalVersion({ document }: { document: TailoredCVView }) {
     mutationFn: () => api.finalTailoredCV(document.id),
     onSuccess: () => { void qc.invalidateQueries({ queryKey: ["tailored-cvs"] }); },
   });
+  const test = useMutation({ mutationFn: () => api.addToTestSet(document.id) });
   if (document.imported) return null;
   return (
     <div className="space-y-1 rounded border border-border p-2">
@@ -84,7 +102,12 @@ function FinalVersion({ document }: { document: TailoredCVView }) {
           {write.isPending && <Loader2 size={12} className="animate-spin" />} Write final version
         </button>
         {document.final_url && <a className="text-accent hover:underline" href={document.final_url}><Download size={11} /> Download final version</a>}
+        <button className="btn-ghost py-1 text-[12px]" disabled={test.isPending} title="Keep this CV and job to measure the optimiser on (python -m src.services.tailoring_tests run)" onClick={() => test.mutate()}>
+          {test.isPending && <Loader2 size={12} className="animate-spin" />} Save to test set
+        </button>
       </div>
+      {test.data && <p className="text-good">Saved to the test set ({test.data.count} {test.data.count === 1 ? "case" : "cases"}).</p>}
+      {test.error && <p className="text-bad">{(test.error as Error).message}</p>}
       {document.final_notes.map((note) => <p key={note} className="text-warn">{note}</p>)}
       {write.error && <p className="text-bad">{(write.error as Error).message}</p>}
     </div>

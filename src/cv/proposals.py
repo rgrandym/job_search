@@ -7,10 +7,10 @@ Optimised tailoring proposes, for the user to approve before applying:
   headline). Each quotes real source text and
   posting text; code checks both quotes, the role or bullet it belongs to, and that it adds no
   number, jargon, superlative or claim the user has already declined.
-- compressions: overlapping bullets merged, a long bullet tightened, or similar roles merged
-  into one entry (every institution and its dates kept). Every number and job term of the
-  source lines stays, nothing new is added, and the app never applies one: it is written in red
-  below the originals and only the user's choice replaces them.
+- compressions: a shorter version of a whole role (its lines synthesised into fewer, every
+  job term kept, any number left out listed), overlapping bullets merged or a long bullet
+  tightened (every number and job term kept). Nothing new is added, and the app never applies
+  one: it is written in red below the originals and only the user's choice replaces them.
 
 Nothing here is a confirmed fact: pending items stay outside the factual CV, its score, its
 keyword coverage and cover letters.
@@ -21,7 +21,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from datetime import date
 from difflib import SequenceMatcher
@@ -58,6 +58,10 @@ MAX_PER_ROLE = 8
 POSSIBLE_SHARE = 1 / 3  # at most this share may be "possible" rather than "likely"
 MAX_METRICS = 5
 MAX_COMPRESSIONS = 6
+# A shorter role (user's decision 2026-10-21: employers found the CV long and slow to scan):
+# the role's lines synthesised into at most this many, each readable at a glance.
+MAX_ROLE_LINES = 8
+ROLE_LINE_WORDS = 40
 DECLINED_MATCH = 0.8  # this similar to a declined proposal counts as the same proposal
 ROLE_KINDS = {"experience", "enrichment", "rewording", "metric"}
 LINE_KINDS = {"enrichment", "rewording", "metric"}  # proposals about one existing bullet
@@ -340,40 +344,93 @@ def check_compressions(
     master: MasterCV,
     keywords: Sequence[str],
     vocab: Sequence[str],
+    relevant: Collection[str] = (),
 ) -> list[CompressionProposal]:
-    """Keep the compressions that keep every number and job term of their source lines, add
-    nothing those lines do not show, and stay within one role (or merge similar roles)."""
+    """Keep the compressions that keep every job term (and, except a shorter role's listed
+    left-out details, every number) of their source lines, add nothing those lines do not
+    show, and stay within one role. A shorter role comes first and takes its role's lines;
+    one of a role this job relies on (`relevant`) keeps every skill its lines name."""
     roles = {r.id: r for r in master.experience}
     used: set[str] = set()
     out: list[CompressionProposal] = []
-    for item in proposed:
-        if item.kind == "condense_role":
-            continue  # built by code (`condensed_roles`), never taken from the model
+    for item in sorted(proposed, key=lambda c: c.kind != "shorter_role"):
+        if item.kind in {"condense_role", "trim_skills"}:
+            continue  # built by code or the shorter-CV step, never taken from the plan
         if item.kind == "merge_roles":
             continue  # different roles are never combined (user's decision 2026-10-15)
         sources = _sources(item, roles)
         if sources is None or used & {b.id for b in sources}:
             continue
-        bullets = [b.strip() for b in item.bullets if b.strip()]
-        if not bullets or _compression_reason(item, sources, bullets, keywords, vocab):
+        if item.kind == "shorter_role":
+            role = roles[item.role_ids[0]]
+            keep = vocab if role.id in relevant else ()
+            if shorter_role_reason(role, item, keywords, vocab, keep):
+                continue
+        elif _compression_reason(item, sources, _lines(item), keywords, vocab):
+            continue
+        if item.kind != "shorter_role" and sum(c.kind != "shorter_role" for c in out) == (
+            MAX_COMPRESSIONS
+        ):
             continue
         used |= {b.id for b in sources}
-        chosen = [roles[i] for i in dict.fromkeys(item.role_ids)]
-        identity = f"{item.kind}\0{','.join(b.id for b in sources)}\0{'|'.join(bullets)}"
-        out.append(
-            CompressionProposal.model_validate(
-                {
-                    **item.model_dump(),
-                    "role_ids": [r.id for r in chosen],
-                    "source_ids": [b.id for b in sources],
-                    "bullets": bullets,
-                    "id": hashlib.sha256(identity.encode()).hexdigest()[:12],
-                }
-            )
-        )
-        if len(out) == MAX_COMPRESSIONS:
-            break
+        out.append(checked_compression(item, sources))
     return out
+
+
+def _lines(item: CompressionCandidate) -> list[str]:
+    return [b.strip() for b in item.bullets if b.strip()]
+
+
+def shorter_role_reason(
+    role: Experience,
+    item: CompressionCandidate,
+    keywords: Sequence[str],
+    vocab: Sequence[str],
+    keep_skills: Sequence[str] = (),
+) -> str | None:
+    """Why a shorter version of `role` is not faithful: the compression checks, and (a role
+    central to the job, user's decision 2026-10-21: consolidated without losing information)
+    every skill of `keep_skills` its lines name."""
+    bullets = _lines(item)
+    if not bullets:
+        return "no lines"
+    if reason := _compression_reason(item, list(role.bullets), bullets, keywords, vocab):
+        return reason
+    source = " ".join(b.text for b in role.bullets)
+    named = extract_skills(source, list(keep_skills)) if keep_skills else []
+    lost = [s for s in named if not mentions(" ".join(bullets), s)]
+    if lost:
+        return "drops skills of a role central to this job: " + ", ".join(lost)
+    return None
+
+
+def trimmed_skills_reason(group: SkillGroup, keep: Sequence[str], job_text: str) -> str | None:
+    """Why a shorter skills line is not the line's own skills minus ones this job does not
+    name: a kept skill not on the line, nothing left out, or a skill the posting names left
+    out."""
+    if any(k not in group.items for k in keep):
+        return "keeps a skill that is not on this line"
+    if len(set(keep)) >= len(group.items):
+        return "leaves nothing out"
+    named = [i for i in group.items if i not in keep and mentions(job_text, i)]
+    if named:
+        return "leaves out skills the posting names: " + ", ".join(named)
+    return None
+
+
+def checked_compression(item: CompressionCandidate, sources: list[Bullet]) -> CompressionProposal:
+    """A compression that passed its checks, as a proposal with a stable id."""
+    bullets = _lines(item)
+    identity = f"{item.kind}\0{','.join(b.id for b in sources)}\0{'|'.join(bullets)}"
+    return CompressionProposal.model_validate(
+        {
+            **item.model_dump(),
+            "role_ids": list(dict.fromkeys(item.role_ids)),
+            "source_ids": [b.id for b in sources],
+            "bullets": bullets,
+            "id": hashlib.sha256(identity.encode()).hexdigest()[:12],
+        }
+    )
 
 
 OLD_ROLE_YEARS = 10
@@ -381,9 +438,13 @@ KEEP_OLD_LINES = 2
 
 
 def condensed_roles(
-    cv: MasterCV, keywords: Sequence[str], today: date | None = None
+    cv: MasterCV,
+    keywords: Sequence[str],
+    today: date | None = None,
+    relevant: Collection[str] = (),
 ) -> list[CompressionProposal]:
-    """Roles that ended over `OLD_ROLE_YEARS` years ago with more than three lines, cut to
+    """Roles that ended over `OLD_ROLE_YEARS` years ago with more than three lines, unless
+    this job relies on them (`relevant`, user's decision 2026-10-21), cut to
     their `KEEP_OLD_LINES` most relevant ones (lines naming a job term first, then the
     draft's order). Built by code, shown in red, applied only by the user (user's decision
     2026-10-15: a recruiter reads the recent roles; an earlier career reads best brief)."""
@@ -391,7 +452,11 @@ def condensed_roles(
     out: list[CompressionProposal] = []
     for role in cv.experience:
         ended = int(role.end[:4]) if role.end else today.year
-        if today.year - ended <= OLD_ROLE_YEARS or len(role.bullets) <= KEEP_OLD_LINES + 1:
+        if (
+            today.year - ended <= OLD_ROLE_YEARS
+            or len(role.bullets) <= KEEP_OLD_LINES + 1
+            or role.id in relevant
+        ):
             continue
         ranked = sorted(role.bullets, key=lambda b: not any(mentions(b.text, k) for k in keywords))
         kept = {b.id for b in ranked[:KEEP_OLD_LINES]}
@@ -426,6 +491,8 @@ def _sources(item: CompressionCandidate, roles: dict[str, Experience]) -> list[B
         ):
             return None
         return [b for r in chosen for b in r.bullets]
+    if item.kind == "shorter_role":
+        return list(chosen[0].bullets) if len(chosen) == 1 else None
     if len(chosen) != 1 or len(item.bullets) != 1:
         return None
     own = {b.id for b in chosen[0].bullets}
@@ -460,7 +527,10 @@ def _compression_reason(
     new = " ".join(bullets)
     if item.kind == "tighten" and len(new.split()) >= len(source.split()):
         return "not shorter"
-    if extract_numbers(source) - extract_numbers(new):
+    if item.kind == "shorter_role":
+        if reason := _role_version_reason(sources, bullets, item.removed):
+            return reason
+    elif extract_numbers(source) - extract_numbers(new):
         return "drops a number"
     if extract_numbers(new) - extract_numbers(evidence):
         return "adds a number"
@@ -472,6 +542,25 @@ def _compression_reason(
         return "names a skill its sources do not show"
     if any(mentions(source, k) and not mentions(new, k) for k in keywords):
         return "drops a job term"
+    return None
+
+
+def _role_version_reason(
+    sources: list[Bullet], bullets: list[str], removed: list[str]
+) -> str | None:
+    """Why a shorter role is not fewer, readable lines that list every number they leave out
+    (a number is often the result a reader looks for: leaving one out must be visible)."""
+    if len(bullets) >= len(sources) or len(bullets) > MAX_ROLE_LINES:
+        return f"not fewer lines (at most {MAX_ROLE_LINES})"
+    if len(" ".join(bullets).split()) >= len(" ".join(b.text for b in sources).split()):
+        return "not shorter"
+    if any(len(b.split()) > ROLE_LINE_WORDS for b in bullets):
+        return f"a line over {ROLE_LINE_WORDS} words"
+    dropped = extract_numbers(" ".join(b.text for b in sources)) - extract_numbers(
+        " ".join(bullets)
+    )
+    if dropped - extract_numbers(" ".join(removed)):
+        return "drops a number without listing it as left out"
     return None
 
 
@@ -493,8 +582,11 @@ def merged_heading(roles: list[Experience]) -> str:
     return (f"{ordered[0].title}, " if same else "") + "; ".join(parts)
 
 
-def apply_compression(cv: MasterCV, proposal: CompressionProposal) -> MasterCV:
-    """`cv` with the compressed version in place of its sources (only on the user's choice)."""
+def apply_compression(
+    cv: MasterCV, proposal: CompressionProposal, keep: Collection[str] = ()
+) -> MasterCV:
+    """`cv` with the compressed version in place of its sources (only on the user's choice).
+    A shorter role keeps the lines in `keep` (facts the user confirmed since it was written)."""
     out = cv.model_copy(deep=True)
     if proposal.kind == "merge_roles":
         return _merge_roles(out, proposal)
@@ -502,6 +594,15 @@ def apply_compression(cv: MasterCV, proposal: CompressionProposal) -> MasterCV:
         for entry in out.experience:
             if entry.id in proposal.role_ids:
                 entry.bullets = [b for b in entry.bullets if b.id not in proposal.source_ids]
+        return MasterCV.model_validate(out.model_dump())
+    if proposal.kind == "shorter_role":
+        return _shorter_role(out, proposal, keep)
+    if proposal.kind == "trim_skills":
+        group = next((g for g in out.skills if g.category == proposal.category), None)
+        if group is None:
+            raise ValueError("This skills line is no longer in the draft")
+        group.items = [i for i in group.items if i in proposal.bullets]
+        out.skills = [g for g in out.skills if g.items]
         return MasterCV.model_validate(out.model_dump())
     role = next((r for r in out.experience if r.id == proposal.role_ids[0]), None)
     if role is None:
@@ -523,6 +624,109 @@ def apply_compression(cv: MasterCV, proposal: CompressionProposal) -> MasterCV:
         if b.id not in ids or b.id == first.id
     ]
     return MasterCV.model_validate(out.model_dump())
+
+
+def _shorter_role(cv: MasterCV, proposal: CompressionProposal, keep: Collection[str]) -> MasterCV:
+    """The role's lines replaced by the shorter version. Each of its lines takes the id of a
+    replaced line it draws on (`version_ids`), so the Word writer rewrites that paragraph in
+    its own formatting and removes the rest. Lines the version was not written from (a
+    confirmed new experience) or that the user confirmed since (`keep`) stay after it: a
+    confirmed fact is never lost (user's decision 2026-10-21)."""
+    role = next((r for r in cv.experience if r.id == proposal.role_ids[0]), None)
+    stay = (
+        [b for b in role.bullets if b.id in keep or b.id not in proposal.source_ids] if role else []
+    )
+    replaced = [b for b in role.bullets if b not in stay] if role else []
+    if role is None or len(replaced) < len(proposal.bullets):
+        raise ValueError("The role of this shorter version is no longer in the draft")
+    skills = list(dict.fromkeys(s for b in role.bullets for s in b.skills))
+    metrics = list(dict.fromkeys(m for b in role.bullets for m in b.metrics))
+    role.bullets = [
+        Bullet(
+            id=new_id,
+            text=text,
+            skills=[s for s in skills if mentions(text, s)],
+            metrics=[m for m in metrics if set() < extract_numbers(m) <= extract_numbers(text)],
+        )
+        for new_id, text in zip(
+            version_ids(proposal, [b.id for b in replaced]), proposal.bullets, strict=True
+        )
+    ] + stay
+    return MasterCV.model_validate(cv.model_dump())
+
+
+def version_ids(proposal: CompressionProposal, replaced: list[str]) -> list[str]:
+    """The id each line of a shorter version takes: the first replaced line it draws on not
+    taken yet, else the first free replaced line (in the draft's order)."""
+    free = list(replaced)
+    out: list[str] = []
+    for n in range(len(proposal.bullets)):
+        sources = proposal.line_sources[n] if n < len(proposal.line_sources) else []
+        chosen = next((i for i in sources if i in free), None) or free[0]
+        free.remove(chosen)
+        out.append(chosen)
+    return out
+
+
+def applied(
+    cv: MasterCV, proposal: CompressionProposal, keep: Collection[str] = ()
+) -> tuple[MasterCV, CompressionProposal]:
+    """`cv` with a compression applied, and the proposal marked applied with what it replaced
+    (for "Restore my lines") and, for a shorter role, the draft ids of its lines."""
+    out = apply_compression(cv, proposal, keep)
+    update: dict[str, object] = {"status": "applied"}
+    if proposal.kind == "shorter_role":
+        old = next(r for r in cv.experience if r.id == proposal.role_ids[0])
+        new = next(r for r in out.experience if r.id == proposal.role_ids[0])
+        gone = [b for b in old.bullets if b.id in proposal.source_ids and b.id not in keep]
+        update |= {
+            "before": [b.text for b in gone],
+            "before_ids": [b.id for b in gone],
+            "line_ids": [b.id for b in new.bullets[: len(proposal.bullets)]],
+        }
+    elif proposal.kind == "trim_skills":
+        group = next(g for g in cv.skills if g.category == proposal.category)
+        update["before"] = list(group.items)
+    return out, proposal.model_copy(update=update)
+
+
+def restored(cv: MasterCV, proposal: CompressionProposal, source: MasterCV) -> MasterCV:
+    """`cv` with an applied shorter role or skills line taken back: the lines as they were
+    (their skill tags from `source`, the CV the draft came from); lines added since stay."""
+    out = cv.model_copy(deep=True)
+    if proposal.kind == "trim_skills":
+        group = next((g for g in out.skills if g.category == proposal.category), None)
+        if group is None:
+            out.skills.append(SkillGroup(category=proposal.category, items=proposal.before))
+        else:
+            group.items = list(dict.fromkeys([*proposal.before, *group.items]))
+        return MasterCV.model_validate(out.model_dump())
+    role = next((r for r in out.experience if r.id == proposal.role_ids[0]), None)
+    if role is None or not proposal.before_ids:
+        raise ValueError("This role's lines can no longer be restored in this draft")
+    tags = source.bullet_index()
+    back = [
+        tags[i].model_copy(update={"text": text}) if i in tags else Bullet(id=i, text=text)
+        for i, text in zip(proposal.before_ids, proposal.before, strict=False)
+    ]
+    taken = {*proposal.line_ids, *proposal.before_ids}
+    rest = [b for b in role.bullets if b.id not in taken]  # lines added since stay
+    role.bullets = back + rest
+    return MasterCV.model_validate(out.model_dump())
+
+
+def covering_line(compressions: Sequence[CompressionProposal], line_id: str) -> str | None:
+    """The draft line of an applied shorter version that now carries `line_id` (a line it
+    replaced): the line drawing on it, else the version's last line. None when `line_id` was
+    not replaced."""
+    for c in compressions:
+        if c.kind != "shorter_role" or c.status != "applied" or line_id not in c.before_ids:
+            continue
+        for n, sources in enumerate(c.line_sources):
+            if line_id in sources and n < len(c.line_ids):
+                return c.line_ids[n]
+        return c.line_ids[-1] if c.line_ids else None
+    return None
 
 
 def _merge_roles(cv: MasterCV, proposal: CompressionProposal) -> MasterCV:
@@ -551,9 +755,7 @@ def _merge_roles(cv: MasterCV, proposal: CompressionProposal) -> MasterCV:
 
 # --- the draft with its proposals in place --------------------------------------------------
 
-MAX_ROLE_SKILLS = (
-    12  # the relevant-skills line: a grouped keyword line (user's decision 2026-10-14)
-)
+MAX_ROLE_SKILLS = 8  # a few skills under the key strengths (user's decision 2026-10-21)
 
 
 def with_proposals(tailored: TailoredCV) -> TailoredCV | None:
@@ -588,8 +790,10 @@ def _place_in_role(out: TailoredCV, item: ReviewAddition, new_id: str) -> None:
     role = next((r for r in out.cv.experience if r.id == item.role_id), None)
     if role is None:
         return
-    index = next((i for i, b in enumerate(role.bullets) if b.id == item.anchor_id), None)
-    if item.kind in {"enrichment", "rewording"}:
+    cover = covering_line(out.compressions, item.anchor_id or "")  # a shorter version's line
+    anchor = cover or item.anchor_id
+    index = next((i for i, b in enumerate(role.bullets) if b.id == anchor), None)
+    if item.kind == "enrichment" or (item.kind == "rewording" and cover is None):
         if index is not None:
             bullet = role.bullets[index]
             text = enriched(bullet.text, item.text) if item.kind == "enrichment" else item.text

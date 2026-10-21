@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 from docx import Document
@@ -22,6 +23,7 @@ from src.cv.docx_original import write_like_original
 from src.cv.fit_check import WEIGHTS, compare_fit
 from src.cv.models import (
     AdditionCandidate,
+    Bullet,
     CompressionCandidate,
     CompressionProposal,
     EvidencedReading,
@@ -45,6 +47,7 @@ from src.cv.proposals import (
     apply_compression,
     check_additions,
     check_compressions,
+    enriched,
     merged_heading,
     rank_additions,
     rewordings,
@@ -218,7 +221,7 @@ def test_the_skills_line_holds_only_skills_shown_in_use(master_cv: MasterCV) -> 
     out = apply_plan(master_cv, plan, JD)
     assert "PyTorch" in out.role_skills and "Kubernetes" in out.role_skills
     assert not {"Go", "Docker", "AWS"} & set(out.role_skills)  # only in the skills list
-    assert MAX_ROLE_SKILLS == 12
+    assert MAX_ROLE_SKILLS == 8  # a few skills (user's decision 2026-10-21)
 
 
 def test_standard_revision_stops_asking_for_keywords_past_80_percent(master_cv: MasterCV) -> None:
@@ -423,6 +426,301 @@ def test_different_roles_are_never_combined(master_cv: MasterCV) -> None:
     assert "never combine different roles" in PLAN_SYSTEM
 
 
+SHORTER_NIMBUS = CompressionCandidate(
+    kind="shorter_role", role_ids=["nimbus"],
+    bullets=["Built a real-time recommendation service in Python and PyTorch for 4M users "
+             "(18% higher click-through rate).",
+             "Moved model training pipelines to Kubernetes (35% lower costs) and introduced "
+             "code review standards for ML code."],
+    removed=["mentoring 5 engineers"], reason="The role's work in two lines",
+)  # fmt: skip
+
+
+def test_a_shorter_role_lists_what_it_leaves_out(master_cv: MasterCV) -> None:
+    vocab = [*JD.hard_skills, *master_cv.all_skills()]
+    unlisted = SHORTER_NIMBUS.model_copy(update={"removed": []})
+    as_long = SHORTER_NIMBUS.model_copy(
+        update={"bullets": [*SHORTER_NIMBUS.bullets, "Mentored 5 engineers."]}
+    )
+    no_term = SHORTER_NIMBUS.model_copy(
+        update={"bullets": [SHORTER_NIMBUS.bullets[0], "Cut training costs by 35%."]}
+    )
+    tighten = CompressionCandidate(
+        kind="tighten", role_ids=["nimbus"], source_ids=["nimbus-2"],
+        bullets=["Moved training to Kubernetes, cutting costs by 35%."], reason="r",
+    )  # fmt: skip
+    kept = check_compressions(
+        [tighten, unlisted, as_long, no_term, SHORTER_NIMBUS], master_cv, ["Kubernetes"], vocab
+    )
+    assert [k.kind for k in kept] == ["shorter_role"]  # it takes the role's lines first
+    assert kept[0].source_ids == ["nimbus-1", "nimbus-2", "nimbus-3"]
+    out = apply_compression(master_cv, kept[0])
+    role = out.experience[0]
+    assert [b.id for b in role.bullets] == ["nimbus-1", "nimbus-2"]
+    assert [b.text for b in role.bullets] == SHORTER_NIMBUS.bullets
+    assert len(master_cv.experience[0].bullets) == 3  # applied to a copy only
+
+
+def test_a_shorter_role_replaces_the_code_built_entry(master_cv: MasterCV) -> None:
+    cv = master_cv.model_copy(deep=True)
+    old = cv.experience[1]
+    old.start, old.end = "2009-01", "2013-06"
+    old.bullets += [
+        Bullet(id="lexa-3", text="Organised the team's weekly reading group."),
+        Bullet(id="lexa-4", text="Wrote internal documentation for Kubernetes jobs."),
+    ]
+    shorter = CompressionCandidate(
+        kind="shorter_role", role_ids=["lexa"],
+        bullets=["Developed NLP models for document classification with 92% accuracy using "
+                 "scikit-learn and spaCy.",
+                 "Designed a PostgreSQL feature store for 3 data science teams and documented "
+                 "Kubernetes jobs."],
+        removed=["the weekly reading group"], reason="r",
+    )  # fmt: skip
+    standard = apply_plan(cv, TailoringPlan(compressions=[shorter]), JD)
+    assert [c.kind for c in standard.compressions] == ["condense_role"]
+    optimised = apply_plan(cv, TailoringPlan(compressions=[shorter]), JD, mode="optimised")
+    assert [c.kind for c in optimised.compressions] == ["shorter_role"]  # no code-built cut
+    # an earlier role the job relies on is not cut for its age, nor stripped of its skills
+    relied = TailoringPlan(
+        requirements=[
+            RequirementEvidence(
+                requirement="NLP", priority="essential", importance="key", match="direct",
+                evidence=["lexa-1"],
+            )
+        ],
+        compressions=[shorter.model_copy(update={"bullets": [
+            "Developed NLP models for document classification with 92% accuracy.",
+            "Designed a PostgreSQL feature store for 3 data science teams and documented "
+            "Kubernetes jobs.",
+        ]})],
+    )  # fmt: skip
+    assert apply_plan(cv, relied, JD).compressions == []
+    assert apply_plan(cv, relied, JD, mode="optimised").compressions == []  # lost spaCy
+
+
+NIMBUS_MORE = [  # each at least `MIN_LINE` characters, as content lines in a Word CV are
+    "Reviewed experiment designs with the product team before launch.",
+    "Wrote design notes for the recommendation service team.",
+    "Ran weekly model quality reviews with the analytics team.",
+    "Documented training pipeline runbooks for new engineers.",
+    "Interviewed engineering candidates for the platform team.",
+    "Presented model results to leadership in monthly reviews.",
+    "Maintained the team's evaluation datasets and their labels.",
+]
+LEXA_TWO = [
+    "Developed NLP models for document classification with 92% accuracy using "
+    "scikit-learn and spaCy.",
+    "Designed PostgreSQL feature store used by 3 data science teams.",
+]
+NIMBUS_SIX = [
+    "Built a real-time recommendation service in Python and PyTorch serving 4M users, "
+    "lifting click-through rate by 18%.",
+    "Led migration of model training pipelines to Kubernetes, cutting training costs by 35%.",
+    "Mentored 5 engineers and introduced code review standards for ML code.",
+    "Reviewed experiment designs with the product team and presented model results.",
+    "Wrote design notes and training pipeline runbooks.",
+    "Ran weekly model quality reviews on the team's evaluation datasets.",
+]
+
+
+NIMBUS_SOURCES = [
+    ["nimbus-1"], ["nimbus-2"], ["nimbus-3"], ["nimbus-4", "nimbus-9"],
+    ["nimbus-5", "nimbus-7"], ["nimbus-6", "nimbus-10"],
+]  # fmt: skip
+
+
+def _version_lines(texts: list[str], sources: list[list[str]] | None = None) -> list[Any]:
+    from src.cv.models import VersionLine
+
+    return [VersionLine(text=t, sources=sources[n] if sources else []) for n, t in enumerate(texts)]
+
+
+def _long_roles(master: MasterCV) -> MasterCV:
+    cv = master.model_copy(deep=True)
+    cv.experience[0].bullets += [
+        Bullet(id=f"nimbus-{n}", text=t) for n, t in enumerate(NIMBUS_MORE, start=4)
+    ]
+    cv.experience[1].bullets += [
+        Bullet(id="lexa-3", text="Organised the team's weekly reading group."),
+        Bullet(id="lexa-4", text="Wrote internal documentation for model jobs."),
+        Bullet(id="lexa-5", text="Reviewed pull requests for the data team."),
+    ]
+    return MasterCV.model_validate(cv.model_dump())
+
+
+def test_each_long_role_gets_a_shorter_version_sized_by_relevance(master_cv: MasterCV) -> None:
+    from src.cv.models import RoleVersion, RoleVersions, SkillGroup, SkillsLine
+    from src.cv.role_versions import SYSTEM, shorter_cv
+
+    cv = _long_roles(master_cv)
+    business_items = ["OPEX", "Budgeting", "Vendor management", "Forecasting", "Procurement"]
+    cv.skills.append(SkillGroup(category="Business", items=[*business_items, "Kubernetes"]))
+    cv.skills[-1].items.insert(0, "Pricing")
+    cited = RequirementEvidence(
+        requirement="recommendation systems", priority="essential", importance="key",
+        match="direct", evidence=["nimbus-1", "nimbus-2"],
+    )  # fmt: skip
+    draft = apply_plan(cv, TailoringPlan(requirements=[cited]), JD, mode="optimised")
+    lexa = RoleVersion(
+        role_id="lexa",
+        bullets=_version_lines(LEXA_TWO),
+        removed=["reading group", "documentation", "pull request reviews"], reason="r",
+    )  # fmt: skip
+    too_short = RoleVersion(role_id="nimbus", bullets=_version_lines(NIMBUS_SIX[:2]), reason="r")
+    business = SkillsLine(category="Business", keep=["Kubernetes"], reason="not lab work")
+    first = RoleVersions(roles=[too_short, lexa], skills=[business])
+    second = RoleVersions(
+        roles=[RoleVersion(role_id="nimbus", bullets=_version_lines(NIMBUS_SIX), reason="r")]
+    )
+    llm = FakeLLM({RoleVersions: lambda prompt: second if "<feedback>" in prompt else first})
+    vocab = [*JD.hard_skills, *cv.all_skills()]
+    job = JOB_TEXT + " Kubernetes."
+    found = shorter_cv(llm, draft, JD, job, ["Kubernetes"], vocab)
+    assert len(llm.calls) == 2  # one more call, for the version the checks rejected
+    assert "central to this job with 10 lines needs 6 to 8" in llm.calls[1][0]
+    roles = [(c.role_ids, len(c.bullets)) for c in found.proposals if c.kind == "shorter_role"]
+    assert roles == [(["nimbus"], 6), (["lexa"], 2)]  # cited most: central; the other: 2 or 3
+    assert found.proposals[0].reason.startswith("Central to this job")
+    trim = found.proposals[-1]
+    assert trim.kind == "trim_skills" and trim.bullets == ["Kubernetes"]
+    assert "OPEX" in trim.removed and found.rejected == []
+    applied = apply_compression(draft.cv, trim)
+    assert next(g for g in applied.skills if g.category == "Business").items == ["Kubernetes"]
+    assert "never combine roles" in SYSTEM
+
+
+def test_the_shorter_cv_rules_hold_for_any_cv_and_job(master_cv: MasterCV) -> None:
+    from src.cv.role_versions import central_roles, sizes
+
+    cv = _long_roles(master_cv)
+    bare = apply_plan(cv, TailoringPlan(), JD, mode="optimised")  # no requirement map
+    assert central_roles(bare, ["Kubernetes", "PyTorch"]) == {"nimbus"}  # job terms decide
+    assert central_roles(bare, ["Fortran"]) == {"nimbus"}  # no evidence: the latest role
+    nimbus, lexa = bare.cv.experience
+    assert sizes(nimbus, True) == (6, 8) and sizes(lexa, False) == (2, 3)
+    assert sizes(lexa, True) == (5, 5)  # a central role of 7 lines or fewer keeps them
+    nine = nimbus.model_copy(update={"bullets": nimbus.bullets[:9]})
+    assert sizes(nine, True) == (6, 7)  # always at least two fewer
+
+
+def test_the_optimiser_shortens_a_different_cv_end_to_end(master_cv: MasterCV) -> None:
+    from src.cv.models import RoleVersion, RoleVersions, SkillGroup, SkillsLine
+
+    cv = _long_roles(master_cv)
+    cv.skills.append(
+        SkillGroup(category="Office", items=["Excel", "PowerPoint", "Word", "Outlook",
+                                             "Teams", "Visio", "SharePoint"])
+    )  # fmt: skip
+    plan = TailoringPlan(
+        requirements=[
+            RequirementEvidence(
+                requirement="recommendation systems", priority="essential", importance="key",
+                match="direct", evidence=["nimbus-1"],
+            )
+        ],
+        compressions=[CompressionCandidate(
+            kind="tighten", role_ids=["nimbus"], source_ids=["nimbus-2"],
+            bullets=["Moved model training pipelines to Kubernetes, cutting costs by 35%."],
+            reason="r",
+        )],
+    )  # fmt: skip
+    lexa = RoleVersion(
+        role_id="lexa", bullets=_version_lines(LEXA_TWO),
+        removed=["reading group", "documentation", "reviews"], reason="r",
+    )  # fmt: skip
+    nimbus = RoleVersion(
+        role_id="nimbus", bullets=_version_lines(NIMBUS_SIX, NIMBUS_SOURCES), reason="r"
+    )
+    versions = RoleVersions(
+        roles=[nimbus, lexa],
+        skills=[SkillsLine(category="office", keep=["excel"], reason="not asked for")],
+    )
+    llm = FakeLLM({TailoringPlan: plan, RoleVersions: versions})
+    out = tailor(cv, JOB_TEXT, llm, review=False, jd=JD, mode="optimised")
+    kinds = [(c.kind, c.role_ids or [c.category], c.status) for c in out.compressions]
+    assert kinds == [
+        ("shorter_role", ["nimbus"], "applied"), ("shorter_role", ["lexa"], "applied"),
+        ("trim_skills", ["Office"], "applied"),
+    ]  # the draft is the short version; the plan's tightened line gave way  # fmt: skip
+    nimbus_role, lexa_role = out.cv.experience
+    assert [b.text for b in nimbus_role.bullets] == NIMBUS_SIX
+    assert [b.id for b in nimbus_role.bullets] == [f"nimbus-{n}" for n in range(1, 7)]
+    assert [b.text for b in lexa_role.bullets] == LEXA_TWO
+    assert next(g for g in out.cv.skills if g.category == "Office").items == ["Excel"]
+    assert out.compressions[0].before_ids == [f"nimbus-{n}" for n in range(1, 11)]
+    assert out.screening is not None  # scored on the short version
+
+
+def test_a_skills_line_keeps_what_the_posting_names(master_cv: MasterCV) -> None:
+    from src.cv.proposals import trimmed_skills_reason
+
+    group = master_cv.skills[0]
+    assert trimmed_skills_reason(group, group.items[:1], "") is None
+    named = trimmed_skills_reason(group, group.items[:1], f"We use {group.items[1]} daily.")
+    assert named and named.startswith("leaves out skills the posting names")
+    assert trimmed_skills_reason(group, ["Cobol"], "") == "keeps a skill that is not on this line"
+    assert trimmed_skills_reason(group, group.items, "") == "leaves nothing out"
+
+
+def test_a_shorter_role_is_red_below_the_role_until_chosen(
+    master_cv: MasterCV, tmp_path: Path
+) -> None:
+    from tests.test_cv_writer import _red_texts
+
+    original = tmp_path / "original.docx"
+    export_docx(master_cv, original)
+    vocab = [*JD.hard_skills, *master_cv.all_skills()]
+    item = check_compressions([SHORTER_NIMBUS], master_cv, ["Kubernetes"], vocab)[0]
+    tailored = apply_plan(master_cv, TailoringPlan(), JD)
+    pending = tmp_path / "pending.docx"
+    write_like_original(original, master_cv, tailored.cv, pending, compressions=[item])
+    text = [p.text for p in Document(str(pending)).paragraphs]
+    label = next(i for i, t in enumerate(text) if t.startswith("[CONFIRM SHORTER VERSION"))
+    assert "2 lines replace the 3 above" in text[label]
+    assert text[label + 1 : label + 3] == SHORTER_NIMBUS.bullets
+    assert text[label - 1].startswith("Mentored 5 engineers")  # the role's lines stay
+    assert {text[label], *SHORTER_NIMBUS.bullets} <= _red_texts(pending)
+    applied_item = item.model_copy(update={"status": "applied"})
+    applied = tmp_path / "applied.docx"
+    write_like_original(
+        original, master_cv, apply_compression(tailored.cv, applied_item), applied,
+        compressions=[applied_item], mark_changes=False,
+    )  # fmt: skip
+    text = [p.text for p in Document(str(applied)).paragraphs]
+    assert all(line in text for line in SHORTER_NIMBUS.bullets)
+    assert not any(t.startswith("Mentored 5") or "[CONFIRM" in t for t in text)
+
+
+def test_a_shorter_skills_line_is_red_until_chosen(master_cv: MasterCV, tmp_path: Path) -> None:
+    from tests.test_cv_writer import _original_cv, _red_texts
+
+    original = _original_cv(master_cv, tmp_path / "original.docx")
+    first, second = master_cv.skills[0], master_cv.skills[1]
+    trim = CompressionProposal(
+        id="t1", kind="trim_skills", category=first.category, role_ids=[],
+        bullets=first.items[:2], removed=first.items[2:], reason="r",
+    )  # fmt: skip
+    drop = trim.model_copy(
+        update={"id": "t2", "category": second.category, "bullets": [], "removed": second.items}
+    )
+    pending = tmp_path / "pending.docx"
+    write_like_original(original, master_cv, master_cv, pending, compressions=[trim, drop])
+    red = _red_texts(pending)
+    label = "[CONFIRM SHORTER SKILLS LINE BEFORE USE: replaces the line above]"
+    assert f"{label} {first.category}: {', '.join(first.items[:2])}" in red
+    assert any(t.startswith("[CONFIRM BEFORE USE: remove the skills line above") for t in red)
+    cv = apply_compression(apply_compression(master_cv, trim), drop)
+    applied = tmp_path / "applied.docx"
+    done = [c.model_copy(update={"status": "applied"}) for c in (trim, drop)]
+    write_like_original(original, master_cv, cv, applied, compressions=done, mark_changes=False)
+    lines = [p.text for p in Document(str(applied)).paragraphs]
+    shown = next(t for t in lines if first.items[0] in t and first.items[1] in t)
+    assert first.items[-1] not in shown
+    assert not any(all(item in t for item in second.items) for t in lines)  # the line went
+    assert not any("[CONFIRM" in t for t in lines)
+
+
 def _old_merge(cv: MasterCV) -> CompressionProposal:
     """A merged entry proposed by a draft made before roles were no longer combined."""
     roles = [r for r in cv.experience if r.id in ("pd1", "pd2")]
@@ -558,8 +856,56 @@ def test_only_the_user_applies_a_compressed_version(ws: Workspace, master_cv: Ma
     assert [b.id for b in done.tailored.cv.experience[0].bullets] == ["nimbus-1", "nimbus-2"]
     assert done.tailored.compressions[0].status == "applied"
     assert len(done.source_cv.experience[0].bullets) == 3  # the source CV keeps its lines
-    with pytest.raises(ValueError, match="Pending compressed version"):
+    with pytest.raises(ValueError, match="Pending shorter version"):
         tailored_documents.review_compression(ws, document_id, item.id, "reject")
+
+
+def _gap_and_shorter(ws: Workspace, master_cv: MasterCV) -> tuple[str, str, str]:
+    """A draft with a gap filler on nimbus-2 and a shorter version of nimbus."""
+    cv = _long_roles(master_cv)
+    ws.master_cv = cv
+    ws.settings.master_cv_path.write_text(cv.model_dump_json())
+    tailored = apply_plan(cv, TailoringPlan(), JD, mode="optimised")
+    tailored.review_additions = check_additions([_proposal()], _ctx(cv))
+    shorter = CompressionCandidate(
+        kind="shorter_role", role_ids=["nimbus"], bullets=NIMBUS_SIX,
+        line_sources=NIMBUS_SOURCES, reason="r",
+    )  # fmt: skip
+    vocab = [*JD.hard_skills, *cv.all_skills()]
+    tailored.compressions = check_compressions([shorter], cv, ["Kubernetes"], vocab)
+    assert tailored.compressions  # the version passed its checks
+    document_id = _draft(ws, cv, tailored)
+    return document_id, tailored.review_additions[0].id, tailored.compressions[0].id
+
+
+def test_a_confirmed_gap_filler_survives_a_shorter_role(ws: Workspace, master_cv: MasterCV) -> None:
+    document_id, addition, version = _gap_and_shorter(ws, master_cv)
+    tailored_documents.review_addition(ws, document_id, addition, "confirm")
+    done = tailored_documents.review_compression(ws, document_id, version, "apply")
+    role = done.tailored.cv.experience[0]
+    assert [b.text for b in role.bullets[:6]] == NIMBUS_SIX
+    assert len(role.bullets) == 7  # the confirmed line stays after the shorter version
+    assert role.bullets[-1].text.endswith("35%, with model monitoring dashboards.")
+
+
+def test_a_gap_filler_confirmed_after_a_shorter_role_is_added_to_it(
+    ws: Workspace, master_cv: MasterCV
+) -> None:
+    document_id, addition, version = _gap_and_shorter(ws, master_cv)
+    tailored_documents.review_compression(ws, document_id, version, "apply")
+    done = tailored_documents.review_addition(ws, document_id, addition, "confirm")
+    role = done.tailored.cv.experience[0]
+    assert len(role.bullets) == 6  # the words join the shorter line that carries nimbus-2
+    assert role.bullets[1].text == enriched(NIMBUS_SIX[1], "with model monitoring dashboards")
+    assert [b.text for b in role.bullets[2:]] == NIMBUS_SIX[2:]  # the rest untouched
+    assert ws.master_cv is not None  # the fact also went into the CV it came from
+    assert ws.master_cv.bullet_index()["nimbus-2"].text.endswith("model monitoring dashboards.")
+    word = [p.text for p in Document(str(ws.output_dir / "cvs" / done.filename)).paragraphs]
+    assert all(b.text in word for b in role.bullets)
+    back = tailored_documents.review_compression(ws, document_id, version, "restore")
+    lines = back.tailored.cv.experience[0].bullets
+    assert len(lines) == 10 and lines[1].text.endswith("model monitoring dashboards.")
+    assert back.tailored.compressions[0].status == "pending"  # can be used again
 
 
 # --- the pass toward the target score ------------------------------------------------------
@@ -778,3 +1124,79 @@ def test_a_role_heading_above_the_employer_line_is_never_taken_or_removed(
     write_like_original(original, aligned, tailored, out)
     text = [p.text for p in Document(str(out)).paragraphs]
     assert sum("\tMar 2017 – Feb 2021" in t for t in text) == len(master_cv.experience)
+
+
+def test_the_assistant_sees_and_decides_the_same_red_layer(
+    ws: Workspace, master_cv: MasterCV
+) -> None:
+    import asyncio
+
+    from src.agents import actions_more
+    from src.agents.definitions import ASSISTANT
+    from src.agents.runtime import AgentContext
+
+    async def _ignore(_event: str, _data: dict[str, object]) -> None:
+        return None
+
+    document_id, addition, version = _gap_and_shorter(ws, master_cv)
+    ctx = AgentContext(ws=ws, emit=_ignore)
+    read = asyncio.run(
+        actions_more.read_tailored_cv(actions_more.TailoredRead(document_id=document_id), ctx)
+    )
+    assert [g["id"] for g in read["gap_fillers"]] == [addition]
+    shorter = read["shorter_versions"][0]
+    assert shorter["id"] == version and shorter["kind"] == "shorter_role"
+    assert (shorter["lines_before"], shorter["lines_after"]) == (10, 6)
+    done = asyncio.run(
+        actions_more.review_cv_compression(
+            actions_more.CVCompressionDecision(
+                document_id=document_id, compression_id=version, decision="apply"
+            ),
+            ctx,
+        )
+    )
+    assert [v["status"] for v in done["still_to_review"]["shorter_versions"]] == ["applied"]
+    assert [g["id"] for g in done["still_to_review"]["gap_fillers"]] == [addition]
+    assert {"read_tailored_cv", "review_cv_compression"} <= set(ASSISTANT.allowed_tools)
+
+
+def test_the_short_version_is_written_red_and_labelled_then_clean(
+    master_cv: MasterCV, tmp_path: Path
+) -> None:
+    from src.cv.models import SkillGroup
+    from src.cv.proposals import applied
+
+    cv = _long_roles(master_cv)
+    cv.skills.append(SkillGroup(category="Office", items=["Excel", "Visio"]))
+    original = tmp_path / "original.docx"
+    export_docx(cv, original)
+    vocab = [*JD.hard_skills, *cv.all_skills()]
+    shorter = CompressionCandidate(
+        kind="shorter_role", role_ids=["nimbus"], bullets=NIMBUS_SIX,
+        line_sources=NIMBUS_SOURCES, reason="r",
+    )  # fmt: skip
+    version = check_compressions([shorter], cv, ["Kubernetes"], vocab)[0]
+    office = CompressionProposal(
+        id="o1", kind="trim_skills", category="Office", role_ids=[], bullets=[],
+        removed=["Excel", "Visio"], reason="r",
+    )  # fmt: skip
+    draft, version = applied(cv, version)
+    draft, office = applied(draft, office)
+    gap = check_additions([_proposal()], _ctx(cv))  # words for nimbus-2, now in line 2
+    out = tmp_path / "draft.docx"
+    write_like_original(
+        original, cv, draft, out, review_additions=gap, compressions=[version, office]
+    )
+    text = [p.text for p in Document(str(out)).paragraphs]
+    assert any(t.startswith("[CONFIRM SHORTER VERSION OF THIS ROLE: 6 lines for 10") for t in text)
+    assert any(t.startswith("[CONFIRM REMOVAL: not related to this job]") for t in text)
+    line_two = next(t for t in text if t.startswith(NIMBUS_SIX[1]))
+    assert line_two.endswith("[CONFIRM: with model monitoring dashboards]")
+    assert not any(t.startswith("Mentored 5") and t != NIMBUS_SIX[2] for t in text)
+    final = tmp_path / "final.docx"
+    write_like_original(
+        original, cv, draft, final, compressions=[version, office], mark_changes=False
+    )
+    text = [p.text for p in Document(str(final)).paragraphs]
+    assert all(line in text for line in NIMBUS_SIX)
+    assert not any("[CONFIRM" in t or "Visio" in t for t in text)
