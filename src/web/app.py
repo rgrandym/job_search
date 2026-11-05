@@ -1,6 +1,6 @@
 """FastAPI app: REST for the UI forms, a WebSocket for the agent chat, and the built SPA.
 
-Run:  uvicorn src.web.app:app --reload --port 8000     (UI dev server: cd web && npm run dev)
+Run:  bash scripts/desktop.sh (Dock app, :18420) · scripts/start.sh (browser, :18410) · dev.sh
 """
 
 from __future__ import annotations
@@ -100,6 +100,7 @@ from src.services import (
     tailored_documents,
     tailoring_tests,
     tracker,
+    ui_state,
 )
 from src.services import connections as connections_service
 from src.services.search_service import (
@@ -174,7 +175,27 @@ def health() -> dict[str, Any]:
     ui = built.exists() and _newest([PROJECT_ROOT / "web" / n for n in UI_SOURCES]) > (
         built.stat().st_mtime
     )
-    return {"app": "job_search", "ui": DIST.exists(), "stale": code or ui}
+    return {
+        "app": "job_search",
+        "ui": DIST.exists(),
+        "stale": code or ui,
+        "launcher": get_workspace().settings.launcher,
+    }
+
+
+@app.get("/api/ui-state")
+def get_ui_state() -> dict[str, str]:
+    """The UI's remembered settings saved on disk for this launcher (filters, layout, theme)."""
+    return ui_state.load(get_workspace().settings)
+
+
+@app.put("/api/ui-state")
+def put_ui_state(body: dict[str, str]) -> dict[str, str]:
+    """Save the UI's remembered settings, so a port change or cleared storage keeps them."""
+    try:
+        return ui_state.save(get_workspace().settings, body)
+    except ValueError as exc:
+        raise HTTPException(413, str(exc)) from exc
 
 
 def _llm_view() -> dict[str, Any]:

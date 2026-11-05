@@ -115,8 +115,9 @@ class Settings(BaseSettings):
     gmail_client_id: str | None = None
     gmail_client_secret: SecretStr | None = None
     gmail_account: str | None = None
-    gmail_redirect_uri: str = "http://localhost:8000/api/gmail/callback"
-    gmail_frontend_url: str = "http://localhost:5173/"
+    # The launchers set both for their own port (scripts/start.sh, desktop.sh, dev.sh).
+    gmail_redirect_uri: str = "http://localhost:18410/api/gmail/callback"
+    gmail_frontend_url: str = "http://localhost:18411/"
     companies_path: Path = PROJECT_ROOT / "data" / "companies.json"
     company_workers: int = Field(8, ge=1, le=32, description="Company boards fetched in parallel")
     # No model calls: more at once only shortens the wait (each site keeps its own delay).
@@ -185,6 +186,10 @@ class Settings(BaseSettings):
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/129.0 Safari/537.36"
     )
+
+    # Which launcher started this server: the Dock app (scripts/desktop.sh) or the browser
+    # web app (scripts/start.sh, dev.sh). Each keeps its own copy of the UI's settings.
+    launcher: Literal["desktop", "web"] = "web"
 
     # Paths
     data_dir: Path = PROJECT_ROOT / "data"

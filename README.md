@@ -18,7 +18,8 @@ The installer sets up the local environment, builds the app and, on a Mac, adds 
 to `~/Applications` and opens it. Right-click its Dock icon and choose **Options → Keep in
 Dock**. Clicking the icon opens the app, or brings its window back if it is already open.
 Without the Mac app, run `bash scripts/start.sh` and open
-[http://localhost:8000](http://localhost:8000). To update, run `git pull`; the app rebuilds
+[http://localhost:18410](http://localhost:18410). The Mac app has its own server (port 18420), so
+the two never clash with each other or with other programs on the usual ports. To update, run `git pull`; the app rebuilds
 what changed the next time it starts. Choose an AI provider in **Settings**,
 upload a CV, then run a search. You can try the **demo** source before adding a CV or API key.
 

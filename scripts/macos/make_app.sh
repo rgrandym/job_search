@@ -4,11 +4,12 @@
 #   bash scripts/macos/make_app.sh             # build, replacing an older copy
 #   bash scripts/macos/make_app.sh --out DIR   # put the app in DIR instead
 #
-# The app opens this repository's UI in its own window and runs scripts/start.sh when no
-# backend is running. It is tied to this folder: rebuild it after moving the folder. It runs
+# The app opens this repository's UI in its own window, served by its own launcher
+# (scripts/desktop.sh, port 18420), which it starts when that server is not running and stops
+# on quit. It never starts or uses the browser web app (scripts/start.sh, dev.sh). It is tied to this folder: rebuild it after moving the folder. It runs
 # with the PATH of the shell that built it, so conda, npm, Chrome and the model CLIs are found
 # as they are in your terminal. Needs the Xcode command line tools (swiftc).
-# Env overrides: BACKEND_PORT (8000).
+# Env overrides: DESKTOP_PORT (18420, scripts/lib/ports.sh).
 
 set -euo pipefail
 
@@ -17,7 +18,9 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 OUT_DIR="$HOME/Applications"
 APP_NAME="Job Search"
 BUNDLE_ID="local.jobsearch.app"
-PORT="${BACKEND_PORT:-8000}"
+# shellcheck source=../lib/ports.sh
+source "$ROOT/scripts/lib/ports.sh"
+PORT="$DESKTOP_PORT"
 
 log() { printf '\033[1;34m[app]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[app]\033[0m %s\n' "$*" >&2; }

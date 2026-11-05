@@ -10,14 +10,21 @@
 # previous run of this script), so there are never two servers fighting over a port.
 # The Claude Code and Codex CLIs (the "claude_code" / "codex" model providers) are updated
 # when older than the latest release, since new models need recent CLIs; offline, skipped.
-# Env overrides: CONDA_ENV (job_search), BACKEND_PORT (8000), FRONTEND_PORT (5173).
+# This is the browser web app (the Dock app has its own server, scripts/desktop.sh).
+# Env overrides: CONDA_ENV (job_search), BACKEND_PORT (18410), FRONTEND_PORT (18411)
+# (defaults in scripts/lib/ports.sh).
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=lib/ports.sh
+source "$ROOT/scripts/lib/ports.sh"
 CONDA_ENV="${CONDA_ENV:-job_search}"
-BACKEND_PORT="${BACKEND_PORT:-8000}"
-FRONTEND_PORT="${FRONTEND_PORT:-5173}"
+BACKEND_PORT="${BACKEND_PORT:-$WEB_PORT}"
+FRONTEND_PORT="${FRONTEND_PORT:-$WEB_UI_PORT}"
+export JOBSEARCH_LAUNCHER=web
+default_env JOBSEARCH_GMAIL_REDIRECT_URI "http://localhost:$BACKEND_PORT/api/gmail/callback"
+default_env JOBSEARCH_GMAIL_FRONTEND_URL "http://localhost:$FRONTEND_PORT/"
 RUN_DIR="$ROOT/.run"
 LOG_DIR="$RUN_DIR/logs"
 FORCE_INSTALL=0
@@ -29,7 +36,7 @@ for arg in "$@"; do
     --install) FORCE_INSTALL=1 ;;
     --stop) STOP_ONLY=1 ;;
     --no-update) CLI_UPDATE=0 ;;
-    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "Unknown option: $arg" >&2; exit 2 ;;
   esac
 done

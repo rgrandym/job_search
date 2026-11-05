@@ -19,9 +19,10 @@ sections apply to every agent, not just Claude.
 conda activate job_search && pip install -e ".[dev]"
 pytest && ruff check src tests .agent && mypy src
 cd web && npm install && npm run typecheck && npm run lint && npm run build
-bash scripts/dev.sh                                  # (re)start backend + frontend → http://localhost:5173
+bash scripts/dev.sh                                  # (re)start backend + frontend → http://localhost:18411
 bash scripts/install.sh                              # new computer: env, deps, UI build, Mac Dock app
-bash scripts/start.sh                                # one server with the built UI → http://localhost:8000
+bash scripts/start.sh                                # browser web app, built UI → http://localhost:18410
+bash scripts/desktop.sh                              # the Dock app's own server → :18420 (run by the app)
 ```
 
 All tests run offline: the LLM is faked, HTTP is mocked, and the agent chat uses a scripted model.

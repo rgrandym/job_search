@@ -31,8 +31,9 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-BACKEND = "http://127.0.0.1:8000"
-FRONTEND = "http://localhost:5173"
+BACKEND = "http://127.0.0.1:18420"  # the Dock app's server (scripts/desktop.sh)
+WEB_BACKEND = "http://127.0.0.1:18410"  # the browser web app's (scripts/start.sh, dev.sh)
+FRONTEND = "http://localhost:18411"  # dev.sh's Vite UI
 TIMEOUT_S = 1.5
 
 
@@ -163,9 +164,14 @@ def _arg(argv: list[str], name: str, default: str) -> str:
     )
 
 
+def _running_backend() -> str:
+    """The Dock app's server when it answers, else the web app's."""
+    return next((b for b in (BACKEND, WEB_BACKEND) if _up(f"{b}/api/health")), BACKEND)
+
+
 def main(argv: list[str]) -> int:
     if argv[:1] == ["claude-limits"] and len(argv) > 1:
-        print(json.dumps(claude_limits(argv[1], _arg(argv, "--backend", BACKEND))))
+        print(json.dumps(claude_limits(argv[1], _arg(argv, "--backend", "") or _running_backend())))
         return 0
     if not argv or argv[0] != "status":
         print("usage: live_status.py status [--plans] [--backend URL] [--frontend URL]")
@@ -173,7 +179,9 @@ def main(argv: list[str]) -> int:
         return 2
     try:
         data = status(
-            _arg(argv, "--backend", BACKEND), _arg(argv, "--frontend", FRONTEND), "--plans" in argv
+            _arg(argv, "--backend", "") or _running_backend(),
+            _arg(argv, "--frontend", FRONTEND),
+            "--plans" in argv,
         )
     except Exception as exc:  # noqa: BLE001 - a live view must always get a line
         data = {"backend": False, "frontend": False, "error": str(exc)}

@@ -636,7 +636,7 @@ def test_api_health_names_the_app_and_its_ui(
     os.utime(root / "web" / "src" / "App.tsx", (1, 1))
     monkeypatch.setattr(webapp, "PROJECT_ROOT", root)
     monkeypatch.setattr(webapp, "DIST", tmp_path / "missing")
-    fresh = {"app": "job_search", "ui": False, "stale": False}
+    fresh = {"app": "job_search", "ui": False, "stale": False, "launcher": "web"}
     assert client.get("/api/health").json() == fresh
     dist = root / "web" / "dist"
     dist.mkdir()
@@ -649,6 +649,26 @@ def test_api_health_names_the_app_and_its_ui(
     os.utime(root / "web" / "src" / "App.tsx", (1, 1))
     os.utime(root / "src" / "a.py", (webapp.STARTED_AT + 60,) * 2)
     assert client.get("/api/health").json()["stale"] is True
+
+
+def test_health_names_the_launcher(client: TestClient, ws: Workspace) -> None:
+    # The Dock app only uses a server its own launcher started (scripts/desktop.sh).
+    ws.settings.launcher = "desktop"
+    assert client.get("/api/health").json()["launcher"] == "desktop"
+
+
+def test_ui_settings_are_kept_on_disk_per_launcher(client: TestClient, ws: Workspace) -> None:
+    # A port change starts the page with empty local storage: it restores from this copy.
+    assert client.get("/api/ui-state").json() == {}
+    sent = {"jobsearch.theme.v3": '"dark"', "react-resizable-panels:jobsearch.layout": "[1]"}
+    kept = client.put("/api/ui-state", json={**sent, "other.site": "x"}).json()
+    assert kept == sent  # only the page's own keys
+    assert client.get("/api/ui-state").json() == sent
+    assert (ws.settings.data_dir / "ui_state_web.json").is_file()
+    ws.settings.launcher = "desktop"  # the Dock app keeps its own copy
+    assert client.get("/api/ui-state").json() == {}
+    big = {"jobsearch.filters": "x" * 600_000}
+    assert client.put("/api/ui-state", json=big).status_code == 413
 
 
 def test_api_state_and_search(client: TestClient) -> None:

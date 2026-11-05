@@ -1,9 +1,10 @@
 // Job Search: the Dock app for the local web app (macOS).
 //
-// One window showing the app's UI. It reuses an up-to-date backend already answering on the
-// port (one started by scripts/dev.sh or a terminal), otherwise runs scripts/start.sh, which
-// also replaces a backend running older code (so reopening the app picks up every change), and
-// stops that backend on quit. macOS keeps one copy of an app running, so clicking the Dock icon brings
+// One window showing the app's UI, served by its own launcher on its own port: it reuses an
+// up-to-date desktop server already answering there, otherwise runs scripts/desktop.sh, which
+// also replaces a server running older code (so reopening the app picks up every change), and
+// stops that server on quit. It never starts or uses the browser web app (scripts/start.sh,
+// scripts/dev.sh), and never takes another program on the port for this app. macOS keeps one copy of an app running, so clicking the Dock icon brings
 // this window back (un-minimised) instead of opening another. Built by make_app.sh, which
 // writes the repository path, the PATH of the shell that built it and the port into Info.plist.
 
@@ -17,7 +18,6 @@ struct Config {
 
     var home: URL { URL(string: "http://localhost:\(port)/")! }
     var health: URL { URL(string: "http://127.0.0.1:\(port)/api/health")! }
-    var devUI: URL { URL(string: "http://localhost:5173/")! }
     var log: URL { URL(fileURLWithPath: root).appendingPathComponent(".run/logs/app.log") }
 
     static func load() -> Config {
@@ -25,12 +25,12 @@ struct Config {
         return Config(
             root: info["JobSearchRoot"] as? String ?? "",
             path: info["JobSearchPath"] as? String ?? "/usr/bin:/bin:/usr/sbin:/sbin",
-            port: info["JobSearchPort"] as? Int ?? 8000
+            port: info["JobSearchPort"] as? Int ?? 18420
         )
     }
 }
 
-enum Backend { case ready, stale, devOnly, down }
+enum Backend { case ready, stale, down }
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate,
@@ -100,14 +100,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     func connect() async {
         status("Starting Job Search…", detail: "The first start installs and builds the app, which can take a few minutes.")
         var launched = false
-        var grace = 6  // start.sh may exit because another backend took the port: let it come up
+        var grace = 6  // desktop.sh may exit because a server of ours took the port: let it come up
         for _ in 0..<1200 {  // up to 10 minutes: a first start installs and builds
             switch await probe() {
             case .ready: webView.load(URLRequest(url: config.home)); return
-            case .stale where launched && server?.isRunning != true:  // start.sh kept it
+            case .stale where launched && server?.isRunning != true:  // desktop.sh kept it
                 webView.load(URLRequest(url: config.home)); return
-            case .devOnly where await reachable(config.devUI):
-                webView.load(URLRequest(url: config.devUI)); return
             default: break
             }
             if server?.isRunning != true {
@@ -121,7 +119,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             }
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
-        status("Job Search could not start", detail: "See \(config.log.path) for details.", retry: true)
+        let reason = lastLogLine().map { "\($0)<br><br>" } ?? ""
+        status("Job Search could not start", detail: "\(reason)See \(config.log.path) for details.", retry: true)
     }
 
     func probe() async -> Backend {
@@ -130,22 +129,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         guard let (data, response) = try? await URLSession.shared.data(for: request),
             (response as? HTTPURLResponse)?.statusCode == 200,
             let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            body["app"] as? String == "job_search"
-        else { return .down }
-        guard body["ui"] as? Bool == true else { return .devOnly }
+            body["app"] as? String == "job_search", body["launcher"] as? String == "desktop",
+            body["ui"] as? Bool == true
+        else { return .down }  // nothing there, another program, or the browser web app
         return body["stale"] as? Bool == true ? .stale : .ready
     }
 
-    func reachable(_ url: URL) async -> Bool {
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 1
-        return (try? await URLSession.shared.data(for: request)) != nil
+    /// The launcher's last messages (e.g. which program holds the port), shown when it failed.
+    func lastLogLine() -> String? {
+        guard let text = try? String(contentsOf: config.log, encoding: .utf8) else { return nil }
+        let lines = text.split(separator: "\n").filter { $0.hasPrefix("[start]") }.suffix(2)
+        guard !lines.isEmpty else { return nil }
+        return lines.map { String($0.dropFirst("[start] ".count)) }.joined(separator: " ")
+            .replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
     }
 
     func launchServer() -> Bool {
-        let script = URL(fileURLWithPath: config.root).appendingPathComponent("scripts/start.sh")
+        let script = URL(fileURLWithPath: config.root).appendingPathComponent("scripts/desktop.sh")
         guard FileManager.default.fileExists(atPath: script.path) else {
-            status("Repository not found", detail: "\(config.root) has no scripts/start.sh. Rebuild the app with scripts/macos/make_app.sh.")
+            status("Repository not found", detail: "\(config.root) has no scripts/desktop.sh. Rebuild the app with scripts/macos/make_app.sh.")
             return false
         }
         try? FileManager.default.createDirectory(
@@ -157,7 +159,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         process.currentDirectoryURL = URL(fileURLWithPath: config.root)
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = config.path  // apps opened from the Dock get a bare PATH
-        env["BACKEND_PORT"] = String(config.port)
+        env["DESKTOP_PORT"] = String(config.port)
         process.environment = env
         if let log = try? FileHandle(forWritingTo: config.log) {
             process.standardOutput = log
@@ -222,7 +224,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         if (error as NSError).code == NSURLErrorCancelled { return }
-        start()  // the backend went away (e.g. dev.sh restarted it): wait for it, or start one
+        start()  // the server went away: wait for it, or start one
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { webView.reload() }

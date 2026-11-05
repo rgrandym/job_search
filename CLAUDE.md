@@ -40,14 +40,33 @@ python .agent/skills/job_search/scoring_engine.py --cv data/examples/master_cv.e
 python .agent/skills/cv_writer/docx_templates.py --cv <cv.json> --template classic --out output/cv.docx
 
 # Web app
-bash scripts/dev.sh                    # (re)start backend :8000 + frontend :5173; Ctrl-C stops both
+bash scripts/dev.sh                    # (re)start backend :18410 + frontend :18411; Ctrl-C stops both
 bash scripts/dev.sh --stop             # stop both · --install forces dependency reinstall
 bash scripts/install.sh                # new computer: env, deps, UI build, Dock app (macOS)
-bash scripts/start.sh                  # one server, built UI, :8000 (what the Dock app runs)
+bash scripts/start.sh                  # browser web app: one server, built UI, :18410
+bash scripts/desktop.sh                # the Dock app's own server, :18420 (what the Dock app runs)
 bash scripts/macos/make_app.sh         # rebuild ~/Applications/Job Search.app (WKWebView wrapper)
 # logs: .run/logs/{backend,frontend}.log
 cd web && npm run typecheck && npm run lint && npm run build
 ```
+
+## Every change goes live in both the browser and the Dock app
+
+The author uses both. They are separate servers with separate launchers and ports
+(`scripts/lib/ports.sh`, user's decision 2026-11-05): the Dock app runs only its own
+(`scripts/desktop.sh`, :18420) and never starts or uses the browser web app (`scripts/start.sh`,
+:18410; `dev.sh` adds Vite on :18411). Each serves the built UI (`web/dist`) and does not reload
+itself, so an edit is not finished until it is running in the one the author has open:
+
+- **UI (`web/`)**: `cd web && npm run typecheck && npm run lint && npm run build`.
+- **Backend (`src/`)**: `bash scripts/desktop.sh` (Dock app) or `bash scripts/start.sh`
+  (browser). Each finds its server stale, replaces it, and rebuilds the UI if that changed too.
+  Reopening the Dock app does the same.
+- **Dock app shell (`scripts/macos/`)**: `bash scripts/macos/make_app.sh`, then quit and reopen
+  Job Search.
+
+Then confirm `curl -s localhost:18420/api/health` (or `:18410`) reports `"stale": false`, and tell the author
+to reload (Cmd+R in the Dock app, refresh in the browser). Never stop at "restart the app".
 
 ## Layout
 

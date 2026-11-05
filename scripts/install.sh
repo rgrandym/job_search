@@ -7,7 +7,7 @@
 #
 # Safe to run again (after `git pull`, or to rebuild the Dock app). It never touches data/,
 # output/ or .env, where your CVs, settings and documents live.
-# Env overrides: CONDA_ENV (job_search), BACKEND_PORT (8000).
+# Env overrides: CONDA_ENV (job_search); ports in scripts/lib/ports.sh.
 
 set -euo pipefail
 
@@ -69,5 +69,5 @@ if [[ "$MAKE_APP" == 1 ]]; then
   bash "$ROOT/scripts/macos/make_app.sh"
   open "$HOME/Applications/Job Search.app"
 else
-  log "Done. Start the app with: bash scripts/start.sh  → http://localhost:${BACKEND_PORT:-8000}"
+  log "Done. Start the app with: bash scripts/start.sh  → http://localhost:${WEB_PORT:-18410}"
 fi

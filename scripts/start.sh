@@ -1,21 +1,29 @@
 #!/usr/bin/env bash
-# Run the app as one server: the backend serving the built UI (web/dist), no reload, no Vite.
-# The Dock app (scripts/macos/) runs this; it also works from a terminal → http://localhost:8000
+# The browser web app as one server: the backend serving the built UI (web/dist), no reload,
+# no Vite → http://localhost:18410. The Dock app has its own launcher (scripts/desktop.sh, which
+# runs this on the desktop port) and never starts or uses this one.
 #
 #   bash scripts/start.sh
 #
 # What changed since the last run (e.g. after `git pull`) is rebuilt first: Python dependencies
-# when pyproject.toml changed, the UI when web/ changed. If an up-to-date backend is already up,
-# it exits; one running older code (its /api/health says "stale") is stopped and replaced, so
-# reopening the Dock app always runs the latest code. A dev backend (`--reload`) is kept: it
-# reloads itself, and only the UI is rebuilt.
-# Env overrides: CONDA_ENV (job_search), BACKEND_PORT (8000).
+# when pyproject.toml changed, the UI when web/ changed. If an up-to-date backend of the same
+# launcher is already up, it exits; one running older code (its /api/health says "stale") is
+# stopped and replaced, so reopening the app always runs the latest code. A dev backend
+# (`--reload`) is kept: it reloads itself, and only the UI is rebuilt. Another program on the
+# port is never taken for this app: it stops with a message naming it.
+# Env overrides: CONDA_ENV (job_search), BACKEND_PORT (18410, scripts/lib/ports.sh).
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=lib/ports.sh
+source "$ROOT/scripts/lib/ports.sh"
 CONDA_ENV="${CONDA_ENV:-job_search}"
-BACKEND_PORT="${BACKEND_PORT:-8000}"
+BACKEND_PORT="${BACKEND_PORT:-$WEB_PORT}"
+export JOBSEARCH_LAUNCHER="${JOBSEARCH_LAUNCHER:-web}"
+# Gmail sign-in returns to the server that started it, on its own port.
+default_env JOBSEARCH_GMAIL_REDIRECT_URI "http://localhost:$BACKEND_PORT/api/gmail/callback"
+default_env JOBSEARCH_GMAIL_FRONTEND_URL "http://localhost:$BACKEND_PORT/"
 RUN_DIR="$ROOT/.run"
 
 log() { printf '[start] %s\n' "$*"; }
@@ -38,6 +46,12 @@ stop_stale_backend() {  # the out-of-date backend on our port, if it is ours and
 }
 
 if health="$(curl -fsS --max-time 2 "http://127.0.0.1:$BACKEND_PORT/api/health" 2>/dev/null)"; then
+  if [[ "$health" != *'"app":"job_search"'* || "$health" != *"\"launcher\":\"$JOBSEARCH_LAUNCHER\""* ]]
+  then
+    warn "Port $BACKEND_PORT is used by another program ($(port_owner "$BACKEND_PORT" || echo unknown))."
+    warn "Stop it, or set another port (see scripts/lib/ports.sh). Job Search was not started."
+    exit 1
+  fi
   if [[ "$health" != *'"stale":true'* ]]; then
     log "Already running → http://localhost:$BACKEND_PORT"
     exit 0
@@ -84,7 +98,13 @@ if [[ "$KEEP_RUNNING" == 1 ]]; then
   exit 0
 fi
 
-log "Serving → http://localhost:$BACKEND_PORT"
+if owner="$(port_owner "$BACKEND_PORT")"; then
+  warn "Port $BACKEND_PORT is used by another program ($owner)."
+  warn "Stop it, or set another port (see scripts/lib/ports.sh). Job Search was not started."
+  exit 1
+fi
+
+log "Serving ($JOBSEARCH_LAUNCHER) → http://localhost:$BACKEND_PORT"
 # The open chat WebSocket would otherwise hold up quitting the app.
 exec python -m uvicorn src.web.app:app --host 127.0.0.1 --port "$BACKEND_PORT" \
   --timeout-graceful-shutdown 3

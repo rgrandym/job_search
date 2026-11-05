@@ -2,7 +2,7 @@
 
 This app runs on your own computer. On a Mac it opens as its own window from the Dock. On
 Windows or Linux, or on a Mac if you prefer, you use it in **Google Chrome** at
-**http://localhost:8000**. Section 1 takes you from nothing to the app open on screen. After that
+**http://localhost:18410**. Section 1 takes you from nothing to the app open on screen. After that
 you work with the buttons in the app; the terminal is only needed to install, start and update.
 
 The app is free for personal job searching under its [noncommercial license](LICENSE.md). AI
@@ -83,7 +83,7 @@ The app is the same; it opens as a page in Google Chrome instead of its own wind
    bash scripts/start.sh
    ```
 
-4. Open **Google Chrome** and go to **http://localhost:8000**. Bookmark it. To give it its own
+4. Open **Google Chrome** and go to **http://localhost:18410**. Bookmark it. To give it its own
    window and icon, use Chrome's menu **⋮ → Cast, save and share → Install page as app**.
 5. Keep the terminal open while you use the app. To stop it, press **Ctrl+C** in that terminal.
    **Every day after that:** open a terminal, run `cd ~/job_search` then `bash scripts/start.sh`,
@@ -129,7 +129,7 @@ or your local `.env` file yourself.
 ### For developers
 
 To work on the app's code, run `bash scripts/dev.sh` instead. It reloads on changes and serves
-the page at **http://localhost:5173**. Run it again to restart, press **Ctrl+C** or run
+the page at **http://localhost:18411**. Run it again to restart, press **Ctrl+C** or run
 `bash scripts/dev.sh --stop` to stop it, and check `.run/logs/backend.log` and
 `.run/logs/frontend.log` if it fails.
 
@@ -194,10 +194,11 @@ Google currently says standard Gmail API usage has **no additional cost below it
 5. Open **Google Auth Platform → Clients** (or **APIs & Services → Credentials**), choose **Create client**, and select **Web application**. Add this **Authorized redirect URI** exactly:
 
    ```text
-   http://localhost:8000/api/gmail/callback
+   http://localhost:18420/api/gmail/callback
+   http://localhost:18410/api/gmail/callback
    ```
 
-   The app receives the Google sign-in on port **8000**, also when you use the developer page on port 5173. Keep `localhost`, `http`, the port, and the path exactly the same. A JavaScript origin is not needed for this server-side flow. [Google's web-server OAuth guide](https://developers.google.com/identity/protocols/oauth2/web-server).
+   The Mac app receives the Google sign-in on its own port, **18420**; the browser version (also the developer page on port 18411) on **18410**. Add the ones you use. Keep `localhost`, `http`, the port, and the path exactly the same. A JavaScript origin is not needed for this server-side flow. [Google's web-server OAuth guide](https://developers.google.com/identity/protocols/oauth2/web-server).
 6. Copy the new **Client ID** and **Client secret**. In the `job_search` folder, make a local `.env` file by copying `.env.example` if you do not have one (`cp .env.example .env`). Open `.env` in a text editor and set:
 
    ```dotenv
@@ -429,7 +430,7 @@ The right-hand **Assistant** does things for you from plain-language requests. F
 | --- | --- |
 | **Install says conda, npm or command line tools are missing** | Install what it names (section 1, *What you need first*), open a **new** terminal, `cd ~/job_search` and run `bash scripts/install.sh` again. |
 | **`git clone` fails or `job_search` already exists** | Check the internet connection. If the folder already exists you have the app: `cd ~/job_search` and use `git pull` to update it. |
-| **Backend unreachable**, or Chrome cannot open `localhost:8000` | On a Mac, click the Job Search icon. Otherwise run `bash scripts/start.sh` in the `job_search` folder and keep that terminal open. Startup logs are in `.run/logs/`. |
+| **Backend unreachable**, or Chrome cannot open `localhost:18410` | On a Mac, click the Job Search icon. Otherwise run `bash scripts/start.sh` in the `job_search` folder and keep that terminal open. Startup logs are in `.run/logs/`. |
 | **The Dock icon does nothing after moving the folder** | Run `bash scripts/macos/make_app.sh` inside the folder's new location. |
 | **No AI scores / pre-filter only** | Select a CV, enable **Match against my CV** and **Smart match**, then check Settings shows both models and a working key or CLI sign-in. |
 | **No profiles yet** | Click **Build profile from selected CV**. If it fails, check the profile model and its provider credentials in Settings. |
@@ -438,7 +439,7 @@ The right-hand **Assistant** does things for you from plain-language requests. F
 | **No jobs** | Open the source report and notices; widen the date or location, enable relevant sources, and inspect excluded jobs. A newly added company may have no public feed. |
 | **Gmail source unavailable** | Check the three `JOBSEARCH_GMAIL_*` values in `.env`, restart, then connect or reconnect under **Job alerts**. Keep a CV selected and Smart match on. |
 | **Gmail needs reconnecting every week** | Your Google Cloud project is in **Testing** status, so Google ends its sign-ins after 7 days. Publish it (**Google Auth Platform → Audience → Publish app**), then click **Reconnect Gmail**. After a reconnect, click **Retry** under the results to read the alerts the failed search missed. |
-| **Google redirect error** | The authorised redirect URI must be exactly `http://localhost:8000/api/gmail/callback`, unless you deliberately changed the backend redirect setting in `.env`. |
+| **Google redirect error** | The authorised redirect URI must be exactly `http://localhost:18420/api/gmail/callback` (Mac app) or `http://localhost:18410/api/gmail/callback` (browser), unless you deliberately changed the backend redirect setting in `.env`. |
 | **Claude keeps showing as signed out** | Open **Settings → Claude accounts** and click **Sign in again** on each account that shows the warning about its Claude Code folder. The app then keeps a sign-in that lasts a year and is not affected by VS Code or a terminal (section 2, B, step 5). If an account says its saved sign-in was refused, click **Sign in** for it. Interrupted saves can leave files named `~/.claude.json.tmp.*` in your home folder; they are safe to delete while no Claude program is running. |
 | **Plan sign-in fails** | Confirm the CLI is installed on the app's computer and signed in with the intended **plan** account. Use the API provider choice only when you intend API billing. |
 | **Job description looks cut off** | Open **Details** and click **Show full description**. If the source only gave a snippet, use **Paste description** on the card (section 6). |
