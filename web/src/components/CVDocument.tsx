@@ -1,8 +1,35 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { ExternalLink, Loader2 } from "lucide-react";
+import { ExternalLink, Loader2, ZoomIn, ZoomOut } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import type { CVAsset } from "../lib/types";
+
+/** Size of the CV page alone, separate from the app's zoom: a dense CV can need more than the
+ *  rest of the app. Remembered in this browser. */
+const CV_ZOOM_KEY = "jobsearch.cvZoom";
+const CV_ZOOM_STEPS = [0.75, 1, 1.25, 1.5, 1.75, 2];
+
+function savedCvZoom(): number {
+  try {
+    const value = Number(localStorage.getItem(CV_ZOOM_KEY));
+    return CV_ZOOM_STEPS.includes(value) ? value : 1;
+  } catch {
+    return 1;
+  }
+}
+
+/** The preview as the frame shows it at `zoom`. The page view of a Word file is sandboxed, so the
+ *  zoom goes into its own stylesheet, where it reflows the text sharply; a PDF opens at that zoom. */
+async function zoomedPreview(blob: Blob, zoom: number): Promise<{ blob: Blob; hash: string }> {
+  if (blob.type.startsWith("text/html")) {
+    if (zoom === 1) return { blob, hash: "" };
+    const html = await blob.text();
+    const style = `<style>html{zoom:${zoom}}</style>`;
+    const zoomed = /<\/head>/i.test(html) ? html.replace(/<\/head>/i, () => `${style}</head>`) : style + html;
+    return { blob: new Blob([zoomed], { type: blob.type }), hash: "" };
+  }
+  return { blob, hash: blob.type === "application/pdf" ? `#zoom=${Math.round(zoom * 100)}` : "" };
+}
 
 /** The CV, including edits saved in Word and the assistant's edits. Word files are shown as an HTML page view; Word opens only on request. */
 export function CVDocument({ asset }: { asset: CVAsset }) {
@@ -23,13 +50,32 @@ export function CVDocument({ asset }: { asset: CVAsset }) {
     staleTime: Infinity,
     retry: false,
   });
+  const [zoom, setZoom] = useState(savedCvZoom);
+  const stepZoom = (by: number) => {
+    const next = by === 0 ? 1 : CV_ZOOM_STEPS[CV_ZOOM_STEPS.indexOf(zoom) + by];
+    if (next === undefined) return;
+    setZoom(next);
+    try {
+      localStorage.setItem(CV_ZOOM_KEY, String(next));
+    } catch {
+      // private window or blocked storage: the size still applies for this visit
+    }
+  };
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
     if (!preview.data) return;
-    const objectUrl = URL.createObjectURL(preview.data);
-    setUrl(objectUrl);
-    return () => URL.revokeObjectURL(objectUrl);
-  }, [preview.data]);
+    let objectUrl: string | null = null;
+    let cancelled = false;
+    void zoomedPreview(preview.data, zoom).then(({ blob, hash }) => {
+      if (cancelled) return;
+      objectUrl = URL.createObjectURL(blob);
+      setUrl(objectUrl + hash);
+    });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [preview.data, zoom]);
   return (
     <div className="flex h-full flex-col">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-border bg-surface px-4 py-2 text-[12px]">
@@ -37,6 +83,23 @@ export function CVDocument({ asset }: { asset: CVAsset }) {
           Your CV, kept as one document: edits you save in Word and changes the assistant makes update this CV
           (its file in output/cvs stays identical to it). Buttons open that file.
         </p>
+        <div className="flex shrink-0 items-center gap-1 text-faint" aria-label="CV size">
+          <button type="button" className="hover:text-fg disabled:opacity-40" title="Smaller CV" disabled={zoom === CV_ZOOM_STEPS[0]} onClick={() => stepZoom(-1)}>
+            <ZoomOut size={15} />
+          </button>
+          <button type="button" className="w-9 text-center text-[11px] tabular-nums hover:text-fg" title="CV size: click for 100%" onClick={() => stepZoom(0)}>
+            {Math.round(zoom * 100)}%
+          </button>
+          <button
+            type="button"
+            className="hover:text-fg disabled:opacity-40"
+            title="Larger CV"
+            disabled={zoom === CV_ZOOM_STEPS[CV_ZOOM_STEPS.length - 1]}
+            onClick={() => stepZoom(1)}
+          >
+            <ZoomIn size={15} />
+          </button>
+        </div>
         {open.isPending && <Loader2 size={13} className="animate-spin text-muted" />}
         {pdf && (
           <button type="button" className="btn-ghost py-1" disabled={open.isPending} onClick={() => open.mutate("default")}>
