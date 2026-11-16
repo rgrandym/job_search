@@ -75,9 +75,6 @@ def claude_binary() -> str | None:
     return next((str(p) for p in candidates if p.exists()), None)
 
 
-USAGE_TIMEOUT_S = 30
-
-
 @lru_cache(maxsize=4)
 def no_chrome(binary: str) -> tuple[str, ...]:
     """`--no-chrome` when this CLI has it: Claude in Chrome may turn itself on and start the
@@ -110,37 +107,6 @@ WORKDIR = Path.home() / ".cache" / "job_search" / "claude-cwd"
 def _workdir() -> Path:
     WORKDIR.mkdir(parents=True, exist_ok=True)
     return WORKDIR
-
-
-def claude_usage_text(config_dir: str | None = None) -> str:
-    """The plan usage Claude Code reports for `/usage` (its share of each window and when it
-    resets) for the account in `config_dir`. A local command: `claude -p /usage` answers
-    without a model call or tokens."""
-    binary = claude_binary()
-    if binary is None:
-        raise LLMError("Claude Code CLI not found")
-    cmd = [binary, "-p", "/usage", "--output-format", "json", "--no-session-persistence"]
-    cmd += ["--tools", "", "--strict-mcp-config", "--setting-sources", "", *no_chrome(binary)]
-    workdir = _workdir()
-    try:
-        out = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=USAGE_TIMEOUT_S,
-            cwd=workdir,
-            env=_folder_env(config_dir),
-            stdin=subprocess.DEVNULL,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise LLMError(f"Could not read Claude Code usage: {exc}") from exc
-    try:
-        data = json.loads(out.stdout)
-    except json.JSONDecodeError as exc:
-        raise LLMError(f"Claude Code usage was not JSON (exit {out.returncode})") from exc
-    if not isinstance(data, dict) or data.get("is_error") or not data.get("result"):
-        raise LLMError("Claude Code did not report its usage")
-    return str(data["result"])
 
 
 def claude_code_status(config_dir: str | None = None, with_email: bool = False) -> dict[str, Any]:
@@ -194,7 +160,7 @@ _TOKEN = re.compile(r"sk-ant-oat\d+-[A-Za-z0-9_\-]{20,}")
 
 def start_login(config_dir: str | None = None, key: str = DEFAULT_ID) -> signin.SignInStart:
     """Start `claude setup-token` for the account `key` (it opens the claude.ai sign-in page;
-    a pasted code goes to it). The year-long token it prints is kept for that account, so it
+    a pasted code goes to it). The long-lived token it prints is kept for that account, so it
     stays signed in however many programs use Claude at once (`claude_accounts`)."""
     binary = claude_binary()
     if binary is None:
@@ -204,11 +170,12 @@ def start_login(config_dir: str | None = None, key: str = DEFAULT_ID) -> signin.
         found = _TOKEN.findall(text)
         if not found:
             return None if code else "Claude did not print a sign-in token. Press Sign in again."
-        # The token does not say who it is: the folder's own sign-in usually does.
-        email = claude_code_status(config_dir, with_email=True).get("email")
+        # Save first: identifying the account can take another CLI process up to 20 s.
+        # Settings can report the connection as soon as the token is available.
         before = claude_accounts.token(key)
-        email = email or (before.email if before else None)
-        claude_accounts.save_token(key, found[-1], email)
+        claude_accounts.save_token(key, found[-1], before.email if before else None)
+        if email := claude_code_status(config_dir, with_email=True).get("email"):
+            claude_accounts.remember_email(key, str(email))
         return None
 
     cmd = [binary, "setup-token"]

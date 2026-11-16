@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -159,6 +160,39 @@ def test_usage_from_before_accounts_belongs_to_the_default(tmp_path: Path) -> No
     assert usage.claude_windows(account="work").windows == []
 
 
+def test_plan_readings_and_tokens_stay_with_their_account() -> None:
+    claude_accounts.add("Work", "/tmp/claude-work-test")
+    reset = time.time() + 3600
+    usage.record_claude_reading("five_hour", 20, reset, "default")
+    usage.record_claude_reading("five_hour", 75, reset, "work")
+    usage.record_account_tokens("default", 10, 2)
+    usage.record_account_tokens("work", 30, 5)
+
+    default = usage.plan_windows("claude_code", account="default")
+    work = usage.plan_windows("claude_code", account="work")
+    assert default is not None and work is not None
+    assert [(w.used_percent, w.tokens) for w in default.windows] == [(20.0, 12)]
+    assert [(w.used_percent, w.tokens) for w in work.windows] == [(75.0, 35)]
+
+    usage.mark_exhausted(claude_accounts.spent_key("default"), reset)
+    assert claude_accounts.active().id == "work"
+    assert usage.plan_windows("claude_code").windows[0].used_percent == 75.0  # type: ignore[union-attr]
+
+
+def test_full_session_uses_the_next_account_until_reset() -> None:
+    claude_accounts.add("Work", "/tmp/claude-work-test")
+    reset = time.time() + 3600
+    usage.record_claude_reading("five_hour", 100, reset, "default")
+    usage.record_claude_reading("five_hour", 20, reset, "work")
+
+    assert claude_accounts.spent_until(claude_accounts.DEFAULT) == reset
+    assert [a.id for a in claude_accounts.queue()] == ["work"]
+    assert claude_accounts.active().id == "work"
+
+    usage.record_claude_reading("five_hour", 80, reset, "default")
+    assert [a.id for a in claude_accounts.queue()] == ["default", "work"]
+
+
 def test_a_chat_resumes_only_on_its_own_account(
     two_accounts: list[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -277,15 +311,20 @@ def test_two_accounts_signed_in_as_the_same_person_are_flagged(
     ]
 
 
-def test_an_idle_account_is_read_once_until_a_call_runs_on_it(
+def test_every_claude_account_refreshes_while_usage_is_live(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    work = claude_accounts.add("Work", "/tmp/claude-work-test").config_dir
-    reads: list[str | None] = []
+    claude_accounts.add("Work", "/tmp/claude-work-test")
+    claude_accounts.save_token("default", "saved-default-token", "default@example.com")
+    claude_accounts.save_token("work", "saved-work-token", "work@example.com")
+    reads: list[str] = []
 
-    def text(config_dir: str | None = None) -> str:
-        reads.append(config_dir)
-        return "Current week (all models): 100% used · resets 11:59pm (UTC)"
+    def get(url: str, token: str) -> dict[str, Any]:
+        email = "work@example.com" if token == "saved-work-token" else "default@example.com"
+        if url == usage.CLAUDE_PROFILE_URL:
+            return {"account": {"email": email}}
+        reads.append(email)
+        return {"seven_day": {"utilization": 100, "resets_at": "2099-01-01T00:00:00Z"}}
 
     class Now:  # the background read, run in place so the test can count it
         def __init__(self, target: Any, args: tuple[Any, ...], daemon: bool) -> None:
@@ -294,23 +333,51 @@ def test_an_idle_account_is_read_once_until_a_call_runs_on_it(
         def start(self) -> None:
             self.run()
 
-    monkeypatch.setattr(backend, "claude_usage_text", text)
+    monkeypatch.setattr(usage, "_claude_oauth_get", get)
     monkeypatch.setattr(usage.threading, "Thread", Now)
     for _ in range(2):
-        usage.plan_windows("claude_code", account="work", live=True)
-        usage.plan_windows("claude_code", account="default", live=True)
-    assert reads == [work, None]
+        usage.plan_windows("claude_code", account="work", live=True, email="work@example.com")
+        usage.plan_windows("claude_code", account="default", live=True, email="default@example.com")
+    assert reads == ["work@example.com", "default@example.com"]
 
-    for state in usage._claude_cli.values():  # long after: only the account in use is read
+    for state in usage._claude_cli.values():
         state["at"] -= usage.CLAUDE_TTL_S
-    usage.plan_windows("claude_code", account="work", live=True)
-    usage.plan_windows("claude_code", account="default", live=True)
-    assert reads[2:] == [None]
+    usage.plan_windows("claude_code", account="work", live=True, email="work@example.com")
+    usage.plan_windows("claude_code", account="default", live=True, email="default@example.com")
+    assert reads[2:] == ["work@example.com", "default@example.com"]
 
     usage.record_account_tokens("work", 10, 1)  # a call ran on it: read once more
     usage._claude_cli["work"]["at"] -= usage.CODEX_STALE_S
-    usage.plan_windows("claude_code", account="work", live=True)
-    assert reads[3:] == [work]
+    usage.plan_windows("claude_code", account="work", live=True, email="work@example.com")
+    assert reads[4:] == ["work@example.com"]
+
+
+def test_folder_sign_in_reads_only_its_current_access_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    work = claude_accounts.add("Work", "/tmp/claude-work-test")
+    reads: list[str] = []
+    monkeypatch.setattr(
+        usage, "_folder_access_token", lambda folder: ("folder-token", time.time() + 3600)
+    )
+
+    def get(url: str, token: str) -> dict[str, Any]:
+        reads.append(url)
+        if url == usage.CLAUDE_PROFILE_URL:
+            return {"account": {"email": "work@example.com"}}
+        return {"five_hour": {"utilization": 42}}
+    monkeypatch.setattr(usage, "_claude_oauth_get", get)
+
+    for _ in range(3):
+        found = usage.plan_windows(
+            "claude_code", account="work", live=True, email="work@example.com"
+        )
+        assert found is not None
+    deadline = time.time() + 2
+    while usage._claude_cli[work.id].get("reading") and time.time() < deadline:
+        time.sleep(0.01)
+    assert reads == [usage.CLAUDE_PROFILE_URL, usage.CLAUDE_USAGE_URL]
+    assert usage.claude_windows(account="work").windows[0].used_percent == 42
 
 
 def test_a_long_lived_sign_in_is_kept_and_given_to_every_call(
@@ -334,6 +401,48 @@ def test_a_long_lived_sign_in_is_kept_and_given_to_every_call(
         True,
         "work@example.com",
     )
+
+
+def test_app_does_not_expire_a_saved_token_by_its_age(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(backend, "claude_binary", lambda: "/bin/claude")
+    claude_accounts.save_token("default", "saved-token", "me@example.com")
+    saved = claude_accounts.token("default")
+    assert saved is not None
+    saved.saved_at = time.time() - 2 * 365 * 86400
+
+    status = claude_accounts.status(claude_accounts.DEFAULT)
+    assert status["logged_in"] is True
+    assert "until you sign out" in status["message"]
+
+
+def test_a_token_saved_by_another_server_updates_cached_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claude_accounts.configure(tmp_path / "data")
+    work = claude_accounts.add("Work", "/tmp/claude-work-test")
+    monkeypatch.setattr(backend, "claude_binary", lambda: "/bin/claude")
+    monkeypatch.setattr(
+        backend,
+        "claude_code_status",
+        lambda *_, **__: {"installed": True, "logged_in": False},
+    )
+    assert claude_accounts.status(work)["logged_in"] is False
+
+    (tmp_path / "data" / claude_accounts.TOKENS_FILE).write_text(
+        json.dumps(
+            {
+                work.id: {
+                    "token": "saved-in-the-other-server",
+                    "saved_at": time.time(),
+                    "email": "work@example.com",
+                }
+            }
+        )
+    )
+    assert claude_accounts.status(work)["logged_in"] is True
+    assert claude_accounts.env(work)[claude_accounts.TOKEN_ENV] == "saved-in-the-other-server"
 
 
 def test_a_refused_long_lived_sign_in_shows_until_a_call_works(
@@ -396,7 +505,12 @@ def test_signing_in_runs_setup_token_and_keeps_its_token(
 
     monkeypatch.setattr(backend.signin, "start", start)
     who = {"installed": True, "logged_in": True, "email": "work@example.com"}
-    monkeypatch.setattr(backend, "claude_code_status", lambda *_, **__: who)
+
+    def status(*_: Any, **__: Any) -> dict[str, Any]:
+        assert claude_accounts.token("work") is not None  # available before the slow check
+        return who
+
+    monkeypatch.setattr(backend, "claude_code_status", status)
 
     backend.start_login("/tmp/claude-work-test", "work")
 

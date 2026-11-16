@@ -267,14 +267,15 @@ def test_stream_output_yields_result_and_records_plan_limits() -> None:
     )
 
     data = backend._result(0, stdout, "")
+    usage._claude["default"]["observed_at"] = 1790880000  # the fixture's reading time
     windows = usage.claude_windows(now=1790880000).windows
 
     assert data["structured_output"] == {"a": 1}
     assert [(w.name, w.used_percent, w.status) for w in windows] == [
         ("5h", 82.0, "allowed_warning")
     ]
-    # Past its reset time, the window reads as unused again.
-    assert usage.claude_windows(now=1790886601).windows[0].used_percent == 0.0
+    # Past its reset, the old reading cannot say how much was used in the new window.
+    assert usage.claude_windows(now=1790886601).windows[0].used_percent is None
 
 
 def test_a_refusing_plan_window_is_a_limit_error_with_its_reset() -> None:

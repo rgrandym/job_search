@@ -3,10 +3,9 @@ other model error.
 
 A wrong classification either strands the user (a limit read as an ordinary error, so no
 switch or wait is offered) or switches provider on an ordinary error; the patterns are tested
-against recorded messages. Nothing here makes a model call: Claude Code reports its windows
-through `claude -p /usage` (a local command; its calls' `rate_limit_event`s state a share only
-near a limit), Codex through `codex app-server`. Both are read at most once a minute, and again
-soon after a call on that plan.
+against recorded messages. Nothing here makes a model call: Claude plan windows come from a
+read-only usage request using the account's current access token. Folder access tokens are
+never refreshed here. Codex uses `codex app-server`.
 
 Each plan window also shows the tokens this app spent inside it (`tokens`), from a short log
 of recent calls: the plans state only a percentage, never a token allowance.
@@ -21,12 +20,15 @@ so tests and CLIs never write into the user's data folder by accident.
 
 from __future__ import annotations
 
+import hashlib
 import json
-import math
 import re
+import subprocess
 import threading
 import time
-from datetime import date, timedelta
+import urllib.error
+import urllib.request
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -151,6 +153,7 @@ def configure(data_dir: Path | None) -> None:
         _exhausted.clear()
         _recent.clear()
         _claude_cli.clear()
+        _token_owner.clear()
         _claude.update(_claude_accounts(_read("usage_claude.json")))
         _spend.update(_read("model_spend.json"))
         _recent.update(_read("usage_recent.json"))
@@ -228,17 +231,24 @@ def record_claude_reading(
             win["resetsAt"] = resets_at
             if previous_reset and resets_at > float(previous_reset) + 60:
                 win["status"] = "allowed"  # the rejected window has reset
+        elif previous_reset and float(previous_reset) <= time.time():
+            win.pop("resetsAt", None)  # this is a new reading; the old reset no longer applies
+            win["status"] = "allowed"
         win.setdefault("status", "allowed")
         mine[kind] = win
         mine["observed_at"] = time.time()
         _write("usage_claude.json", _claude)
 
 
-def claude_windows(now: float | None = None, account: str = DEFAULT_ACCOUNT) -> UsageWindows:
+def claude_windows(
+    now: float | None = None, account: str = DEFAULT_ACCOUNT, expected_email: str = ""
+) -> UsageWindows:
     """A Claude account's windows as last reported. A window past its reset reads as unused."""
     now = time.time() if now is None else now
     with _lock:
         stored = dict(_claude.get(account) or {})
+    if expected_email and stored.get("account_email") != expected_email.casefold():
+        return UsageWindows(note="No verified usage for this account's current sign-in.")
     if not stored.get("observed_at"):
         return UsageWindows(note="Shown after the first Claude Code call.")
     windows = []
@@ -248,7 +258,9 @@ def claude_windows(now: float | None = None, account: str = DEFAULT_ACCOUNT) -> 
             continue
         util, resets, status = win.get("utilization"), win.get("resetsAt"), win.get("status")
         if resets and float(resets) < now:
-            util, status = 0.0, "allowed"  # reset since it was observed
+            if float(stored["observed_at"]) <= float(resets):
+                util, status = None, "allowed"  # no reading since that reset
+            resets = None  # never show an old reset on a newer reading
         used = None
         if status == "rejected":
             used = 100.0  # a refused call is decisive even if /usage still reports a lower share
@@ -317,8 +329,11 @@ def codex_plan_windows(ttl: float = CODEX_TTL_S) -> UsageWindows:
     return value
 
 
-# Claude account -> when its `/usage` was last read, and whether calls moved it since.
+# Claude account -> when its plan windows were last read, and whether calls moved it since.
 _claude_cli: dict[str, dict[str, Any]] = {}
+CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+CLAUDE_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
+_token_owner: dict[str, str] = {}
 _USAGE_LINE = re.compile(
     r"^\s*Current (session|week)(?: \(([^)]*)\))?:\s*(\d+(?:\.\d+)?)% used(?:\s*·\s*resets (.+))?$",
     re.I | re.M,
@@ -381,17 +396,112 @@ def _reset_epoch(text: str, now: float | None = None) -> float | None:
     return when.timestamp()
 
 
-def _read_claude_usage(account: str, config_dir: str | None) -> None:
-    """Record what `/usage` reports for one account; nothing when it cannot be read."""
-    from src.core.llm.claude_code_backend import claude_usage_text
-    from src.core.llm.types import LLMError
-
+def _folder_access_token(config_dir: str | None) -> tuple[str, float] | None:
+    """Read the current Claude Code token without using its one-use refresh token."""
+    service = (
+        f"Claude Code-credentials-{hashlib.sha256(config_dir.encode()).hexdigest()[:8]}"
+        if config_dir else "Claude Code-credentials"
+    )
     try:
-        readings = parse_claude_usage(claude_usage_text(config_dir))
-    except (LLMError, OSError, ValueError):
-        readings = []
-    for kind, used, resets in readings:
-        record_claude_reading(kind, used, resets, account)
+        out = subprocess.run(
+            ["security", "find-generic-password", "-s", service, "-w"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        if out.returncode:
+            return None
+        oauth = json.loads(out.stdout).get("claudeAiOauth") or {}
+        token, expiry = oauth.get("accessToken"), oauth.get("expiresAt")
+        if isinstance(token, str) and isinstance(expiry, (int, float)):
+            return token, float(expiry) / 1000
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def _claude_oauth_get(url: str, token: str) -> Any:
+    request = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {token}",
+        "anthropic-beta": "oauth-2025-04-20",
+        "Content-Type": "application/json",
+        "User-Agent": "job-search-app",
+    })
+    with urllib.request.urlopen(request, timeout=15) as response:
+        return json.loads(response.read())
+
+
+def _read_claude_usage(account: str, config_dir: str | None, email: str) -> None:
+    """Read verified live windows. A failure preserves the previous account reading."""
+    from src.core.llm import claude_accounts
+
+    note = ""
+    backoff = False
+    try:
+        if not email:
+            note = "Account email is unavailable; usage cannot be attributed safely."
+            return
+        # setup-token keeps model calls signed in, but does not necessarily grant the
+        # profile/usage endpoints. The folder's current access token does, and reading it
+        # leaves Claude Code's one-use refresh token untouched.
+        found = _folder_access_token(config_dir)
+        saved = claude_accounts.token(account)
+        if found is not None and found[1] > time.time() + 30:
+            token = found[0]
+        elif saved is not None:
+            token = saved.token.get_secret_value()
+        elif found is not None:
+            note = "Claude Code will renew this folder's access token on its next call."
+            return
+        else:
+            note = "No current Claude Code access token for this folder."
+            return
+        fingerprint = hashlib.sha256(token.encode()).hexdigest()
+        owner = _token_owner.get(fingerprint)
+        if owner is None:
+            profile = _claude_oauth_get(CLAUDE_PROFILE_URL, token)
+            owner = str((profile.get("account") or {}).get("email") or "").strip().casefold()
+            _token_owner[fingerprint] = owner
+        if owner != email.strip().casefold():
+            note = "The current access token belongs to a different Claude account."
+            return
+        body = _claude_oauth_get(CLAUDE_USAGE_URL, token)
+        incoming: dict[str, dict[str, Any]] = {}
+        for kind in _CLAUDE_NAMES:
+            raw = body.get(kind) if isinstance(body, dict) else None
+            if not isinstance(raw, dict) or not isinstance(raw.get("utilization"), (int, float)):
+                continue
+            reset = raw.get("resets_at")
+            try:
+                resets_at = (
+                    datetime.fromisoformat(reset).timestamp() if isinstance(reset, str) else None
+                )
+            except ValueError:
+                resets_at = None
+            percent = float(raw["utilization"])
+            incoming[kind] = {
+                "utilization": percent / 100,
+                "resetsAt": resets_at,
+                "status": "rejected" if percent >= 100 or raw.get("locked_reason") else "allowed",
+            }
+        if not incoming:
+            note = "Claude returned no plan windows."
+            return
+        with _lock:
+            _claude[account] = {
+                "account_email": owner, "observed_at": time.time(), **incoming
+            }
+            _write("usage_claude.json", _claude)
+    except urllib.error.HTTPError as exc:
+        note = f"Claude refused the usage read ({exc.code})."
+        backoff = True
+    except (OSError, ValueError, TypeError, AttributeError):
+        note = "Claude usage is temporarily unavailable."
+    finally:
+        with _lock:
+            state = _claude_cli.setdefault(account, {})
+            state["reading"] = False
+            state["note"] = note
+            if backoff:
+                state["at"] = time.time() + 280  # five-minute backoff, including the normal TTL
 
 
 def claude_plan_windows(
@@ -399,33 +509,42 @@ def claude_plan_windows(
     account: str = DEFAULT_ACCOUNT,
     config_dir: str | None = None,
     wait: bool = True,
+    email: str = "",
 ) -> UsageWindows:
-    """A Claude account's windows (its folder: `config_dir`), refreshed from `/usage` once a
-    minute (sooner after calls on it); what the calls reported stands when it cannot be read.
+    """A Claude account's windows (its folder: `config_dir`), refreshed from Claude at
+    the requested interval (sooner after calls on it); prior readings stand on failure.
     `wait=False` reads in the background and returns what is known now."""
-    read = _claude_cli.setdefault(account, {})
-    age = time.time() - float(read.get("at") or 0)
-    stale = read.get("stale") and age >= CODEX_STALE_S
-    if not read.get("at") or age >= ttl or stale:
-        read.update(at=time.time(), stale=False)  # one reader at a time
+    with _lock:
+        read = _claude_cli.setdefault(account, {})
+        age = time.time() - float(read.get("at") or 0)
+        stale = read.get("stale") and age >= CODEX_STALE_S
+        refresh = bool(email) and not read.get("reading") and (
+            not read.get("at") or age >= ttl or stale
+        )
+        if refresh:
+            read.update(at=time.time(), stale=False, reading=True)
+    if refresh:
         if wait:
-            _read_claude_usage(account, config_dir)
+            _read_claude_usage(account, config_dir, email)
         else:
             threading.Thread(
-                target=_read_claude_usage, args=(account, config_dir), daemon=True
+                target=_read_claude_usage, args=(account, config_dir, email), daemon=True
             ).start()
-    return claude_windows(account=account)
+    result = claude_windows(account=account, expected_email=email)
+    note = _claude_cli.get(account, {}).get("note")
+    if note:
+        result.note = f"{note} Showing the last verified reading." if result.windows else note
+    return result
 
 
 def plan_windows(
-    provider: str, fresh: bool = False, account: str | None = None, live: bool = False
+    provider: str, fresh: bool = False, account: str | None = None, live: bool = False,
+    email: str = "",
 ) -> UsageWindows | None:
     """The plan windows of a plan provider, each with this app's tokens inside it; None for
     providers billed per token. Claude Code: `account`'s, else those of the account calls
-    run on now. `live` (the usage panel): the account in use is read again every
-    `LIVE_TTL_S` in the background, so the panel never waits on the CLI; an idle account
-    is read once, then again only after calls on it (its spent state and reset times are
-    known, and a window past its reset already reads as unused)."""
+    run on now. `live` (the usage panel): each account is read every `LIVE_TTL_S`
+    in the background, so the panel never waits for the network."""
     ttl: float = 0 if fresh else CLAUDE_TTL_S
     key = provider
     if provider == "claude_code":
@@ -436,13 +555,12 @@ def plan_windows(
             return None
         key = claude_accounts.spent_key(found_account.id)
         if live:
-            idle = found_account.id != claude_accounts.active().id
-            ttl = math.inf if idle else min(ttl, LIVE_TTL_S)
+            ttl = min(ttl, LIVE_TTL_S)
+        saved = claude_accounts.token(found_account.id)
+        known_email = email or (saved.email if saved else "") or ""
         found = claude_plan_windows(
-            ttl,
-            found_account.id,
-            found_account.config_dir,
-            wait=not live,
+            ttl, found_account.id, found_account.config_dir, wait=not live,
+            email=known_email,
         )
     elif provider == "codex":
         found = codex_plan_windows(ttl=0 if fresh else CODEX_TTL_S)
@@ -540,7 +658,7 @@ def record_account_tokens(account: str, input_tokens: int, output_tokens: int) -
     """Log a call on one Claude account, whose windows then are read again soon."""
     with _lock:
         _log_recent(f"claude_code@{account}", int(input_tokens), int(output_tokens))
-    _claude_cli.setdefault(account, {})["stale"] = True
+        _claude_cli.setdefault(account, {})["stale"] = True
 
 
 RECENT_S = 8 * 86400  # longer than the longest plan window (7 days)

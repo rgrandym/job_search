@@ -27,7 +27,7 @@ function WindowBar({ win, threshold }: { win: PlanWindow; threshold: number }) {
         <div className={cn("h-full rounded-full", tone)} style={{ width: `${empty ? 100 : used == null ? 100 : Math.min(100, used)}%` }} />
       </div>
       <span className="w-40 shrink-0 text-right text-faint" title={win.status ?? undefined}>
-        {empty ? "No tokens left" : used == null ? (win.status === "allowed_warning" ? "nearing limit" : "within limit") : `${Math.round(used)}% used`}
+        {empty ? "No tokens left" : used == null ? (win.status === "allowed_warning" ? "nearing limit" : "usage unknown") : `${Math.round(used)}% used`}
         {win.resets_at ? ` · ${clockLabel(win.resets_at)}` : ""}
       </span>
     </div>
@@ -62,12 +62,15 @@ function ConnectionCard({ c, threshold }: { c: Connection; threshold: number }) 
       {c.accounts.length > 1 && (
         <div className="space-y-0.5">
           {c.accounts.map((a) => (
-            <div key={a.id} className="flex items-center gap-1.5 text-[11px]">
-              <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", !a.signed_in ? "bg-bad" : a.exhausted_until ? "bg-warn" : "bg-good")} />
-              <span className={a.active ? "text-fg" : "text-muted"}>{a.label}</span>
-              <span className="ml-auto truncate text-faint">
-                {!a.signed_in ? "not signed in" : a.exhausted_until ? `limit reached · back ${clockLabel(a.exhausted_until)}` : windowsLine(a.windows) || "ready"}
-              </span>
+            <div key={a.id} className="space-y-0.5">
+              <div className="flex items-center gap-1.5 text-[11px]">
+                <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", !a.signed_in ? "bg-bad" : a.exhausted_until ? "bg-warn" : "bg-good")} />
+                <span className={a.active ? "text-fg" : "text-muted"}>{a.label}</span>
+                <span className="ml-auto truncate text-faint">
+                  {!a.signed_in ? "not signed in" : a.exhausted_until ? `limit reached · back ${clockLabel(a.exhausted_until)}` : windowsLine(a.windows) || "ready"}
+                </span>
+              </div>
+              {a.signed_in && a.windows?.note && <p className="pl-3 text-[10px] text-faint">{a.windows.note}</p>}
             </div>
           ))}
         </div>

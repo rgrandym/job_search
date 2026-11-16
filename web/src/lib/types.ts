@@ -82,7 +82,7 @@ export interface ClaudeAccount {
   email: string | null;
   subscription: string | null;
   message: string;
-  /** Signed in from the app (a year-long sign-in): stays signed in until signed out. */
+  /** Signed in from the app: saved until signed out or Claude refuses the token. */
   lasting: boolean;
   /** When that sign-in was made (epoch seconds). */
   token_saved_at: number | null;

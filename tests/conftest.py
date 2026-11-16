@@ -58,14 +58,14 @@ def settings(tmp_path: Path) -> Settings:
 
 @pytest.fixture(autouse=True)
 def _no_claude_usage_read(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Plan windows would run the real `claude -p /usage`; tests stay offline."""
-    from src.core.llm import claude_code_backend
-    from src.core.llm.types import LLMError
+    """Plan windows must never reach Claude or the macOS Keychain in tests."""
+    from src.core.llm import usage
 
-    def unavailable(config_dir: str | None = None) -> str:
-        raise LLMError("Claude Code usage is not read in tests")
+    def unavailable(url: str, token: str) -> None:
+        raise OSError("Claude usage is not read in tests")
 
-    monkeypatch.setattr(claude_code_backend, "claude_usage_text", unavailable)
+    monkeypatch.setattr(usage, "_claude_oauth_get", unavailable)
+    monkeypatch.setattr(usage, "_folder_access_token", lambda config_dir: None)
 
 
 @pytest.fixture(autouse=True)

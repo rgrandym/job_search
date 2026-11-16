@@ -1,4 +1,4 @@
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ExternalLink, Loader2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { SignInStart } from "../lib/types";
@@ -21,6 +21,7 @@ export function SignInHelp({
   plan: string;
   onCode?: (code: string) => Promise<unknown>;
 }) {
+  const qc = useQueryClient();
   const [code, setCode] = useState("");
   const opened = useRef<SignInStart | null>(null);
   useEffect(() => {
@@ -28,7 +29,14 @@ export function SignInHelp({
     opened.current = start;
     openSignIn(start);
   }, [start]);
-  const send = useMutation({ mutationFn: (value: string) => (onCode ? onCode(value) : Promise.resolve()) });
+  const send = useMutation({
+    mutationFn: (value: string) => (onCode ? onCode(value) : Promise.resolve()),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["claude-accounts"] });
+      void qc.invalidateQueries({ queryKey: ["connections"] });
+      void qc.invalidateQueries({ queryKey: ["cli-status", "claude_code"] });
+    },
+  });
 
   return (
     <div className="space-y-1.5 rounded-md bg-surface p-2 text-[11px]">

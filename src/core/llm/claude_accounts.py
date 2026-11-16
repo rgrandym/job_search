@@ -9,9 +9,9 @@ every account is spent does it fail as a plan limit (which `fallback` then hands
 Staying signed in: a folder's own sign-in (`claude auth login`, kept in the macOS Keychain)
 lasts hours and its refresh token works once, so when the app's parallel calls, VS Code and a
 terminal renew it together the losers are signed out. The app therefore signs each account in
-with `claude setup-token`: a token for the plan that lasts a year and is never renewed, kept
-here per account (`data/claude_tokens.json`, readable by the user only) and given to every
-call as `CLAUDE_CODE_OAUTH_TOKEN`. It stays until the user signs the account out in Settings.
+with `claude setup-token`: a long-lived token kept here per account
+(`data/claude_tokens.json`, readable by the user only) and given to every call as
+`CLAUDE_CODE_OAUTH_TOKEN`. The app keeps it until sign-out or removal; Claude can refuse it.
 The app never reads the folders' own credentials.
 
 The list persists in `data/claude_accounts.json` once `configure(data_dir)` is called; until
@@ -40,7 +40,6 @@ DEFAULT_ID = "default"
 FILE = "claude_accounts.json"
 TOKENS_FILE = "claude_tokens.json"
 TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
-TOKEN_DAYS = 365  # how long `claude setup-token` tokens last
 STATUS_TTL_S = 30.0
 SIGNED_OUT_S = 10 * 60  # an account that answered "not signed in" is skipped this long
 
@@ -74,17 +73,19 @@ _accounts: list[ClaudeAccount] = []
 _status: dict[str, tuple[float, dict[str, Any]]] = {}  # id -> (checked_at, status)
 _signed_out: dict[str, float] = {}  # id -> when a call found it signed out
 _tokens: dict[str, SavedToken] = {}  # id -> its long-lived sign-in
+_tokens_stamp: tuple[int, int] | None = None
 
 
 def configure(data_dir: Path | None) -> None:
     """Persist under `data_dir` from now on (None: memory only), loading what is there."""
-    global _dir
+    global _dir, _tokens_stamp
     with _lock:
         _dir = data_dir
         _accounts.clear()
         _status.clear()
         _signed_out.clear()
         _tokens.clear()
+        _tokens_stamp = None
         if data_dir is None:
             return
         rows = _read(data_dir / FILE).get("accounts")
@@ -98,6 +99,41 @@ def configure(data_dir: Path | None) -> None:
                 _tokens[account_id] = SavedToken.model_validate(row)
             except ValueError:
                 continue
+        _tokens_stamp = _stamp(data_dir / TOKENS_FILE)
+
+
+def _stamp(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
+
+
+def _refresh_tokens() -> None:
+    """See sign-ins saved by the other local app server without restarting this one."""
+    global _tokens_stamp
+    with _lock:
+        if _dir is None:
+            return
+        path = _dir / TOKENS_FILE
+        stamp = _stamp(path)
+        if stamp == _tokens_stamp:
+            return
+        try:
+            rows = json.loads(path.read_text()) if stamp is not None else {}
+            if not isinstance(rows, dict):
+                return
+            updated = {key: SavedToken.model_validate(row) for key, row in rows.items()}
+        except (OSError, ValueError):
+            return  # a write in progress or invalid file: keep the last valid sign-ins
+        for account_id in _tokens.keys() | updated.keys():
+            if _tokens.get(account_id) != updated.get(account_id):
+                _status.pop(account_id, None)
+                _signed_out.pop(account_id, None)
+        _tokens.clear()
+        _tokens.update(updated)
+        _tokens_stamp = stamp
 
 
 def _read(path: Path) -> dict[str, Any]:
@@ -119,6 +155,7 @@ def _save() -> None:
 
 def _save_tokens() -> None:
     """Write the tokens, readable by the user only (caller holds `_lock`)."""
+    global _tokens_stamp
     if _dir is None:
         return
     _dir.mkdir(parents=True, exist_ok=True)
@@ -128,6 +165,7 @@ def _save_tokens() -> None:
     with os.fdopen(fd, "w") as out:
         json.dump(rows, out, indent=2)
     os.chmod(path, 0o600)  # a file made before by hand keeps no wider access
+    _tokens_stamp = _stamp(path)
 
 
 def accounts() -> list[ClaudeAccount]:
@@ -229,11 +267,13 @@ def found_folders() -> list[str]:
 
 
 def token(account_id: str) -> SavedToken | None:
+    _refresh_tokens()
     return _tokens.get(account_id)
 
 
 def save_token(account_id: str, value: str, email: str | None = None) -> None:
     """Keep the long-lived sign-in `claude setup-token` printed for an account."""
+    _refresh_tokens()
     with _lock:
         _tokens[account_id] = SavedToken(token=SecretStr(value), saved_at=time.time(), email=email)
         _save_tokens()
@@ -243,12 +283,23 @@ def save_token(account_id: str, value: str, email: str | None = None) -> None:
 
 def sign_out(account_id: str) -> bool:
     """Forget an account's long-lived sign-in; False when it had none."""
+    _refresh_tokens()
     with _lock:
         if _tokens.pop(account_id, None) is None:
             return False
         _save_tokens()
         _status.pop(account_id, None)
     return True
+
+
+def remember_email(account_id: str, email: str) -> None:
+    """Add the identity found after a token was already saved for this account."""
+    with _lock:
+        saved = _tokens.get(account_id)
+        if saved is not None and saved.email != email:
+            saved.email = email
+            _save_tokens()
+            _status.pop(account_id, None)
 
 
 def _token_failed(account: ClaudeAccount, exc: LLMError) -> None:
@@ -276,6 +327,7 @@ def env(account: ClaudeAccount, with_token: bool = True) -> dict[str, str]:
     long-lived sign-in when it has one (never another account's, nor one inherited)."""
     from src.core.llm.anthropic_backend import subscription_env
 
+    _refresh_tokens()
     drop = {"CLAUDE_CONFIG_DIR", TOKEN_ENV}
     out = {k: v for k, v in subscription_env().items() if k not in drop}
     if account.config_dir:
@@ -292,7 +344,20 @@ def spent_key(account_id: str) -> str:
 
 
 def spent_until(account: ClaudeAccount) -> float | None:
-    return usage.exhausted_until(spent_key(account.id))
+    rejected = usage.exhausted_until(spent_key(account.id))
+    if rejected is not None:
+        return rejected
+    now = time.time()
+    full = [
+        window.resets_at
+        for window in usage.claude_windows(account=account.id).windows
+        if window.name in ("5h", "7d")
+        and window.used_percent is not None
+        and window.used_percent >= 100
+        and window.resets_at is not None
+        and window.resets_at > now
+    ]
+    return min(full) if full else None
 
 
 def usable(account: ClaudeAccount) -> bool:
@@ -385,6 +450,7 @@ def status(account: ClaudeAccount, max_age: float = STATUS_TTL_S) -> dict[str, A
     """`claude auth status` for one account, cached (it starts a process)."""
     from src.core.llm.claude_code_backend import claude_binary, claude_code_status
 
+    _refresh_tokens()
     hit = _status.get(account.id)
     if hit and time.monotonic() - hit[0] < max_age:
         return hit[1]
@@ -400,15 +466,12 @@ def status(account: ClaudeAccount, max_age: float = STATUS_TTL_S) -> dict[str, A
 
 
 def _token_status(saved: SavedToken) -> dict[str, Any]:
-    """An account with a long-lived sign-in: signed in until a call is refused or it ends."""
-    ends = saved.saved_at + TOKEN_DAYS * 86400
-    until = time.strftime("%d %b %Y", time.localtime(ends))
+    """Keep an app-saved sign-in until the user removes it or Claude refuses it."""
     base = {"installed": True, "lasting": True, "token_saved_at": saved.saved_at}
-    if saved.failed or time.time() > ends:
-        why = saved.failed or f"it ended on {until}"
-        message = f"The saved Claude sign-in was refused ({why}). Sign in again."
+    if saved.failed:
+        message = f"Claude refused the saved sign-in ({saved.failed}). Reconnect this account."
         return {**base, "logged_in": False, "subscription": None, "message": message}
-    message = f"Stays signed in until {until} or until you sign it out."
+    message = "Saved in this app until you sign out. Reconnect if Claude stops accepting it."
     return {
         **base,
         "logged_in": True,

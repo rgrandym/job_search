@@ -84,7 +84,7 @@ CLI did not open it, and the code claude.ai shows on that page is passed back to
 A folder's own Claude sign-in lives in the macOS Keychain and its refresh token is used once:
 concurrent CLI processes on one folder (parallel app calls, VS Code, a terminal) race when it
 renews, and the losers report "not signed in". So Sign in runs `claude setup-token` on a
-pseudo-terminal instead: the year-long token it prints is never renewed, is kept per account
+pseudo-terminal instead: the long-lived token it prints is not renewed by the app, is kept per account
 in `data/claude_tokens.json` (mode 600) and is passed to every call as
 `CLAUDE_CODE_OAUTH_TOKEN` (`claude_accounts.env`). It stays until the user signs the account
 out (`POST /api/claude-code/accounts/{id}/logout`) or removes it. A refused call marks the

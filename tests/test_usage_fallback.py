@@ -130,6 +130,18 @@ def test_rejected_claude_session_fills_window_until_its_reset(tmp_path: Path) ->
     assert (reset.used_percent, reset.status) == (12.0, "allowed")
 
 
+def test_expired_claude_reset_does_not_claim_fresh_usage() -> None:
+    past = time.time() - 3600
+    usage.record_claude_reading("five_hour", 90, past)
+    usage._claude["default"]["observed_at"] = past - 60
+    old = usage.claude_windows().windows[0]
+    assert (old.used_percent, old.resets_at) == (None, None)
+
+    usage.record_claude_reading("five_hour", 15, None)
+    fresh = usage.claude_windows().windows[0]
+    assert (fresh.used_percent, fresh.resets_at) == (15.0, None)
+
+
 USAGE_TEXT = """You are currently using your subscription to power your Claude Code usage
 
 Current session: 76% used · resets Oct 11 at 2:10pm (Europe/London)
@@ -161,15 +173,19 @@ def test_claude_usage_text_is_parsed() -> None:
 def test_claude_windows_are_read_from_usage_and_again_after_a_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from src.core.llm import claude_code_backend
+    from src.core.llm import claude_accounts
+
+    claude_accounts.save_token("default", "saved-test-token", "me@example.com")
 
     reads: list[int] = []
 
-    def text(config_dir: str | None = None) -> str:
+    def get(url: str, token: str) -> dict[str, Any]:
+        if url == usage.CLAUDE_PROFILE_URL:
+            return {"account": {"email": "me@example.com"}}
         reads.append(1)
-        return f"Current session: {10 * len(reads)}% used · resets 11:59pm (UTC)"
+        return {"five_hour": {"utilization": 10 * len(reads)}}
 
-    monkeypatch.setattr(claude_code_backend, "claude_usage_text", text)
+    monkeypatch.setattr(usage, "_claude_oauth_get", get)
     first = usage.plan_windows("claude_code")
     assert first is not None and first.windows[0].used_percent == 10.0
     assert usage.plan_windows("claude_code").windows[0].used_percent == 10.0  # type: ignore[union-attr]
@@ -182,15 +198,19 @@ def test_claude_windows_are_read_from_usage_and_again_after_a_call(
 def test_live_windows_are_read_in_the_background(monkeypatch: pytest.MonkeyPatch) -> None:
     import threading
 
-    from src.core.llm import claude_code_backend
+    from src.core.llm import claude_accounts
+
+    claude_accounts.save_token("default", "saved-test-token", "me@example.com")
 
     release = threading.Event()
 
-    def text(config_dir: str | None = None) -> str:
+    def get(url: str, token: str) -> dict[str, Any]:
+        if url == usage.CLAUDE_PROFILE_URL:
+            return {"account": {"email": "me@example.com"}}
         release.wait(5)
-        return "Current session: 30% used · resets 11:59pm (UTC)"
+        return {"five_hour": {"utilization": 30}}
 
-    monkeypatch.setattr(claude_code_backend, "claude_usage_text", text)
+    monkeypatch.setattr(usage, "_claude_oauth_get", get)
     first = usage.plan_windows("claude_code", live=True)  # returns before `/usage` answers
     assert first is not None and first.windows == []
     release.set()
@@ -201,7 +221,86 @@ def test_live_windows_are_read_in_the_background(monkeypatch: pytest.MonkeyPatch
     assert found is not None and found.windows[0].used_percent == 30.0
 
 
+def test_live_refresh_does_not_start_overlapping_claude_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    from src.core.llm import claude_accounts
+
+    claude_accounts.save_token("default", "saved-test-token", "me@example.com")
+
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[int] = []
+
+    def get(url: str, token: str) -> dict[str, Any]:
+        if url == usage.CLAUDE_PROFILE_URL:
+            return {"account": {"email": "me@example.com"}}
+        calls.append(1)
+        entered.set()
+        release.wait(5)
+        return {"five_hour": {"utilization": 30}}
+
+    monkeypatch.setattr(usage, "_claude_oauth_get", get)
+    usage.plan_windows("claude_code", live=True)
+    assert entered.wait(2)
+    usage._claude_cli["default"]["at"] -= usage.LIVE_TTL_S
+    usage.plan_windows("claude_code", live=True)
+    assert len(calls) == 1
+    release.set()
+    deadline = time.time() + 2
+    while usage._claude_cli["default"].get("reading") and time.time() < deadline:
+        time.sleep(0.01)
+    assert not usage._claude_cli["default"].get("reading")
+
+
+def test_saved_sign_in_uses_current_folder_token_for_plan_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.llm import claude_accounts
+
+    claude_accounts.save_token("default", "setup-token", "me@example.com")
+    monkeypatch.setattr(
+        usage, "_folder_access_token", lambda folder: ("folder-token", time.time() + 3600)
+    )
+    seen: list[str] = []
+
+    def get(url: str, token: str) -> dict[str, Any]:
+        seen.append(token)
+        if url == usage.CLAUDE_PROFILE_URL:
+            return {"account": {"email": "me@example.com"}}
+        return {"five_hour": {"utilization": 64}}
+
+    monkeypatch.setattr(usage, "_claude_oauth_get", get)
+    found = usage.plan_windows("claude_code", email="me@example.com")
+    assert found is not None and found.windows[0].used_percent == 64
+    assert seen == ["folder-token", "folder-token"]
+
+
+def test_live_usage_refuses_to_attribute_another_accounts_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.llm import claude_accounts
+
+    claude_accounts.save_token("default", "saved-token", "me@example.com")
+    calls: list[str] = []
+
+    def get(url: str, token: str) -> dict[str, Any]:
+        calls.append(url)
+        return {"account": {"email": "other@example.com"}}
+
+    monkeypatch.setattr(usage, "_claude_oauth_get", get)
+    found = usage.plan_windows("claude_code", email="me@example.com")
+    assert found is not None and found.windows == []
+    assert "different Claude account" in found.note
+    assert calls == [usage.CLAUDE_PROFILE_URL]
+
+
 def test_an_unreadable_usage_keeps_what_the_calls_reported() -> None:
+    from src.core.llm import claude_accounts
+
+    claude_accounts.save_token("default", "saved-test-token")
     usage.record_claude_limit(
         {"rateLimitType": "seven_day", "status": "allowed_warning", "utilization": 0.77}
     )

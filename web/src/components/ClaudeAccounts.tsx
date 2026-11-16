@@ -9,14 +9,14 @@ import { SignInHelp } from "./SignInHelp";
 
 // Several Claude plan accounts for Claude Code (each its own Claude Code folder). Calls use the
 // first account whose limit is not spent and move to the next one when it is; only when every
-// account is spent does work go to the other plan (Codex). Signing in here keeps a year-long
-// sign-in for the account, so it stays signed in until signed out. Backend: `core/llm/claude_accounts`.
+// account is spent does work go to the other plan (Codex). Signing in here saves a long-lived
+// token until sign-out or removal (Claude can refuse it). Backend: `core/llm/claude_accounts`.
 
 /** "5h 40% · 7d 12%" for an account's plan windows. */
 export function windowsLine(w: PlanWindows | null) {
   if (!w || !w.windows.length) return "";
   return w.windows
-    .map((win) => `${win.name} ${win.status === "rejected" ? "spent" : win.used_percent == null ? "ok" : `${Math.round(win.used_percent)}%`}`)
+    .map((win) => `${win.name} ${win.status === "rejected" ? "spent" : win.used_percent == null ? "usage unknown" : `${Math.round(win.used_percent)}%`}`)
     .join(" · ");
 }
 
@@ -59,11 +59,14 @@ function AccountRow({
       <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
         <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", !a.signed_in ? "bg-bad" : a.exhausted_until ? "bg-warn" : "bg-good")} />
         <span className="min-w-0 truncate font-medium text-fg">{a.label}</span>
+        <span className={cn("chip", a.signed_in ? "text-good" : "text-bad")}>
+          {a.signed_in ? "Connected" : "Not connected"}
+        </span>
         {a.active && <span className="chip text-accent">in use now</span>}
         {a.exhausted_until && <span className="chip text-warn">limit reached · back {clockLabel(a.exhausted_until)}</span>}
         <span className="ml-auto flex shrink-0 items-center gap-1">
           <button type="button" className="btn-ghost px-2 py-1 text-[12px]" disabled={busy} onClick={onSignIn} title="Open the claude.ai sign-in page for this account">
-            <LogIn size={12} /> {a.signed_in ? "Sign in again" : "Sign in"}
+            <LogIn size={12} /> {a.signed_in ? (a.lasting ? "Reconnect" : "Keep signed in") : "Sign in"}
           </button>
           {a.lasting && (
             <button type="button" className="btn-ghost px-1.5 py-1" disabled={busy} onClick={onSignOut} title="Sign this account out of the app" aria-label="Sign out">
@@ -85,7 +88,13 @@ function AccountRow({
       {a.signed_in && a.lasting && <p className="text-[11px] text-faint">{a.message}</p>}
       {a.signed_in && !a.lasting && (
         <p className="text-[11px] text-warn">
-          Signed in through its Claude Code folder, which can sign out when other programs use Claude. Press Sign in again once to keep it signed in.
+          Signed in through its Claude Code folder. Click Keep signed in to save a sign-in for this account and avoid refresh races with other Claude Code sessions.
+        </p>
+      )}
+      {a.signed_in && (
+        <p className="text-[10px] text-faint">
+          Live usage refreshes about every 20 seconds
+          {a.windows?.updated_at ? ` · last read ${clockLabel(a.windows.updated_at)}` : " · awaiting a reading"}
         </p>
       )}
       {a.same_as && (

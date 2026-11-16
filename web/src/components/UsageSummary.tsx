@@ -59,7 +59,7 @@ function WindowLine({ win, now, threshold }: { win: PlanWindow; now: number; thr
       ? `${Math.round(share)}% left`
       : win.status === "allowed_warning"
         ? "nearing limit"
-        : "within limit";
+        : "usage unknown";
   return (
     <div className="flex items-center gap-2 text-[11px]">
       <span className="w-14 shrink-0 text-faint">{WINDOW_LABEL[win.name] ?? win.name}</span>
@@ -99,13 +99,14 @@ function AccountUsage({ a, now, threshold }: { a: ClaudeAccount; now: number; th
         <span className={a.active ? "font-medium text-fg" : "text-muted"}>{a.label}</span>
         {a.active && <span className="chip">in use</span>}
         {a.email && <span className="min-w-0 truncate text-faint">{a.email}</span>}
-        {/* Idle accounts are read once (see `usage.plan_windows`), so their age says nothing. */}
         <span className={cn("ml-auto shrink-0", state ? "text-warn" : "text-faint")}>
-          {state || (a.active ? readAgo(a.windows?.updated_at ?? null, now) : "not in use")}
+          {state || `${a.active ? "" : "not in use · "}${readAgo(a.windows?.updated_at ?? null, now) || "reading usage…"}`}
         </span>
       </div>
       {windows.map((w) => <WindowLine key={w.name} win={w} now={now} threshold={threshold} />)}
-      {a.signed_in && !windows.length && <p className="text-[10px] text-faint">{a.windows?.note || "Reading usage…"}</p>}
+      {a.signed_in && (a.windows?.note || !windows.length) && (
+        <p className="text-[10px] text-faint">{a.windows?.note || "Reading usage…"}</p>
+      )}
     </div>
   );
 }
