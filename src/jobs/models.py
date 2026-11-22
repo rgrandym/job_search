@@ -410,6 +410,11 @@ class ProfileSummary(_Strict):
     target_roles: list[str] = Field(description="Roles they fit now, incl. adjacent titles")
     stretch_roles: list[str] = Field(default_factory=list)
     not_a_fit: list[str] = Field(description="Role types to reject, with a short reason each")
+    evidence_gaps: list[str] = Field(
+        default_factory=list,
+        description="Requirements the CV does not evidence: a gap the matcher states, never a "
+        "reason to reject a role the candidate is otherwise interested in",
+    )
     search_keywords: list[str] = Field(default_factory=list)
     summary: str = Field(description="4-6 sentence narrative")
     role_families: list[RoleFamily] = Field(

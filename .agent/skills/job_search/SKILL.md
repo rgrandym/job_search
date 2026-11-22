@@ -456,11 +456,19 @@ updated.
 - **Learned preferences** (`services/learning.py`, `data/learned_preferences.json`, per CV):
   Evidence is your labels with their notes plus the reason and note on applied jobs (read as
   "yes") and N/A jobs (read as "no"). **At the start of each search** (`learn_new`), evidence
-  not read before (a new or changed note or reason) goes to the quality model once, and the
-  proposals that pass code's checks are accepted at once (`auto`, removable like any other).
+  not read before (a new or changed note or reason) goes to the quality model once. A proposal
+  that **widens** the search (`target_role`, `transferable_strength`, `adjacent_family`,
+  `requirement_gap`) and passes code's checks is accepted at once (`auto`, removable like any
+  other); one that would **narrow** it (`not_a_fit`, `seniority_floor`) is left pending for the
+  user's yes and is reported by the search (user's decision 2026-11-22: a wrong inclusion costs
+  one job to skip, a wrong exclusion silently hides every role of that kind from every later
+  search).
   "Your labels" > *Suggest profile updates* asks the quality model to turn all of it into
-  general preferences for you to review: `requirement_gap`, `seniority_floor`, `not_a_fit` (added to
-  `not_a_fit`), `target_role`, `transferable_strength`, and `adjacent_family` (a role family
+  general preferences for you to review: `seniority_floor` and `not_a_fit` (added to
+  `not_a_fit`), `requirement_gap` (added to `evidence_gaps`: a gap the matcher states, never a
+  reason to reject a role — user's decision 2026-11-22, measured: routing gaps into `not_a_fit`
+  made them dealbreakers and cost 4 of 20 labelled "would apply" jobs, including roles the user
+  had also accepted as targets), `target_role`, `transferable_strength`, and `adjacent_family` (a role family
   searched when widening; accepting it adds it to the intent's target areas). Code checks each
   one (cites labels pointing its way, names no employer, a gap never names a profile skill, no
   repeats, families pass `check_families`); the user accepts, rewords or rejects it. Accepted

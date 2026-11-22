@@ -119,6 +119,9 @@ def test_command_is_headless_toolless_and_skips_haiku_effort(
     assert "--strict-mcp-config" in sonnet
     assert sonnet[sonnet.index("--effort") + 1] == "medium"
     assert "--effort" not in haiku
+    # Haiku 5.5 does take an effort level, unlike 4.5
+    haiku55 = backend._command("/bin/claude", cfg, "claude-haiku-5-5", "sys", {"type": "object"})
+    assert haiku55[haiku55.index("--effort") + 1] == "medium"
     assert "--no-chrome" in sonnet  # Claude in Chrome must never start the user's Chrome
 
 

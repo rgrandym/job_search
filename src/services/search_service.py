@@ -777,8 +777,20 @@ async def _learn_from_reasons(ws: Workspace, emit: Emit, usage_sink: UsageSink |
         await _say(emit, "summary", f"Could not learn from your labels this time: {exc}")
         return
     if learned:
-        added = "; ".join(p.text for p in learned)
-        await _say(emit, "summary", f"Added to your profile from your labels and reasons: {added}")
+        applied = [p for p in learned if p.status == "accepted"]
+        waiting = [p for p in learned if p.status == "pending"]
+        if applied:
+            added = "; ".join(p.text for p in applied)
+            await _say(
+                emit, "summary", f"Added to your profile from your labels and reasons: {added}"
+            )
+        if waiting:  # an exclusion hides later jobs, so the user decides it
+            held = "; ".join(p.text for p in waiting)
+            await _say(
+                emit,
+                "summary",
+                f"Waiting for your yes in Your labels (these would rule roles out): {held}",
+            )
     elif learned is not None:
         await _say(emit, "summary", "Read your new labels and reasons: nothing new to add")
 

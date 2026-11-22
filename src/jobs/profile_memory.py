@@ -367,6 +367,7 @@ def profile_markdown(rec: ProfileRecord) -> str:
         ("Target roles", s.target_roles),
         ("Stretch roles", s.stretch_roles),
         ("Not a fit", s.not_a_fit),
+        ("Not evidenced in the CV (a gap, never a dealbreaker)", s.evidence_gaps),
         ("Search keywords", s.search_keywords),
     ]:
         section(title, items)

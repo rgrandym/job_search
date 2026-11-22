@@ -42,6 +42,7 @@ import asyncio
 import json
 import time
 import tomllib
+from collections import Counter
 from collections.abc import Callable
 from datetime import date
 from pathlib import Path
@@ -93,6 +94,14 @@ class ComparePlan(BaseModel):
     )
     learned: bool = Field(False, description="Apply the preferences accepted from your labels")
     labels_since: date | None = Field(None, description="Only labels given on or after this")
+    threshold: float | None = Field(
+        None,
+        ge=0,
+        le=100,
+        description="Score every label at this listing floor instead of the one stored with it",
+    )
+    max_yes: int | None = Field(None, gt=0, description="Cap the 'yes' labels: a faster sweep")
+    max_no: int | None = Field(None, gt=0, description="Cap the 'no' labels: a faster sweep")
     baseline: list[str] = Field(default_factory=list)
     setups: list[str | SetupSpec] = Field(min_length=1)
 
@@ -305,6 +314,41 @@ def labelled_jobs(
     return items, store.profiles
 
 
+def group_key(item: labels.LabelledJob, threshold: float | None = None) -> tuple[str, str, float]:
+    """A label is screened with the profile, filters and threshold it was given under: labels
+    sharing all three are screened together, in one call per batch of postings. `threshold`
+    overrides the stored one, which merges groups that differed only by it."""
+    floor = item.threshold if threshold is None else threshold
+    return (item.profile_key or "", item.query.model_dump_json(), floor)
+
+
+def balanced(
+    items: list[labels.LabelledJob], max_yes: int | None, max_no: int | None
+) -> list[labels.LabelledJob]:
+    """At most `max_yes` "yes" and `max_no` "no" labels, taken from the largest label groups
+    first. Deterministic, so every setup in a sweep is scored on the same labels.
+
+    Drawing from the biggest groups is what makes a smaller sample faster than its size
+    suggests: groups are screened one after another, so a long tail of groups holding one or
+    two labels costs a whole call each. It also narrows the sample to a few searches, so the
+    numbers measure those searches rather than the whole label history.
+    """
+    if max_yes is None and max_no is None:
+        return items
+    sizes = Counter(group_key(x) for x in items)
+    caps = {"yes": max_yes, "no": max_no}
+    keep: set[int] = set()
+    for verdict, cap in caps.items():
+        of_class = [x for x in items if x.label == verdict]
+        if cap is None or len(of_class) <= cap:
+            keep |= {id(x) for x in of_class}
+            continue
+        # Biggest group first; the job id keeps it stable inside a group.
+        ranked = sorted(of_class, key=lambda x: (-sizes[group_key(x)], x.job.id))
+        keep |= {id(x) for x in ranked[:cap]}
+    return [x for x in items if id(x) in keep]
+
+
 async def compare_labels(
     items: list[labels.LabelledJob],
     profiles: dict[str, ProfileSummary],
@@ -313,26 +357,27 @@ async def compare_labels(
     context: tuple[str, Callable[[SearchQuery], str]] = ("", lambda _: ""),
     progress: compare_usage.Progress | None = None,
     adjust: Callable[[ProfileSummary], ProfileSummary] = lambda s: s,
+    threshold: float | None = None,
 ) -> LabelCompareReport:
     """Re-screen `items` with one setup, each group with the summary, constraints and
     threshold its labels were given under; `context` is (career intent text, location base);
-    `adjust` changes each profile first (e.g. adds your learned preferences)."""
+    `adjust` changes each profile first (e.g. adds your learned preferences). `threshold`
+    scores every label at that floor instead of the stored one (the floor searches now use)."""
     t0 = time.monotonic()
     intent, base_for = context
     groups: dict[tuple[str, str, float], list[labels.LabelledJob]] = {}
     for x in items:
-        key = (x.profile_key or "", x.query.model_dump_json(), x.threshold)
-        groups.setdefault(key, []).append(x)
+        groups.setdefault(group_key(x, threshold), []).append(x)
     scored: list[labels.LabelledJob] = []
     errors: list[str] = []
-    for g, ((profile_key, _, threshold), group) in enumerate(groups.items()):
+    for g, ((profile_key, _, floor), group) in enumerate(groups.items()):
         query = group[0].query
         verdicts, errs = await screen_jobs(
             adjust(profiles[profile_key]),
             [x.job for x in group],
             llm_for("screening"),
             query,
-            threshold=threshold,
+            threshold=floor,
             base=base_for(query),
             intent=intent,
             review_llm=llm_for("quality"),
@@ -361,6 +406,7 @@ def run_labels(
     prices: dict[str, tuple[float, float]] | None = None,
     label: str = "",
     learned: bool = False,
+    threshold: float | None = None,
 ) -> LabelCompareReport:
     """Score `cfg` against your labels, as the app would screen (intent and location), with
     its cost per model and the plan usage measured around it."""
@@ -388,6 +434,7 @@ def run_labels(
                 context,
                 bar,
                 lambda s: learning.apply_learned(s, prefs, cv, intent),
+                threshold,
             )
         )
     finally:
@@ -537,11 +584,16 @@ def main(argv: list[str] | None = None) -> None:
 
 def _main_labels(ws: Workspace, configs: list[LLMConfig], as_json: bool, plan: ComparePlan) -> None:
     items, profiles = labelled_jobs(ws, plan.labels_since)
+    items = balanced(items, plan.max_yes, plan.max_no)
     if not items:
         raise SystemExit("No 'yes' or 'no' labels (in that period): label jobs in the app first.")
     yes = sum(x.label == "yes" for x in items)
     if not as_json:
         since = f" since {plan.labels_since}" if plan.labels_since else ""
+        caps = [f"{n} {k}" for k, n in (("yes", plan.max_yes), ("no", plan.max_no)) if n]
+        since += f" · sampled, at most {' and '.join(caps)}" if caps else ""
+        since += f" · {len({group_key(x, plan.threshold) for x in items})} label group(s)"
+        since += f" · threshold {plan.threshold:g}" if plan.threshold is not None else ""
         learned = len([p for p in learning.load(ws) if p.status == "accepted"])
         prefs = f" · with your {learned} learned preference(s)" if plan.learned else ""
         print(
@@ -551,7 +603,9 @@ def _main_labels(ws: Workspace, configs: list[LLMConfig], as_json: bool, plan: C
     reports: list[LabelCompareReport] = []
     for i, cfg in enumerate(configs, 1):
         label = f"setup {i}/{len(configs)}"
-        reports.append(run_labels(ws, cfg, items, profiles, plan.prices, label, plan.learned))
+        reports.append(
+            run_labels(ws, cfg, items, profiles, plan.prices, label, plan.learned, plan.threshold)
+        )
         if not as_json:
             print(f"\n{_label_text(reports[-1])}", flush=True)  # sweeps are slow: show each
     if as_json:

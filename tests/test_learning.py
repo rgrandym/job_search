@@ -195,7 +195,7 @@ async def _quiet(kind: str, payload: dict[str, object]) -> None:
     return None
 
 
-def test_new_reasons_are_learned_once_and_go_straight_into_the_profile(
+def test_new_reasons_are_read_once_and_an_exclusion_waits_for_the_user(
     ws: Workspace, master_cv: MasterCV
 ) -> None:
     _labelled(ws, master_cv)
@@ -212,10 +212,14 @@ def test_new_reasons_are_learned_once_and_go_straight_into_the_profile(
 
     learned = learning.learn_new(ws, fake)  # type: ignore[arg-type]
     assert learned is not None and [p.text for p in learned] == [floor.text]
-    assert learned[0].status == "accepted" and learned[0].auto
+    # An N/A reason proposes an exclusion, and an exclusion is the user's call: it is read
+    # from the reason once, then waits (user's decision 2026-11-22).
+    assert learned[0].status == "pending" and not learned[0].auto
     assert "ruled out (N/A): site monitoring travel" in fake.calls[0][0]
     summary = learning.learned_for(ws, SUMMARY, master_cv)
-    assert floor.text in summary.not_a_fit  # every later search's profile carries it
+    assert floor.text not in summary.not_a_fit  # not in force until accepted
+    learning.decide(ws, learned[0].id, True)
+    assert floor.text in learning.learned_for(ws, SUMMARY, master_cv).not_a_fit
 
     assert learning.learn_new(ws, fake) is None  # nothing new: no model call
     assert len(fake.calls) == 1
@@ -235,3 +239,62 @@ def test_a_job_can_be_deleted_from_the_results_and_its_search(
     _, outcome = history.open_entry(ws, entry_id)
     assert "n2" not in {r.job.id for r in outcome.report.all_results()}
     assert not search_service.remove_result(ws, "n2", entry_id)
+
+
+def test_a_requirement_gap_is_a_gap_not_a_rejected_role(ws: Workspace, master_cv: MasterCV) -> None:
+    """User's decision 2026-11-22: "not evidenced in my CV" states a gap for the matcher; it
+    never joins `not_a_fit`, where it became a dealbreaker and dropped roles the user had also
+    accepted as targets. A proposal still has to cite a job they said no to."""
+    _labelled(ws, master_cv)
+    items = {x.job_id: x for x in labels.load(ws).labels}
+    gap = DraftPreference(
+        kind="requirement_gap",
+        text="Roles whose core requirement is hands-on statistical genetics",
+        label_ids=["n1"],
+    )
+    kept, aside = learning._vet([gap], items, SUMMARY, [], master_cv)
+    assert kept == [gap] and aside == []  # learned from a "no", as before
+
+    pref = learning.LearnedPreference(
+        id="g1",
+        kind="requirement_gap",
+        text=gap.text,
+        status="accepted",
+        label_ids=["n1"],
+        created_at="2026-11-22T00:00:00",
+    )
+    used = learning.apply_learned(SUMMARY, [pref], master_cv)
+    assert gap.text in used.evidence_gaps  # stated as a gap
+    assert gap.text not in used.not_a_fit  # never a reason to reject the role
+    assert learning.apply_learned(used, [pref], master_cv) == used  # idempotent
+
+
+def test_a_search_applies_widening_preferences_but_holds_exclusions(
+    ws: Workspace, master_cv: MasterCV
+) -> None:
+    """User's decision 2026-11-22: `learn_new` applies what widens the search at once and
+    leaves what narrows it pending, because a wrong exclusion hides jobs from every later
+    search while a wrong inclusion costs one job to skip."""
+    _labelled(ws, master_cv)
+    drafts = [
+        DraftPreference(
+            kind="target_role", text="Head of Computational Biology roles", label_ids=["y1"]
+        ),
+        DraftPreference(
+            kind="not_a_fit", text="Roles centred on plant biotechnology", label_ids=["n1"]
+        ),
+    ]
+    llm = FakeLLM({DraftPreferences: DraftPreferences(proposals=drafts)})
+    new = learning.learn_new(ws, llm)  # type: ignore[arg-type]
+    assert new is not None
+    by_kind = {p.kind: p for p in new}
+    assert by_kind["target_role"].status == "accepted" and by_kind["target_role"].auto
+    assert by_kind["not_a_fit"].status == "pending"  # the user decides an exclusion
+    assert by_kind["not_a_fit"].auto is False and by_kind["not_a_fit"].decided_at is None
+
+    st = learning.state(ws)
+    assert [p.kind for p in st.pending] == ["not_a_fit"]
+    assert (
+        "Roles centred on plant biotechnology"
+        not in learning.learned_for(ws, SUMMARY, master_cv).not_a_fit
+    )  # not in force until accepted

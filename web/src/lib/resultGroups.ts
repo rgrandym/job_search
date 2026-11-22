@@ -8,8 +8,9 @@ export function isAdjacentPossibility(result: MatchResult): boolean {
     verdict.fit_score >= 40 && verdict.transferable.some((point) => point.trim().length > 0);
 }
 
-/** Below 40, neither the AI fit score nor the deterministic pre-filter score is useful for
- * manual review. Excluded jobs are handled in their own list. */
+/** The score a "not selected" job is reviewed by. Below 40 an *unscreened* job's pre-filter
+ * score says too little to review by hand; a job the matcher judged is listed whatever it
+ * scored (user's decision 2026-11-22). Excluded jobs are handled in their own list. */
 export function reviewScore(result: MatchResult): number {
   return result.verdict?.fit_score ?? result.score?.total ?? 0;
 }

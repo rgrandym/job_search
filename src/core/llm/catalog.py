@@ -41,7 +41,15 @@ CLAUDE: list[tuple[str, str, int, float, float, str]] = [
     ),
     ("claude-fable-5-1", "Claude Fable 5.1", 1_000_000, 10, 50, "Most capable; long turns"),
     ("claude-fable-5", "Claude Fable 5", 1_000_000, 10, 50, ""),
-    ("claude-haiku-4-5", "Claude Haiku 4.5", 200_000, 1, 5, "Cheapest; no effort control"),
+    (
+        "claude-haiku-5-5",
+        "Claude Haiku 5.5",
+        1_000_000,
+        0.1,
+        0.5,
+        "Cheapest; effort from low (prices up to a 100k prompt)",
+    ),
+    ("claude-haiku-4-5", "Claude Haiku 4.5", 200_000, 1, 5, "Older Haiku; no effort control"),
 ]
 
 

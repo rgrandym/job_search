@@ -5,7 +5,9 @@ summary. So your labels become *general* profile preferences, proposed by the qu
 checked by code and accepted (or edited, or rejected) by you:
 
 - requirement_gap   a capability area postings require that your CV does not show
-                    ("hands-on statistical genetics") -> not_a_fit
+                    ("hands-on statistical genetics")                      -> evidence_gaps
+                    (a gap the matcher states, never a reason to reject a role you want:
+                    user's decision 2026-11-22)
 - seniority_floor   roles below your level ("postdoc or fixed-term research posts") -> not_a_fit
 - not_a_fit         another kind of role you reject                              -> not_a_fit
 - target_role       a role type you would take now                            -> target_roles
@@ -21,7 +23,9 @@ you rejected, and an adjacent family passes the same CV-evidence checks as any o
 
 Evidence is your labels with their notes, plus the reasons and notes on jobs you applied for
 (read as "yes") or marked N/A (read as "no"). Each search first learns from evidence it has not
-read yet (`learn_new`): proposals that pass the checks are accepted at once, marked `auto`, and
+read yet (`learn_new`): proposals that widen the search and pass the checks are accepted at
+once, marked `auto`; ones that would narrow it (`not_a_fit`, `seniority_floor`) wait for the
+user's yes in "Your labels" (user's decision 2026-11-22), and
 you can remove any of them (removed ones are never proposed again). "Suggest profile updates"
 still proposes from all the evidence for you to review.
 
@@ -58,7 +62,14 @@ Kind = Literal[
     "transferable_strength",
     "adjacent_family",
 ]
-EXCLUDING: set[str] = {"requirement_gap", "seniority_floor", "not_a_fit"}
+# A role the user rejects. A `requirement_gap` is deliberately NOT here (user's decision
+# 2026-11-22): "not evidenced in my CV" is a gap to state, not a role to refuse. Pouring gaps
+# into `not_a_fit` made the matcher raise them as dealbreakers, so roles the user had also
+# accepted as targets (AD Disease and Target Biology, Principal Data Scientist) were dropped.
+EXCLUDING: set[str] = {"seniority_floor", "not_a_fit"}
+GAPS: set[str] = {"requirement_gap"}
+# Kinds learned from a job you said no to (a gap included): what a proposal must cite.
+NEGATIVE: set[str] = EXCLUDING | GAPS
 MAX_PROPOSALS = 8
 
 SYSTEM = """You turn a job seeker's own calls on job postings into GENERAL preferences that \
@@ -205,6 +216,7 @@ def apply_learned(
     merged = summary.model_copy(
         update={
             "not_a_fit": add(summary.not_a_fit, EXCLUDING),
+            "evidence_gaps": add(summary.evidence_gaps, GAPS),
             "target_roles": add(summary.target_roles, {"target_role"}),
             "transferable_strengths": add(
                 summary.transferable_strengths, {"transferable_strength"}
@@ -262,9 +274,9 @@ def _vet(
         problem = None
         if not cited:
             problem = "cites no labelled job"
-        elif d.kind in EXCLUDING and "no" not in calls:
+        elif d.kind in NEGATIVE and "no" not in calls:
             problem = "an exclusion needs a job you said no to"
-        elif d.kind not in EXCLUDING and "yes" not in calls:
+        elif d.kind not in NEGATIVE and "yes" not in calls:
             problem = "an addition needs a job you would apply for"
         elif any(c in d.text.casefold() for c in companies):
             problem = "names an employer: it would not hold beyond one posting"
@@ -398,8 +410,14 @@ def _read(ws: Workspace) -> dict[str, list[str]]:
 
 
 def learn_new(ws: Workspace, llm: LLMProvider) -> list[LearnedPreference] | None:
-    """Learn from labels and reasons not read yet (a note or reason says why): proposals that
-    pass the checks go straight into the profile. None when there was nothing new to read."""
+    """Learn from labels and reasons not read yet (a note or reason says why). A preference
+    that *widens* the search is applied at once; one that *narrows* it waits for the user
+    (user's decision 2026-11-22). None when there was nothing new to read.
+
+    The two directions carry different risk: a wrong inclusion costs one job to skip, a wrong
+    exclusion silently hides every role of that kind from every later search, so only the
+    user turns a reason into a rejection.
+    """
     items, store = _evidence_items(ws)
     seen = set(_read(ws).get(_owner(ws), []))
     fresh = [x for x in items if x.note.strip() and _fingerprint(x) not in seen]
@@ -409,13 +427,16 @@ def learn_new(ws: Workspace, llm: LLMProvider) -> list[LearnedPreference] | None
     now = datetime.now(UTC).isoformat(timespec="seconds")
     new = [
         LearnedPreference(
-            id=uuid.uuid4().hex[:10], created_at=now, decided_at=now, status="accepted",
-            auto=True, **d.model_dump(),
+            id=uuid.uuid4().hex[:10], created_at=now,
+            decided_at=None if d.kind in EXCLUDING else now,
+            status="pending" if d.kind in EXCLUDING else "accepted",
+            auto=d.kind not in EXCLUDING, **d.model_dump(),
         )
         for d in kept
     ]  # fmt: skip
     for pref in new:
-        _on_accept(ws, pref)
+        if pref.status == "accepted":
+            _on_accept(ws, pref)
     _save(ws, [*known, *new])
     read = _read(ws) | {_owner(ws): sorted(seen | {_fingerprint(x) for x in items if x.note})}
     _read_path(ws).write_text(json.dumps(read, indent=1), encoding="utf-8")

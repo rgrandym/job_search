@@ -436,3 +436,48 @@ def test_an_independent_grader_reads_the_tailored_cv(
     assert grader.calls and not any(m is not JDAnalysis and m is not TailoringPlan
                                     for _, m in writer.calls)  # fmt: skip
     assert any("fit check could not run" in n for n in tailored.document_notes)
+
+
+def test_compare_plan_takes_a_balanced_sample_from_the_biggest_groups() -> None:
+    """`max_yes`/`max_no` make a sweep cheaper: each class is capped, labels are drawn from the
+    largest label groups first (a group costs a call of its own), and the pick is stable."""
+    from src.jobs.models import SearchQuery
+    from src.services.labels import LabelledJob
+
+    def label(i: int, verdict: str, group: str) -> LabelledJob:
+        job = type("J", (), {"id": f"j{i}"})()
+        return LabelledJob.model_construct(
+            label=verdict, job=job, profile_key=group, threshold=60.0, query=SearchQuery()
+        )
+
+    # group "big": 6 yes + 6 no · groups "s0".."s3": one yes and one no each
+    items = [label(i, "yes" if i % 2 else "no", "big") for i in range(12)]
+    items += [label(100 + i, "yes" if i % 2 else "no", f"s{i // 2}") for i in range(8)]
+
+    picked = model_compare.balanced(items, 4, 4)
+    assert sum(x.label == "yes" for x in picked) == 4
+    assert sum(x.label == "no" for x in picked) == 4
+    # all of it came from the biggest group, so the sweep screens one group, not five
+    assert {model_compare.group_key(x)[0] for x in picked} == {"big"}
+    assert [x.job.id for x in model_compare.balanced(items, 4, 4)] == [x.job.id for x in picked]
+    assert model_compare.balanced(items, None, None) == items  # no caps: untouched
+    assert model_compare.balanced(items, 99, 99) == items  # caps above the counts: untouched
+
+
+def test_compare_plan_threshold_overrides_the_stored_one() -> None:
+    """`threshold` scores labels at the floor searches use now, not the one they were saved
+    with, and merges groups that differed only by that floor (one call instead of two)."""
+    from src.jobs.models import SearchQuery
+    from src.services.labels import LabelledJob
+
+    def label(i: int, floor: float) -> LabelledJob:
+        job = type("J", (), {"id": f"j{i}"})()
+        return LabelledJob.model_construct(
+            label="yes", job=job, profile_key="p", threshold=floor, query=SearchQuery()
+        )
+
+    old, new = label(1, 60.0), label(2, 70.0)
+    assert model_compare.group_key(old) != model_compare.group_key(new)  # stored floors differ
+    assert model_compare.group_key(old, 50.0) == model_compare.group_key(new, 50.0)
+    assert model_compare.group_key(old, 50.0)[2] == 50.0
+    assert model_compare.group_key(old)[2] == 60.0  # no override: the stored floor

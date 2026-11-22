@@ -551,13 +551,16 @@ function SearchResults({ hasCv, savedAt, tracked, focus }: {
   const isMoved = (r: MatchResult) => savedAt.has(r.job.id) || isApplied(r);
   const movedToSaved = [...rep.matches, ...(rep.to_check ?? []), ...rep.below_threshold, ...rep.excluded, ...(rep.dismissed ?? [])]
     .filter((r) => savedAt.has(r.job.id) && !isApplied(r)).length;
-  const below = rep.below_threshold.filter((r) => !isMoved(r) && reviewScore(r) >= 40);
+  // A job the matcher actually judged is always listed: the 40-point floor only hides jobs
+  // that were never screened (their pre-filter score says little). User's decision 2026-11-22.
+  const below = rep.below_threshold.filter((r) => !isMoved(r) && (!!r.verdict || reviewScore(r) >= 40));
   const adjacent = rep.screened ? below.filter(isAdjacentPossibility) : [];
   const listed = tab === "adjacent" ? adjacent :
     tab === "not_screened" ? below.filter((r) => !r.verdict) :
     tab === "below_threshold" && rep.screened ? below.filter((r) => !!r.verdict && !isAdjacentPossibility(r)) :
       (rep[tab] ?? []).filter((r) => !isMoved(r));
-  // A job found with "Find in lists" is shown even when its list hides it (fit below 40).
+  // A job found with "Find in lists" is shown even when its list hides it (never screened,
+  // pre-filter score below 40).
   const focused = focus?.tab === tab && !listed.some((r) => r.job.id === focus.jobId)
     ? rep.below_threshold.find((r) => r.job.id === focus.jobId)
     : undefined;
