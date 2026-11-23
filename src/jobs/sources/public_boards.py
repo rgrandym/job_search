@@ -425,6 +425,7 @@ class JobsAcUkSource:
         uk_only("jobs.ac.uk", query)
         jobs: dict[str, JobPosting] = {}
         today = date.today()
+        first = True
         for term in query.search_terms():
             for page in range(self.max_pages):
                 params = {
@@ -434,6 +435,12 @@ class JobsAcUkSource:
                 }
                 body = self.http.get(f"{JOBS_AC_UK}/search/", params=params, check_robots=True)
                 cards = parse_jobs_ac_uk(body.text, today)
+                if first and not cards and not _jobs_ac_uk_empty(body.text):
+                    raise SourceError(
+                        "jobs.ac.uk search page returned no result cards and no 'no jobs found' "
+                        "notice: its layout has probably changed (parse_jobs_ac_uk)"
+                    )
+                first = False
                 for job in cards:
                     jobs.setdefault(job.id, job)
                 if len(cards) < self.page_size:
@@ -468,6 +475,19 @@ def _day_month(text: str, today: date, *, future: bool) -> date | None:
     if not future and parsed > today:
         return parsed.replace(year=today.year - 1)
     return parsed
+
+
+_JOBS_AC_UK_EMPTY_RE = re.compile(
+    r"no jobs? (?:were )?found|no (?:matching|search) results|found 0 jobs|0 jobs? found"
+    r"|no results (?:were )?found|sorry,? no",
+    re.IGNORECASE,
+)
+
+
+def _jobs_ac_uk_empty(page: str) -> bool:
+    """Whether a search page says it genuinely found nothing, rather than having changed shape
+    under a parser pinned to its CSS classes (site rebuilt 2026-11)."""
+    return bool(_JOBS_AC_UK_EMPTY_RE.search(html_to_text(page)))
 
 
 def parse_jobs_ac_uk(page: str, today: date) -> list[JobPosting]:

@@ -56,7 +56,7 @@ from src.jobs.profile_memory import (
     summarize_profile,
 )
 from src.jobs.screener import VerdictCache, apply_verdicts, screen_jobs
-from src.jobs.sources.base import HttpFetcher, SourceError
+from src.jobs.sources.base import HttpFetcher, SourceError, site_unavailable
 from src.jobs.sources.browser import BrowserFetcher
 from src.jobs.sources.companies import EmployerFeedReader
 from src.jobs.sources.gmail_alerts import GmailAlertSource, GmailAuth
@@ -379,7 +379,7 @@ async def _retry(
 ) -> SearchOutcome:
     t0 = time.monotonic()
     req, outcome = history.open_entry(ws, history_id)
-    failed = [s.name for s in outcome.sources if s.status == "failed"]
+    failed = [s.name for s in outcome.sources if s.status == "failed" or _unavailable(s)]
     wanted = [name for name in (names or failed) if name in failed]
     if not wanted:
         raise ValueError("No failed source to search again in this search")
@@ -396,6 +396,11 @@ async def _retry(
     labels.attach_verdicts(ws, outcome.report, ws.last_models)
     ws.last_report = outcome.report
     return await _finish(outcome, emit)
+
+
+def _unavailable(src: SourceReport) -> bool:
+    """A source skipped because its site was down: worth searching again when it is back."""
+    return src.status == "skipped" and site_unavailable(src.detail)
 
 
 async def _unseen(known: MatchReport, jobs: list[JobPosting], emit: Emit) -> list[JobPosting]:
@@ -1470,7 +1475,11 @@ async def _fetch_source(
     )
     counts |= found_counts
     if src.name in failed:
-        message, status = f"{label} failed: {failed[src.name]}", "failed"
+        why = failed[src.name]
+        if site_unavailable(why):  # the host is down, not the source broken
+            message, status = f"{label}: {why}", "skipped"
+        else:
+            message, status = f"{label} failed: {why}", "failed"
     else:
         message, status = f"{label}: {counts.get(src.name, 0)} postings", "done"
     await _say(emit, "capture", message, source=src.name, status=status)
@@ -1515,11 +1524,18 @@ def _source_report(
     errors: dict[str, str],
     skipped: dict[str, str],
 ) -> list[SourceReport]:
-    """Which sources ran, how many postings each returned, and which failed or were skipped."""
+    """Which sources ran, how many postings each returned, and which failed or were skipped.
+
+    A host that served its own maintenance page is reported skipped, not failed: nothing is
+    broken here and the detail says so plainly instead of quoting a 500 (user's decision
+    2026-11-23). It stays retryable, since the site comes back.
+    """
     report: list[SourceReport] = []
     for src in sources:
         if src.name in errors:
-            report.append(SourceReport(name=src.name, status="failed", detail=errors[src.name]))
+            why = errors[src.name]
+            status = "skipped" if site_unavailable(why) else "failed"
+            report.append(SourceReport(name=src.name, status=status, detail=why))
             continue
         partial = sum(1 for key in errors if key.startswith(f"{src.name}:"))
         report.append(

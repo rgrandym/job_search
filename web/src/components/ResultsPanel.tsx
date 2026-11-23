@@ -62,6 +62,10 @@ const SOURCE_NAMES: Record<string, string> = {
 /** A failure the user fixes by signing in again, not by retrying. */
 const needsSignIn = (src: SourceReport) => src.status === "failed" && /reconnect|sign-in|authori[sz]/i.test(src.detail ?? "");
 
+/** Skipped because the site itself was down (its maintenance page): nothing is broken, but it
+ *  is worth searching again once the site is back, so it keeps the retry button. */
+const siteUnavailable = (src: SourceReport) => src.status === "skipped" && /^site unavailable/i.test(src.detail ?? "");
+
 /** What to do about failed sources: reconnect Gmail when its sign-in lapsed, then search only
  *  the failed sources again (their new jobs join these results), or the whole search. */
 function FailedSourceActions({
@@ -76,7 +80,7 @@ function FailedSourceActions({
   const gmail = useGmail();
   const gmailLapsed = failed.some((src) => src.name === "gmail_alerts" && needsSignIn(src));
   const blocked = gmailLapsed && !gmail.healthy && failed.length === 1; // retrying cannot help yet
-  const what = failed.length === 1 ? (SOURCE_NAMES[failed[0].name] ?? failed[0].name) : `the ${failed.length} failed sources`;
+  const what = failed.length === 1 ? (SOURCE_NAMES[failed[0].name] ?? failed[0].name) : `the ${failed.length} sources`;
   return (
     <div className="flex flex-wrap items-center gap-2 pt-1">
       {gmailLapsed && !gmail.healthy && !gmail.waiting && (
@@ -124,7 +128,7 @@ function SourcesUsed({
   if (!sources.length) return null;
   const used = sources.filter((src) => src.status === "used");
   const other = sources.filter((src) => src.status !== "used");
-  const failed = other.filter((src) => src.status === "failed");
+  const failed = other.filter((src) => src.status === "failed" || siteUnavailable(src));
   const label = (name: string) => SOURCE_NAMES[name] ?? name;
   return (
     <div className="space-y-0.5 break-words text-[11px]">
@@ -146,7 +150,7 @@ function SourcesUsed({
           {other.map((src, i) => (
             <span key={src.name}>
               {i > 0 && " · "}
-              <span className={src.status === "failed" ? "text-bad" : undefined}>{label(src.name)}</span>{" "}
+              <span className={src.status === "failed" ? "text-bad" : siteUnavailable(src) ? "text-warn" : undefined}>{label(src.name)}</span>{" "}
               ({src.status === "failed" ? "failed" : "skipped"}{src.detail ? `: ${src.detail}` : ""})
             </span>
           ))}

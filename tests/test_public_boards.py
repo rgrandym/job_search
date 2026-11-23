@@ -15,7 +15,14 @@ from src.jobs import fetcher, scorer
 from src.jobs.matcher import profile_from_query
 from src.jobs.models import JobPosting, SearchQuery
 from src.jobs.sources import public_boards
-from src.jobs.sources.base import HttpFetcher, SourceError, posting_from_jsonld
+from src.jobs.sources.base import (
+    HttpFetcher,
+    SiteUnavailable,
+    SourceError,
+    posting_from_jsonld,
+    site_unavailable,
+    transient,
+)
 from src.jobs.sources.public_boards import (
     JobsAcUkSource,
     LinkedInSource,
@@ -701,3 +708,64 @@ def test_on_macos_only_a_headless_shell_is_used_so_no_dock_icon_bounces(
     monkeypatch.setattr(browser, "_version", lambda p: versions[p.read_text()])
     found = browser.locate_chrome(None, tmp_path, "darwin")
     assert found is not None and "chromium_headless_shell-1234" in found  # the newest
+
+
+JOBS_AC_UK_MAINTENANCE = """<!doctype html><html><head>
+<title>Jobs | Job Search | Job Vacancies on jobs.ac.uk</title></head><body>
+<p>jobs.ac.uk is currently unavailable while we update the site to improve your jobseeker
+experience. We apologise for any inconvenience caused and we will be back again soon.</p>
+</body></html>"""
+
+
+def test_jobs_ac_uk_maintenance_page_is_reported_as_the_site_being_down(
+    settings: Settings,
+) -> None:
+    """A 5xx whose body is the site's own "we are down" page (jobs.ac.uk, 2026-11-23) is not a
+    broken source: the error says the site is unavailable and is not worth retrying at once."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            500, text=JOBS_AC_UK_MAINTENANCE, headers={"content-type": "text/html"}
+        )
+
+    source = JobsAcUkSource(HttpFetcher(settings, _client(handler)), settings)
+    with pytest.raises(SiteUnavailable) as caught:
+        source.fetch(SearchQuery(titles=["Technician"]))
+    detail = str(caught.value)
+    assert site_unavailable(detail) and "www.jobs.ac.uk" in detail and "HTTP 500" in detail
+    assert not transient(caught.value)  # a maintenance page: retrying changes nothing
+
+
+def test_a_plain_server_error_is_still_an_ordinary_failure(settings: Settings) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="<html><body>Fatal error in /app/search.php</body></html>")
+
+    source = JobsAcUkSource(HttpFetcher(settings, _client(handler)), settings)
+    with pytest.raises(SourceError) as caught:
+        source.fetch(SearchQuery(titles=["Technician"]))
+    assert not isinstance(caught.value, SiteUnavailable)
+    assert not site_unavailable(str(caught.value)) and transient(caught.value)
+
+
+def test_jobs_ac_uk_search_page_without_cards_fails_loudly(settings: Settings) -> None:
+    """A rebuilt search page that parses to nothing must fail, not return 0 jobs silently."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nDisallow: /job/feedback/\n")
+        page = "<html><body><div class='results'>25 jobs</div></body></html>"
+        return httpx.Response(200, text=page)
+
+    source = JobsAcUkSource(HttpFetcher(settings, _client(handler)), settings)
+    with pytest.raises(SourceError, match="layout has probably changed"):
+        source.fetch(SearchQuery(titles=["Technician"]))
+
+
+def test_jobs_ac_uk_genuine_no_results_page_is_not_a_failure(settings: Settings) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\n")
+        return httpx.Response(200, text="<html><body><h1>No jobs found</h1></body></html>")
+
+    source = JobsAcUkSource(HttpFetcher(settings, _client(handler)), settings)
+    assert source.fetch(SearchQuery(titles=["Technician"])) == []

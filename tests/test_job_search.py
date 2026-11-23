@@ -22,6 +22,7 @@ from src.jobs.sources.base import HttpFetcher, SourceError, extract_jsonld_jobs,
 from src.jobs.sources.companies import CompanyBoard, CompanyCareersSource
 from src.jobs.sources.inbox import InboxSource, parse_alert_email
 from src.jobs.sources.job_boards import AdzunaSource, ReedSource
+from src.services import search_service
 from tests.conftest import EXAMPLES
 
 
@@ -844,3 +845,17 @@ def test_jsonld_sections_outside_the_description_are_kept() -> None:
     assert "Experience\nProgramme management in drug discovery" in job.description
     assert "Skills\nMS Project\nRisk management" in job.description
     assert job.description.startswith("We are a biotechnology company.")
+
+
+def test_a_site_down_for_maintenance_is_skipped_not_failed_and_stays_retryable() -> None:
+    """A host serving its own maintenance page reads as skipped (nothing to fix here), while
+    the retry path still offers it, since the site comes back (user's decision 2026-11-23)."""
+    sources = [fetcher.JsonFileSource(EXAMPLES / "jobs.example.json")]
+    sources[0].name = "jobs_ac_uk"  # type: ignore[misc]
+    down = "site unavailable: www.jobs.ac.uk served a maintenance page (HTTP 500); try again later"
+    rows = search_service._source_report(sources, {}, {"jobs_ac_uk": down}, {})
+    assert [(r.status, r.detail) for r in rows] == [("skipped", down)]
+    assert search_service._unavailable(rows[0])
+
+    broken = search_service._source_report(sources, {}, {"jobs_ac_uk": "GET /search/ failed"}, {})
+    assert broken[0].status == "failed" and not search_service._unavailable(broken[0])

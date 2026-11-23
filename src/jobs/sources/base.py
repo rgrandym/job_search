@@ -33,6 +33,43 @@ class SourceError(RuntimeError):
     """A source could not be queried (missing key, HTTP error, disallowed by robots.txt)."""
 
 
+#: Marks an error as the host being down rather than the source being broken. The report reads
+#: it (`search_service._source_report`) to call the source skipped instead of failed.
+UNAVAILABLE_PREFIX = "site unavailable"
+
+
+class SiteUnavailable(SourceError):
+    """The host answered, but with a maintenance page instead of results: nothing to fix here
+    and nothing to retry now (jobs.ac.uk, 2026-11-23: a site rebuild behind CloudFront 500s)."""
+
+
+_MAINTENANCE_RE = re.compile(
+    r"currently unavailable|temporarily unavailable|under (?:going )?maintenance"
+    r"|down for maintenance|scheduled maintenance|back (?:again )?soon"
+    r"|site is being (?:updated|upgraded)|service unavailable",
+    re.IGNORECASE,
+)
+
+
+def maintenance_page(resp: httpx.Response) -> bool:
+    """Whether a failed response is the site's own "we are down" page: a 5xx whose short HTML
+    body says so. A long page, or any other status, is a real failure."""
+    if not 500 <= resp.status_code < 600:
+        return False
+    if "html" not in resp.headers.get("content-type", "").lower():
+        return resp.status_code == 503
+    try:
+        body = resp.text[:20_000]
+    except (UnicodeDecodeError, httpx.ResponseNotRead):
+        return False
+    return bool(_MAINTENANCE_RE.search(html_to_text(body)))
+
+
+def site_unavailable(detail: str | None) -> bool:
+    """Whether a source's recorded error says the host itself was down for maintenance."""
+    return detail is not None and detail.lstrip().lower().startswith(UNAVAILABLE_PREFIX)
+
+
 def _check_stopped() -> None:
     """Refuse new requests once the search that started them was stopped (its `call_group`
     is cancelled), so an abandoned fetch ends at its next request instead of crawling on."""
@@ -51,7 +88,9 @@ def pause(seconds: float) -> None:
 
 def transient(exc: Exception) -> bool:
     """A failed request worth one more try: a timeout, a dropped connection or a server
-    error. A refusal, a missing page or a stopped search is not."""
+    error. A refusal, a missing page, a maintenance page or a stopped search is not."""
+    if isinstance(exc, SiteUnavailable):
+        return False  # the host is down on purpose; a second request changes nothing
     cause = exc.__cause__
     if isinstance(cause, httpx.HTTPStatusError):
         return cause.response.status_code >= 500
@@ -69,6 +108,18 @@ def slow_down_status(exc: Exception) -> tuple[int, float | None] | None:
         return None
     after = cause.response.headers.get("retry-after", "")
     return status, float(after) if after.strip().isdigit() else None
+
+
+def _request_error(method: str, url: str, exc: httpx.HTTPError) -> SourceError:
+    """The error for a failed request: `SiteUnavailable` when the host served its own
+    maintenance page, otherwise a plain `SourceError` carrying the reason."""
+    if isinstance(exc, httpx.HTTPStatusError) and maintenance_page(exc.response):
+        host = urlsplit(url).netloc or url
+        return SiteUnavailable(
+            f"{UNAVAILABLE_PREFIX}: {host} served a maintenance page "
+            f"(HTTP {exc.response.status_code}); try again later"
+        )
+    return SourceError(f"{method} {url} failed: {exc}")
 
 
 class HttpFetcher:
@@ -108,7 +159,7 @@ class HttpFetcher:
             resp.raise_for_status()
         except httpx.HTTPError as exc:
             _check_stopped()
-            raise SourceError(f"GET {url} failed: {exc}") from exc
+            raise _request_error("GET", url, exc) from exc
         return resp
 
     def post(self, url: str, *, check_robots: bool = False, **kwargs: Any) -> httpx.Response:
@@ -124,7 +175,7 @@ class HttpFetcher:
             resp.raise_for_status()
         except httpx.HTTPError as exc:
             _check_stopped()
-            raise SourceError(f"POST {url} failed: {exc}") from exc
+            raise _request_error("POST", url, exc) from exc
         return resp
 
     def _wait_turn(self, host: str) -> None:
