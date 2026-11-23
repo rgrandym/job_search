@@ -142,7 +142,8 @@ def account_views(max_age: float = claude_accounts.STATUS_TTL_S) -> list[ClaudeA
         same = next((v.label for v in out if email and v.email == email), None)
         windows = (
             usage.plan_windows("claude_code", account=account.id, live=True, email=str(email or ""))
-            if signed_in else None
+            if signed_in
+            else None
         )
         out.append(
             ClaudeAccountView(

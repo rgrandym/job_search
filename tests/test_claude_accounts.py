@@ -366,6 +366,7 @@ def test_folder_sign_in_reads_only_its_current_access_token(
         if url == usage.CLAUDE_PROFILE_URL:
             return {"account": {"email": "work@example.com"}}
         return {"five_hour": {"utilization": 42}}
+
     monkeypatch.setattr(usage, "_claude_oauth_get", get)
 
     for _ in range(3):

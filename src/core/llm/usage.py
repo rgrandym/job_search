@@ -400,12 +400,16 @@ def _folder_access_token(config_dir: str | None) -> tuple[str, float] | None:
     """Read the current Claude Code token without using its one-use refresh token."""
     service = (
         f"Claude Code-credentials-{hashlib.sha256(config_dir.encode()).hexdigest()[:8]}"
-        if config_dir else "Claude Code-credentials"
+        if config_dir
+        else "Claude Code-credentials"
     )
     try:
         out = subprocess.run(
             ["security", "find-generic-password", "-s", service, "-w"],
-            capture_output=True, text=True, timeout=10, check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
         )
         if out.returncode:
             return None
@@ -419,12 +423,15 @@ def _folder_access_token(config_dir: str | None) -> tuple[str, float] | None:
 
 
 def _claude_oauth_get(url: str, token: str) -> Any:
-    request = urllib.request.Request(url, headers={
-        "Authorization": f"Bearer {token}",
-        "anthropic-beta": "oauth-2025-04-20",
-        "Content-Type": "application/json",
-        "User-Agent": "job-search-app",
-    })
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "anthropic-beta": "oauth-2025-04-20",
+            "Content-Type": "application/json",
+            "User-Agent": "job-search-app",
+        },
+    )
     with urllib.request.urlopen(request, timeout=15) as response:
         return json.loads(response.read())
 
@@ -486,9 +493,7 @@ def _read_claude_usage(account: str, config_dir: str | None, email: str) -> None
             note = "Claude returned no plan windows."
             return
         with _lock:
-            _claude[account] = {
-                "account_email": owner, "observed_at": time.time(), **incoming
-            }
+            _claude[account] = {"account_email": owner, "observed_at": time.time(), **incoming}
             _write("usage_claude.json", _claude)
     except urllib.error.HTTPError as exc:
         note = f"Claude refused the usage read ({exc.code})."
@@ -518,8 +523,8 @@ def claude_plan_windows(
         read = _claude_cli.setdefault(account, {})
         age = time.time() - float(read.get("at") or 0)
         stale = read.get("stale") and age >= CODEX_STALE_S
-        refresh = bool(email) and not read.get("reading") and (
-            not read.get("at") or age >= ttl or stale
+        refresh = (
+            bool(email) and not read.get("reading") and (not read.get("at") or age >= ttl or stale)
         )
         if refresh:
             read.update(at=time.time(), stale=False, reading=True)
@@ -538,7 +543,10 @@ def claude_plan_windows(
 
 
 def plan_windows(
-    provider: str, fresh: bool = False, account: str | None = None, live: bool = False,
+    provider: str,
+    fresh: bool = False,
+    account: str | None = None,
+    live: bool = False,
     email: str = "",
 ) -> UsageWindows | None:
     """The plan windows of a plan provider, each with this app's tokens inside it; None for
@@ -559,7 +567,10 @@ def plan_windows(
         saved = claude_accounts.token(found_account.id)
         known_email = email or (saved.email if saved else "") or ""
         found = claude_plan_windows(
-            ttl, found_account.id, found_account.config_dir, wait=not live,
+            ttl,
+            found_account.id,
+            found_account.config_dir,
+            wait=not live,
             email=known_email,
         )
     elif provider == "codex":
